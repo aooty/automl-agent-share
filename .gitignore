@@ -1,0 +1,58 @@
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Editors
+# settings.json here holds a machine-local interpreter/env-manager choice, so it is
+# ignored too rather than pinning everyone to one conda setup.
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+
+# Dependencies / build output
+node_modules/
+dist/
+build/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Run output: LLM I/O archives, training logs, checkpoints, reports
+artifacts/
+graph.png
+graph.mmd
+
+# Everything that must not ship lives in one place, so "is this safe to publish?" is a
+# question about one directory instead of a file-by-file audit. Data files, cards built
+# from real data, scratch runs — all of it goes here. The docs default their --out paths
+# to local/ for the same reason.
+/local/
+
+# The same rule by file type, kept as a second layer: a stray CSV dropped anywhere in the
+# tree is still ignored. The design assumes rows stay on the machine that owns them, and
+# the clinical data this was developed against is under a use agreement that does not
+# permit redistribution. Hand-written example *cards* (shape only) do live in examples/.
+*.csv
+*.parquet
+*.feather
+*.xlsx
+
+# Secrets
+.env
+.env.local
+*.pem
+*.key

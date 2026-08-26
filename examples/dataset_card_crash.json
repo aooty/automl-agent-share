@@ -1,0 +1,22 @@
+{
+  "name": "crashing-trainer-drill",
+  "description": "학습 subprocess가 result.json도 남기지 못하고 하드 종료하는 상황을 주입한다. 오케스트레이터가 죽지 않고 Critic 경로로 넘어가는지 확인하는 드릴용 카드.",
+  "task": "binary_classification",
+  "n_rows": 4000,
+  "n_features": 16,
+  "n_classes": 2,
+  "difficulty": {
+    "class_sep": 1.4,
+    "label_noise": 0.02
+  },
+  "constraints": {
+    "memory_limit_mb": 2048
+  },
+  "simulate": {
+    "fail": "crash"
+  },
+  "data": {
+    "path": null,
+    "target_column": "target"
+  }
+}

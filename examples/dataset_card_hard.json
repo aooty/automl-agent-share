@@ -1,0 +1,23 @@
+{
+  "name": "fraud-tabular-hard",
+  "description": "클래스 불균형과 라벨 노이즈가 큰 어려운 데이터셋. f1 0.85는 이 데이터에서 사실상 달성 불가에 가깝고, 목표 미달 종료 경로를 확인하는 데 쓴다.",
+  "task": "binary_classification",
+  "n_rows": 6000,
+  "n_features": 30,
+  "n_informative": 6,
+  "n_classes": 2,
+  "class_balance": [0.9, 0.1],
+  "difficulty": {
+    "class_sep": 0.45,
+    "label_noise": 0.18
+  },
+  "feature_notes": "정보량 있는 특성이 6개뿐이고 나머지는 노이즈에 가깝다.",
+  "constraints": {
+    "memory_limit_mb": 2048,
+    "max_train_time_sec": 600
+  },
+  "data": {
+    "path": null,
+    "target_column": "is_fraud"
+  }
+}

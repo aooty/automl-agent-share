@@ -1,0 +1,22 @@
+{
+  "name": "wide-tabular-tight-memory",
+  "description": "메모리 예산이 매우 빡빡하게 잡힌 카드. 첫 시도는 oom으로 실패하고, Critic의 축소 지시에 따라 재계획하면 예산 안으로 들어온다. --dry-run 없이 실제 oom 경로를 재현하는 데 쓴다.",
+  "task": "binary_classification",
+  "n_rows": 12000,
+  "n_features": 60,
+  "n_informative": 20,
+  "n_classes": 2,
+  "class_balance": [0.6, 0.4],
+  "difficulty": {
+    "class_sep": 1.5,
+    "label_noise": 0.02
+  },
+  "constraints": {
+    "memory_limit_mb": 6,
+    "max_train_time_sec": 600
+  },
+  "data": {
+    "path": null,
+    "target_column": "label"
+  }
+}

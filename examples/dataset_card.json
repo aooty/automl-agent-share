@@ -1,0 +1,23 @@
+{
+  "name": "churn-tabular-v1",
+  "description": "월간 구독 서비스 이탈 예측용 tabular 데이터. 원본 데이터는 제공하지 않고 이 카드만으로 계획을 세운다.",
+  "task": "binary_classification",
+  "n_rows": 8000,
+  "n_features": 24,
+  "n_informative": 12,
+  "n_classes": 2,
+  "class_balance": [0.72, 0.28],
+  "difficulty": {
+    "class_sep": 1.3,
+    "label_noise": 0.02
+  },
+  "feature_notes": "모두 수치형으로 전처리된 상태. 결측치는 중앙값으로 대치한다.",
+  "constraints": {
+    "memory_limit_mb": 2048,
+    "max_train_time_sec": 600
+  },
+  "data": {
+    "path": null,
+    "target_column": "churned"
+  }
+}
