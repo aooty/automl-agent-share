@@ -98,6 +98,13 @@ MIN_UNITS = 20
 # conditioned on being lucky.
 MIN_VALID_SHARE = 0.8
 
+# What can be resampled. Named rather than written inline at the two return sites because
+# :func:`automl_agent.privacy.public_result` checks this field against the closed set instead of
+# forwarding any string, and a set the writer and the sieve state separately can drift.
+UNIT_ROW = "row"
+UNIT_GROUP = "group"
+RESAMPLE_UNITS: tuple[str, ...] = (UNIT_ROW, UNIT_GROUP)
+
 
 @dataclass(frozen=True)
 class Interval:
@@ -106,7 +113,7 @@ class Interval:
     low: float
     high: float
     resamples: int
-    # "row" or "group". Not published as a metric — it is already implied by the protocol's
+    # One of :data:`RESAMPLE_UNITS`. Not published as a metric — it is already implied by the protocol's
     # ``grouped_by`` — but logged, because an interval measured the wrong way is narrow
     # rather than absent and nothing else in the record would say so.
     unit: str
@@ -209,7 +216,7 @@ def _units(groups: Any, n_rows: int) -> tuple[list[Any] | None, str]:
     import numpy as np
 
     if groups is None:
-        return None, "row"
+        return None, UNIT_ROW
     group_arr = np.asarray(groups)
     if len(group_arr) != n_rows:
         raise ValueError(
@@ -217,7 +224,7 @@ def _units(groups: Any, n_rows: int) -> tuple[list[Any] | None, str]:
         )
     _, inverse = np.unique(group_arr, return_inverse=True)
     inverse = np.asarray(inverse).reshape(-1)
-    return [np.flatnonzero(inverse == code) for code in range(int(inverse.max()) + 1)], "group"
+    return [np.flatnonzero(inverse == code) for code in range(int(inverse.max()) + 1)], UNIT_GROUP
 
 
 # --------------------------------------------------------------------------- #
@@ -238,6 +245,9 @@ PAIRED_FIELDS: tuple[str, ...] = ("delta_vs_best", "delta_ci_low", "delta_ci_hig
 
 PAIRED_MEASURED = "measured"
 PAIRED_SKIPPED = "skipped"
+# Same argument as :data:`RESAMPLE_UNITS`: the sieve has to check ``status`` against the words
+# this module writes, not against ``str``.
+PAIRED_STATUSES: tuple[str, ...] = (PAIRED_MEASURED, PAIRED_SKIPPED)
 
 # Why a comparison was not made. Published rather than left absent, because "no paired
 # verdict" and "the paired verdict found nothing" are different facts and a reader with only

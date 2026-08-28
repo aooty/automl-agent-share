@@ -27,7 +27,14 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .scoring.intervals import PAIRED_FIELDS, PAIRED_KEY, PAIRED_REASONS
+from .scoring.intervals import (
+    PAIRED_FIELDS,
+    PAIRED_KEY,
+    PAIRED_REASONS,
+    PAIRED_STATUSES,
+    RESAMPLE_UNITS,
+)
+from .scoring.metrics import METRICS, canonical
 
 
 class RawDataLeak(RuntimeError):
@@ -364,16 +371,23 @@ def _public_paired(block: Any) -> dict[str, Any]:
     Filtered like ``metrics`` rather than forwarded, and for the same reason: this block is
     written by the training subprocess, so it is on the far side of the boundary, and the
     rule that makes it safe is that every field is a number or one of a fixed set of words.
-    ``reason`` is checked against :data:`automl_agent.scoring.intervals.PAIRED_REASONS` rather than
-    merely being a string, because the one string field is the one a future edit could turn
-    into a free-text detail — and a detail about a failed comparison is where a column name
-    or a cell value would arrive.
+    So every string field is checked against its own vocabulary rather than against ``str``:
+    ``status``, ``unit`` and ``reason`` against the words
+    :mod:`automl_agent.scoring.intervals` writes, ``metric`` against the metric registry. A
+    string field that admits any string is a field a future edit can turn into a free-text
+    detail, and a detail about a failed comparison is where a column name or a cell value
+    would arrive.
     """
     raw = block if isinstance(block, dict) else {}
     clean: dict[str, Any] = {}
-    for key in ("status", "metric", "unit"):
-        if isinstance(raw.get(key), str):
-            clean[key] = raw[key]
+    if raw.get("status") in PAIRED_STATUSES:
+        clean["status"] = raw["status"]
+    if raw.get("unit") in RESAMPLE_UNITS:
+        clean["unit"] = raw["unit"]
+    if canonical(str(raw.get("metric") or "")) in METRICS:
+        # The alias the caller wrote, not the canonical name: this is a passthrough, and the
+        # ledger prints this field beside the same metric name the goal states.
+        clean["metric"] = raw["metric"]
     if str(raw.get("reason") or "") in PAIRED_REASONS:
         clean["reason"] = raw["reason"]
     for key in (*PAIRED_FIELDS, "baseline_iteration", "resamples"):

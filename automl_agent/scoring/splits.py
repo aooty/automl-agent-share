@@ -30,9 +30,9 @@ inflated, and nothing in the run can detect it — the held-back test slice is c
 the same way, so it agrees with the validation number and the selection gap looks
 healthy. That failure is invisible to every check in this repo, which is why the split
 has to be told. Pass ``groups`` and no group's rows are divided across two sets. The
-group column arrives through the card's *private* ``data`` block, like ``na_values``: it
-is a data-loading decision, so :func:`automl_agent.privacy.public_card` strips it and the
-LLM can neither see it nor propose changing it.
+group column arrives through the card's *private* ``data`` block, because it is a
+data-loading decision and not a modelling one: :func:`automl_agent.privacy.public_card`
+strips it and the LLM can neither see it nor propose changing it.
 
 Nothing here imports sklearn at module level, because the nodes import this module to
 read :func:`protocol` and the process that renders prompts must stay free of the data
