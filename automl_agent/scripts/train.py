@@ -576,7 +576,7 @@ def _classifier(key: str, seed: int) -> Any:
     if key == "xgboost":
         try:
             from xgboost import XGBClassifier
-        except ImportError as exc:  # pragma: no cover - xgboost is installed here
+        except ImportError as exc:  # pragma: no cover - reached only if the extra is missing
             raise ValueError(f"model 'xgboost' is unavailable: {exc}") from exc
 
         return XGBClassifier(
@@ -640,7 +640,7 @@ def _regressor(key: str, seed: int) -> Any:
     if key == "xgboost":
         try:
             from xgboost import XGBRegressor
-        except ImportError as exc:  # pragma: no cover - xgboost is installed here
+        except ImportError as exc:  # pragma: no cover - reached only if the extra is missing
             raise ValueError(f"model 'xgboost' is unavailable: {exc}") from exc
 
         return XGBRegressor(n_estimators=300, tree_method="hist", random_state=seed)

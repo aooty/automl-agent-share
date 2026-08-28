@@ -63,6 +63,7 @@ from typing import Any
 from ..config import TRAIN_SCRIPT, RunConfig, decode_output, read_json_object, utf8_env
 from ..privacy import public_result
 from ..scoring.intervals import CI_LEVEL, contains, interval_of
+from ..scoring.metrics import MINIMIZE, direction_of
 from ..scoring.splits import TEST_FRACTION
 from ..state import AutoMLState
 
@@ -163,7 +164,12 @@ def holdout(state: AutoMLState, *, config: RunConfig) -> dict:
     }
     score = holdout_block["score"]
     if isinstance(score, (int, float)) and isinstance(best.get("score"), (int, float)):
-        holdout_block["selection_gap"] = round(float(best["score"]) - float(score), 6)
+        # Signed so that positive always means "validation was optimistic", whichever way the
+        # metric runs. ``best`` is the *minimum* of the noisy validation numbers on an error
+        # metric, so ``best - test`` there is negative exactly when the selection effect is
+        # present — and ``describe`` calls this number the size of that effect.
+        gap = float(best["score"]) - float(score)
+        holdout_block["selection_gap"] = round(-gap if direction_of(metric) == MINIMIZE else gap, 6)
         # Whether the gap is bigger than what these rows can resolve. The test split is
         # ~20% of the file, so its own interval is the widest in the run, and a gap inside
         # it is a gap this measurement cannot tell from zero — reporting "선택 편향
