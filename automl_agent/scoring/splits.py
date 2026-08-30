@@ -41,6 +41,7 @@ stack.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -142,6 +143,43 @@ def describe_protocol(declared: dict[str, Any] | None = None, seed: int = 42) ->
         f" ({stratifying}{grouping}, seed={block.get('seed', seed)}) —"
         " test는 반복 밖에서 저장된 모델로 1회만 채점합니다"
     )
+
+
+def row_counts(n_rows: int) -> dict[str, int]:
+    """How many rows each set holds, computed the way the split actually rounds.
+
+    Not ``n * share``. ``train_test_split`` takes the *ceiling* of a float ``test_size``
+    and gives the whole remainder to the other side, and :func:`split_three_way` does that
+    twice, so the product is off by up to two rows in each set. Reproducing the rounding
+    matters because the number this feeds is compared against a threshold: sklearn resolves
+    ``early_stopping='auto'`` at ``n_samples > 10_000`` and a two-row error lands on the
+    wrong side of it for a file near that size.
+
+    Exact for the row-level path — it reproduces all five recorded train sizes in
+    ``bench/`` — and approximate for the grouped one, where a group cannot be divided to
+    make a share come out even. Callers that publish these numbers to a reader have to say
+    which of the two they are in; :func:`automl_agent.capabilities.describe_row_budget`
+    does.
+
+    Derived from this module's own constants rather than from a declared protocol block,
+    because the rounding above is a property of *this* implementation. A card measured
+    under different fractions is refused rather than reinterpreted — see
+    :func:`automl_agent.nodes.profiling.assert_protocol_matches`.
+
+    Refuses wherever the split itself would. Under three rows both ceilings take everything and
+    nothing is left to train on; ``train_test_split`` raises there too ("the resulting train set
+    will be empty"), and a forecast of ``train: 0`` would be read as an answer.
+    """
+    total = int(n_rows)
+    n_test = math.ceil(TEST_FRACTION * total) if total > 0 else 0
+    pool = total - n_test
+    n_val = math.ceil(VAL_FRACTION_OF_POOL * pool) if pool > 0 else 0
+    if pool - n_val <= 0:
+        raise ValueError(
+            f"3행 미만은 train/val/test로 나눌 수 없습니다 — n_rows={n_rows}, "
+            f"train={pool - n_val}"
+        )
+    return {"train": pool - n_val, "val": n_val, "test": n_test}
 
 
 def split_three_way(

@@ -117,6 +117,7 @@ python -m automl_agent.main graph --out graph.png
 | `--goal-mode {auto,fixed}` | 기본 `auto`(기준선에서 도출). `--threshold`를 주면 `fixed`로 간주 |
 | `--threshold` / `--margin` | 각각 `fixed`의 목표값 / `auto`가 요구할 남은 여유의 비율(기본 `0.25`). 모드와 어긋나면 거부 |
 | `--max-iterations` / `--time-budget-sec` / `--seed` | 반복 예산 |
+| `--search-past-goal` | 목표를 넘어도 멈추지 않고 예산을 다 씁니다. `auto`의 바는 기준선에서 도출되므로 첫 시도가 넘는 일이 흔하고, 그러면 Critic이 한 번도 안 돕니다 — 진단·재계획 경로를 실제로 돌려 보려면 이 플래그입니다. 바를 올리지도, 우승자 규칙(val 최고)을 바꾸지도 않습니다 |
 | `--no-llm` | 학습은 **실제로** 하고 추론 노드만 규칙 기반 폴백. 자격 증명 불필요 |
 | `--dry-run` / `--scenario` | LLM과 학습을 **모두** 모킹. `--scenario {success,fail,oom,stall,slow,crash}` |
 | `--force` | 같은 `--thread-id`의 기존 체크포인트를 지우고 처음부터 |
@@ -279,12 +280,18 @@ $files | Select-String -Pattern "<파일명>"    # 출력 없음이 정상
 
 ## 루프가 끝나는 세 가지 경우 — `route()`
 
-1. 목표 지표 달성
+1. 목표 지표 달성 (`--search-past-goal`이면 이 조건만 해제됩니다)
 2. `iteration >= max_iterations`
 3. 정체: `stall_count >= 2` (개선 없는 반복 연속 2회)
 
-2·3번이 함께 무한 루프를 불가능하게 만듭니다. 목표를 못 채워도 `best` 스냅샷을
-근거로 보고서는 **반드시** 작성됩니다.
+2·3번이 함께 무한 루프를 불가능하게 만듭니다 — `--search-past-goal`도 예산을 **더 쓸
+수는 있어도 넘길 수는 없습니다.** 목표를 못 채워도 `best` 스냅샷을 근거로 보고서는
+**반드시** 작성됩니다.
+
+1번이 먼저 검사되므로 **첫 시도가 바를 넘으면 `critic`은 한 번도 실행되지
+않습니다.** 진단·재계획 경로가 돌지 않은 실행이고, 보고서와 `history.json`의
+`critic_runs`가 그 사실을 명시합니다 — 루프가 실제로 루프했는지를 점수와 따로 읽을 수
+있어야 하기 때문입니다.
 
 Critic의 출력은 자유 텍스트가 아니라 `{failure_type, evidence, direction,
 concrete_changes}` 스키마이고, `failure_type`은 8종으로 제한됩니다 —
@@ -424,6 +431,6 @@ iter 3 달성) · `stall`(동일 점수 3회 → 조기 종료). `--no-llm` 실�
 
 - 실행 명령: [RUNBOOK.md](RUNBOOK.md)
 - 각 규칙의 근거: 해당 모듈의 docstring. 위 트리의 파일 이름이 곧 목차입니다
-- 테스트 스위트(1227개)와 임상 데이터 측정 기록은 배포본에 없습니다 — 개발 저장소의
+- 테스트 스위트(1377개)와 임상 데이터 측정 기록은 배포본에 없습니다 — 개발 저장소의
   `tests/`와 `FINDINGS-mimic.md`입니다. 이 문서가 하는 주장을 실제로 검증하는 것이 그
   스위트이므로, 코드를 고칠 생각이라면 그쪽에서 작업하세요

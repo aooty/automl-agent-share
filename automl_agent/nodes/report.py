@@ -29,11 +29,29 @@ STOP_REASON_LABELS = {
     "unknown": "알 수 없는 사유",
 }
 
+# The write-up is the run's only long-form output and is generated exactly once, so it gets a
+# larger allowance than the reasoning nodes' structured replies. It used to be handed the
+# 8000 that was also ``DEFAULT_LLM_MAX_TOKENS``, which ``test-1`` spent in full — adaptive
+# thinking and the prose draw on the same allowance, so the report was competing with the
+# model's own reasoning for room, and lost silently. Raised rather than removed: an unbounded
+# request cannot fail loudly either.
+REPORT_MAX_TOKENS = 24000
+
+# Appended when the model was cut off. In the report itself and not only on the console,
+# because ``report.md`` is the artifact that gets read later and forwarded on, and a write-up
+# that stops mid-sentence otherwise reads as a finished conclusion that simply omitted things.
+TRUNCATION_NOTE = (
+    "> **주의 — 이 보고서는 완결되지 않았습니다.** 생성 중 출력 상한"
+    f"({REPORT_MAX_TOKENS} 토큰)에 닿아 마지막 문장이 끊겼고, 뒤에 올 절이 빠져 있을 수 "
+    "있습니다. 위에 적힌 내용 자체는 유효하지만 **결론으로 읽지 마십시오.** 모든 시도의 지표는 "
+    "`history.json`에, 프롬프트와 응답 원본은 `llm/` 아래에 그대로 남아 있습니다."
+)
+
 
 def report(state: AutoMLState, *, config: RunConfig) -> dict:
     """Return ``{"report": markdown, "history": [final attempt]}``."""
     reason = stop_reason(state, config)
-    reached = goal_met(dict(state.get("result") or {}), dict(state.get("goal") or {}))
+    reached = run_met_goal(state)
     final_attempt = build_attempt(state, None)
     # The final attempt is not in state["history"] yet, so add it for the write-up.
     full_history = [*_history_digest(state), digest_attempt(final_attempt)]
@@ -44,6 +62,10 @@ def report(state: AutoMLState, *, config: RunConfig) -> dict:
         "iterations": str(state.get("iteration") or 0),
         "max_iterations": str(state.get("max_iterations") or config.max_iterations),
         "stop_reason": f"{reason} ({STOP_REASON_LABELS.get(reason, reason)})",
+        # How many of the attempts below were diagnosed. Handed over as a sentence because the
+        # report prompt asks for "the pattern across the Critic's verdicts", and with zero
+        # verdicts that instruction invites a pattern to be invented — see describe_replanning.
+        "replanning": describe_replanning(full_history),
         "best": state.get("best") or "(성공한 시도 없음)",
         "history": full_history,
         "dataset_card": state.get("dataset_card") or {},
@@ -60,24 +82,104 @@ def report(state: AutoMLState, *, config: RunConfig) -> dict:
     }
 
     text = ""
+    truncated = False
     if not config.use_llm:
         archive_prompt_only(config, "report", render_prompt("report", variables))
     else:
         try:
-            text = LLMClient(config).complete_text("report", variables, max_tokens=8000)
+            text, truncated = LLMClient(config).complete_text(
+                "report",
+                variables,
+                # ``max()`` so a config that deliberately raised the ceiling is not lowered
+                # here — the floor is this node's, the choice stays the caller's.
+                max_tokens=max(REPORT_MAX_TOKENS, config.llm_max_tokens),
+            )
         except (LLMUnavailable, KeyError, OSError) as exc:
             print(f"  [report] LLM 보고서 생성 실패({exc}) — 템플릿 보고서로 폴백합니다")
 
+    if truncated:
+        print(
+            f"  [report] 보고서가 출력 상한({max(REPORT_MAX_TOKENS, config.llm_max_tokens)} "
+            "토큰)에서 끊겼습니다 — report.md가 완결되지 않았습니다"
+        )
     if not text.strip():
+        # Includes the case where the allowance ran out during thinking and no prose came back
+        # at all. The template report is complete on its own, so it needs no truncation note —
+        # the console line above is what says the long-form write-up was lost.
         text = fallback_report(state, config, reason, reached, full_history)
+    elif truncated:
+        text = f"{text.rstrip()}\n\n{TRUNCATION_NOTE}\n"
 
     _write_artifacts(state, config, text, full_history)
     return {"report": text, "history": [final_attempt]}
 
 
+def describe_replanning(history: list[dict[str, Any]]) -> str:
+    """How much of the loop actually looped, as one sentence.
+
+    ``goal_reached`` is checked before anything else in :func:`automl_agent.graph.route`, and the
+    bar in ``auto`` mode is derived from the baseline — so a first attempt that clears it ends the
+    run at iteration 1 and the Critic never runs at all. Four of the five datasets in
+    ``bench/RESULTS.md`` ended that way. Nothing said so: the report's stop reason read
+    "목표 지표 달성", the attempt table's ``critic 진단`` column read "—", and a reader comparing
+    the LLM arm against the rule-based arm had no way to see that the whole diagnose-and-replan
+    path — the thing the comparison was about — had not executed on either side.
+
+    So the count is stated rather than left to be inferred from an empty column, and it is stated
+    in both directions: zero verdicts is evidence about the *planner*, and it is evidence for
+    neither side about the loop.
+
+    ``critic`` is absent from the last attempt by construction — the loop stops after evaluating
+    it, so its verdict would only have fed a replan that never happens — which is why the
+    sentence names that attempt instead of leaving a reader to explain the missing row.
+    """
+    attempts = len(history)
+    diagnosed = sum(1 for item in history if item.get("critic"))
+    if not attempts:
+        return "시도가 없어 재계획에 대해 말할 것이 없습니다."
+    if not diagnosed:
+        return (
+            f"critic이 한 번도 실행되지 않았습니다 (시도 {attempts}회, 진단 0회). 진단·재계획 "
+            "경로는 이 결과에 기여하지 않았습니다 — 점수는 첫 계획 하나가 낸 것입니다. 그 경로가 "
+            "도움이 된다는 증거도, 해가 된다는 증거도 이 실행에는 없습니다."
+        )
+    return (
+        f"critic이 {diagnosed}회 실행되어 그만큼 재계획했습니다 (시도 {attempts}회 — 마지막 "
+        "시도는 평가 직후 루프가 끝나므로 진단 대상이 아닙니다)."
+    )
+
+
+def run_met_goal(state: AutoMLState) -> bool:
+    """Whether this run produced a model that clears the bar — not whether its *last* one did.
+
+    Judged on ``best`` as well as on the final result, because ``best`` is the run's answer: it
+    is the model ``holdout`` scored and the one ``predict`` resolves to. Under the default
+    routing the two questions have the same answer, since the loop stops the instant an attempt
+    clears the bar and ``best`` is then that attempt. Under
+    :attr:`automl_agent.config.RunConfig.search_past_goal` they come apart — the run keeps going,
+    and a later attempt that scores worse would otherwise turn "달성" into "미달성" while the
+    winning model sits unchanged in ``best``.
+
+    Either shape satisfies it, and ``goal_met`` refuses a missing or non-numeric score, so an
+    empty ``best`` (no successful fit) answers False rather than raising.
+    """
+    goal = dict(state.get("goal") or {})
+    return goal_met(dict(state.get("result") or {}), goal) or goal_met(
+        dict(state.get("best") or {}), goal
+    )
+
+
 def stop_reason(state: AutoMLState, config: RunConfig) -> str:
-    """Recompute why the loop ended, in the same order ``route`` decided it."""
-    if goal_met(dict(state.get("result") or {}), dict(state.get("goal") or {})):
+    """Recompute why the loop ended, in the same order ``route`` decided it.
+
+    The ``search_past_goal`` guard mirrors ``route``'s, and it has to: under that flag clearing
+    the bar is not a stop condition at all, so ``goal_reached`` would name a reason the loop did
+    not act on. Such a run stops on iterations or on the stall guard, and *also* met its goal —
+    which is what ``goal_met`` in the write-up says, separately from this.
+    """
+    if not config.search_past_goal and goal_met(
+        dict(state.get("result") or {}), dict(state.get("goal") or {})
+    ):
         return "goal_reached"
     if int(state.get("iteration", 0) or 0) >= int(state.get("max_iterations", 0) or 0):
         return "max_iterations"
@@ -135,6 +237,10 @@ def fallback_report(
         "",
         f"{verdict_line} {best_line} 총 {iterations}회 시도했고(최대 {max_iterations}회), "
         f"종료 사유는 **{STOP_REASON_LABELS.get(reason, reason)}**입니다.",
+        "",
+        # In the summary and not only in 원인 분석, because "목표 지표 달성" at iteration 1 is
+        # read as the loop having worked — and at iteration 1 the loop did not run.
+        f"재계획: {describe_replanning(history)}",
         "",
         # Where the bar came from. A report that states "0.872 달성" without this reads
         # as though the number were a universal standard rather than this dataset's.
@@ -209,7 +315,14 @@ def fallback_report(
         if last_direction:
             lines += ["", f"마지막 Critic 방향: {last_direction}"]
     else:
-        lines.append("Critic이 개입하기 전에 종료되어 축적된 진단이 없습니다.")
+        # What the absence *means*, since the summary above already gives the count. Without
+        # this the section reads as a gap in the write-up rather than as a limit on what the
+        # run can be cited for.
+        lines.append(
+            "Critic이 실행되지 않아 축적된 진단이 없습니다. 이 실행이 잰 것은 첫 계획의 "
+            "품질이고, 진단·재계획 경로는 여기서 평가되지 않았습니다 — 이 결과를 그 경로의 "
+            "근거로 인용할 수 없습니다."
+        )
 
     lines += ["", "## 다음 단계 제안", ""]
     lines += [f"- {item}" for item in _next_steps(reason, reached, diagnoses, metric, threshold)]
@@ -328,6 +441,11 @@ def _write_artifacts(
             "goal": state.get("goal"),
             "iterations": state.get("iteration"),
             "stop_reason": stop_reason(state, config),
+            # How many attempts the Critic diagnosed. A count rather than the sentence, because
+            # this file is read by ``bench/`` and by anything else aggregating runs — and it was
+            # the missing column: the five-dataset comparison could not tell that four of its
+            # runs never entered the loop without re-deriving it from every attempt's ``critic``.
+            "critic_runs": sum(1 for item in history if item.get("critic")),
             "best": state.get("best"),
             "holdout": state.get("holdout"),
             # Which model files this run still has. Without it, "iteration 3의 모델이 없다"

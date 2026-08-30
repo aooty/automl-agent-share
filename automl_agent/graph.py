@@ -32,19 +32,38 @@ from .state import AutoMLState, goal_met
 Route = Literal["report", "critic"]
 
 
-def route(state: AutoMLState, stall_limit: int = STALL_LIMIT) -> Route:
+def route(
+    state: AutoMLState, stall_limit: int = STALL_LIMIT, search_past_goal: bool = False
+) -> Route:
     """Decide whether to write the report or to critique and replan.
 
     Terminates on any of three conditions:
 
-    1. the goal metric is reached,
+    1. the goal metric is reached — unless ``search_past_goal``,
     2. the iteration budget is exhausted,
     3. the run has stalled (``stall_count`` consecutive non-improving iterations).
 
-    Anything else continues the loop through the critic. The iteration and stall
-    guards together make an infinite loop impossible.
+    Anything else continues the loop through the critic. Conditions 2 and 3 are what make an
+    infinite loop impossible, and they hold with or without ``search_past_goal`` — which is why
+    that flag can only ever cost iterations, never unbound them.
+
+    On condition 1 being checked first, and what ``search_past_goal`` changes. In ``auto`` mode
+    the bar is derived from the card's baseline, so a first attempt that clears it ends the run
+    at iteration 1 and the Critic never runs — four of the five datasets in ``bench/RESULTS.md``
+    ended exactly that way, which means the diagnose-and-replan path the benchmark was comparing
+    did not execute on either arm. ``search_past_goal`` is how a run keeps going anyway: it does
+    not raise the bar and it does not change which attempt wins (``best`` is still val-best), it
+    only spends the remaining iterations. Off by default, because every number recorded under the
+    old behaviour was measured with a budget this flag changes — see
+    :attr:`automl_agent.config.RunConfig.search_past_goal`.
+
+    ``goal_met`` is still evaluated on this iteration's result and still reaches the report:
+    ``report.stop_reason`` recomputes it, so a run that cleared the bar at iteration 1 and then
+    spent four more says ``goal_reached`` regardless of what the last attempt scored.
     """
-    if goal_met(state.get("result", {}) or {}, state.get("goal", {}) or {}):
+    if not search_past_goal and goal_met(
+        state.get("result", {}) or {}, state.get("goal", {}) or {}
+    ):
         return "report"
 
     iteration = int(state.get("iteration", 0) or 0)
@@ -146,7 +165,9 @@ def build_state_graph(config: RunConfig) -> StateGraph:
     # number that could change the loop's behaviour would no longer be a held-back one.
     g.add_conditional_edges(
         "evaluate",
-        partial(route, stall_limit=config.stall_limit),
+        partial(
+            route, stall_limit=config.stall_limit, search_past_goal=config.search_past_goal
+        ),
         {"report": "holdout", "critic": "critic"},
     )
     g.add_edge("holdout", "report")

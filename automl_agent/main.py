@@ -61,6 +61,7 @@ from .scoring.goal import (
     resolve_goal,
 )
 from .scoring.metrics import GOAL_METRICS
+from .threads import thread_state
 
 RUN_CONFIG_FILE = "run_config.json"
 
@@ -139,6 +140,15 @@ def save_run_config(config: RunConfig) -> None:
         key: (str(value) if isinstance(value, Path) else value)
         for key, value in dataclasses.asdict(config).items()
     }
+    # Not a ``RunConfig`` field, and written here anyway: it is the environment the run
+    # happened in rather than a setting the run was given, and ``load_run_config`` keeps only
+    # declared fields, so a resumed run never reads it back as one. It is here because this is
+    # the one file per run directory that says what the run *was*, and thread count moves the
+    # scores in it by more than some of the differences they are used to argue
+    # (:mod:`automl_agent.threads`). A resume overwrites this file, so it describes the shell
+    # of the most recent leg — the per-attempt copies in ``result.json`` are the ones that stay
+    # matched to their own numbers.
+    payload["threads"] = thread_state()
     path = config.run_dir / RUN_CONFIG_FILE
     # Written to a sibling and renamed, because ``os.replace`` is atomic on both platforms:
     # every command except ``run`` rebuilds its settings from this file, so a write cut off
@@ -485,6 +495,7 @@ def command_run(args: argparse.Namespace) -> int:
         direction=args.direction,
         max_iterations=args.max_iterations,
         time_budget_sec=args.time_budget_sec,
+        search_past_goal=args.search_past_goal,
         dry_run=args.dry_run,
         dry_run_scenario=args.scenario,
         no_llm=args.no_llm,
@@ -942,6 +953,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_TIME_BUDGET_SEC,
         help="학습 1회당 시간 예산(초). 초과 시 too_slow로 기록됩니다.",
+    )
+    run_parser.add_argument(
+        "--search-past-goal",
+        action="store_true",
+        help="목표를 넘어도 --max-iterations 까지 계속 탐색합니다. 기본값은 목표 달성 즉시 "
+        "종료이고, auto 모드에서는 첫 시도가 바를 넘는 일이 흔하므로 그때 critic은 한 번도 "
+        "실행되지 않습니다 — 진단·재계획 경로를 실제로 돌리려면 이 플래그입니다. 바를 올리지도, "
+        "어느 시도가 이기는지를 바꾸지도 않고(승자는 여전히 val 최고), 남은 예산을 쓸 뿐입니다. "
+        "쓴 예산이 달라지므로 이 플래그를 켠 실행은 끄고 잰 실행과 같은 조건이 아닙니다",
     )
     run_parser.add_argument("--thread-id", required=True, help="체크포인트 식별자")
     run_parser.add_argument(

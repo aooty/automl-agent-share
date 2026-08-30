@@ -18,7 +18,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..config import (
     API_KEY_ENV,
@@ -34,6 +34,26 @@ from ..privacy import assert_clean
 
 class LLMUnavailable(RuntimeError):
     """Raised when a call cannot be completed. Callers fall back deterministically."""
+
+
+class TextCompletion(NamedTuple):
+    """A free-form completion, plus whether the model was cut off before finishing.
+
+    ``truncated`` exists because the fact was being thrown away. :meth:`LLMClient._archive`
+    has always written the API's ``stop_reason`` into the exchange JSON and no code path read
+    it, so ``test-1`` spent exactly its output allowance, wrote a ``report.md`` that ends in
+    the middle of a word, and reported success. A cut-off response is not an error the
+    transport can raise — it is a well-formed reply that happens to be incomplete — so the
+    only place it can be noticed is here, at the return.
+
+    Called ``truncated`` and not ``stop_reason`` on purpose:
+    :func:`automl_agent.nodes.report.stop_reason` already means *why the loop ended*, and one
+    name for both would make "why the run stopped" and "why the sentence stopped" the same
+    field in a reader's head.
+    """
+
+    text: str
+    truncated: bool
 
 
 # Name of the single tool used when structured output has to be enforced via tool use.
@@ -263,8 +283,12 @@ class LLMClient:
         system: str | None = None,
         max_tokens: int | None = None,
         iteration: int | None = None,
-    ) -> str:
-        """Free-form completion. Used only where prose is the product (the report)."""
+    ) -> TextCompletion:
+        """Free-form completion. Used only where prose is the product (the report).
+
+        Returns the text *and* whether it was cut off — see :class:`TextCompletion` for why
+        that second field is not something the caller can be trusted to remember to ask for.
+        """
         prompt = render_prompt(prompt_name, variables)
         label = archive_label(prompt_name, iteration=iteration)
         try:
@@ -279,7 +303,7 @@ class LLMClient:
             raise
         text = extract_text(response)
         self._archive(label, prompt, system, text, response)
-        return text
+        return TextCompletion(text, getattr(response, "stop_reason", None) == "max_tokens")
 
     def complete_json(
         self,

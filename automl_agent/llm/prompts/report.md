@@ -9,6 +9,7 @@ You are the Report Agent. The AutoML loop has finished. Write the final report.
 - Goal reached: {{goal_met}}
 - Iterations used: {{iterations}} of {{max_iterations}}
 - Stop reason: {{stop_reason}}
+- 재계획: {{replanning}}
 
 ## Best result
 
@@ -68,7 +69,12 @@ Required structure:
    differ, say that the difference is the size of the selection effect — the run made its
    choices on the validation number.
 4. `## 원인 분석` — what actually limited performance, citing the numbers and the
-   pattern across the Critic's verdicts.
+   pattern across the Critic's verdicts. The `재계획` line under `Outcome` says how many
+   verdicts exist. **If it says zero, there is no pattern to describe** — a first attempt
+   that cleared the bar ends the run before the Critic ever runs. Say that the score is the
+   first plan's, and that this run therefore says nothing either way about the
+   diagnose-and-replan loop. Do not assemble a cause from the attempt's own metrics and
+   present it as a diagnosis: no diagnosis was made.
 5. `## 다음 단계 제안` — two to four concrete next actions. If the goal was not
    reached, this section carries the weight: say what you would try with more budget
    and why the evidence points there.

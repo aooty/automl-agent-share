@@ -499,6 +499,12 @@ def digest_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:
         # whenever the requested strategy was downgraded. Absent for runs recorded before
         # the executor reported it, which is why the report prompt has a fallback.
         "preprocessing": result.get("applied_preprocessing") or {},
+        # Beside ``preprocessing`` for the same reason: it is what the executor did rather than
+        # what was asked for. This attempt's ``hyperparams`` may say ``validation_fraction:
+        # 0.15`` and nothing else said what that cost, so a Planner comparing two attempts on
+        # score alone read a 15% smaller training set as a fair tie. Empty when the estimator
+        # held no rows back, and absent for runs recorded before the executor reported it.
+        "internal_validation": result.get("internal_validation") or {},
         "unsupported_claims": plan.get("unsupported_claims") or [],
         "status": result.get("status"),
         "error_type": result.get("error_type"),

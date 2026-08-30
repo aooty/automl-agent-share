@@ -47,6 +47,13 @@ whatever the plan describes, only what is listed here.
 
 {{executor_capabilities}}
 
+## How many rows the fit will see
+
+The card above gives the row total and the split fractions separately; this is their
+product, plus the one executor default whose value depends on it.
+
+{{row_budget}}
+
 ## Previous attempts
 
 {{history}}

@@ -146,7 +146,9 @@ python -m automl_agent.main run `
 ### 예산
 
 `--max-iterations 3` · `--time-budget-sec 3600` · `--seed 42` ·
-`--force`(기존 `thread-id` 덮어쓰기) · `--keep-models all`
+`--force`(기존 `thread-id` 덮어쓰기) · `--keep-models all` ·
+`--search-past-goal`(목표를 넘어도 예산을 다 씀 — 첫 시도가 바를 넘어 Critic이 0회 도는
+실행을 피하려면 이것)
 
 디스크도 예산입니다. 기본값 `--keep-models best`는 `predict`가 실제로 쓰는 최고 시도의
 `model.joblib`만 남깁니다 — 적합된 모델 하나가 수백 MB가 되고(개발 중 측정된 최댓값

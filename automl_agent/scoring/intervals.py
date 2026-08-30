@@ -503,10 +503,19 @@ def describe_paired(block: Mapping[str, Any] | None) -> str:
     verdict = "0과 구분됨" if not low <= 0.0 <= high else "이 행들로는 0과 구분되지 않음"
     against = block.get("baseline_iteration")
     head = f"짝지은 Δ(iteration {against} 대비)" if against is not None else "짝지은 Δ"
-    return (
+    text = (
         f"[{head} {delta:+.4f}, {int(CI_LEVEL * 100)}% CI {low:+.4f}~{high:+.4f}, "
         f"P(개선) {p_better:.3f} — {verdict}]"
     )
+    if block.get("threads_changed") is True:
+        # Appended rather than folded into the verdict, because the interval is still the
+        # interval: those two prediction vectors really do differ by that much. What the row
+        # can no longer say is that the plan is why. Measured on the MIMIC card, the same
+        # config across OMP_NUM_THREADS 1..20 spans 0.0077 balanced_accuracy — 0.99x the
+        # half-width of one of these intervals (:mod:`automl_agent.threads`), so the
+        # environment is not a rounding error next to what is being claimed.
+        text += " [baseline과 스레드 상태가 다릅니다 — 이 Δ에는 환경 차이가 섞여 있습니다]"
+    return text
 
 
 def _iteration(value: Any) -> int | None:

@@ -54,10 +54,13 @@ no becomes a yes; it is not a promise that the yes is worth an iteration.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from .scoring.metrics import TASK_CLASSIFICATION, TASK_REGRESSION
+from .scoring.splits import row_counts
 
 
 @dataclass(frozen=True)
@@ -482,12 +485,16 @@ CANNOT: tuple[Capability, ...] = (
     ),
     Capability(
         name="xgboost_early_stopping",
-        summary="Use `eval_set`, `early_stopping_rounds` or `callbacks` for xgboost.",
+        summary="Name your own `eval_set`, or pass `callbacks`, to xgboost.",
         instead=(
-            "a Pipeline cannot forward an eval set, so these are blocked before `fit`. "
-            "hist_gbdt's own `early_stopping=True` + `validation_fraction` does work"
+            "`early_stopping_rounds` works and needs nothing else from you — the executor "
+            "holds 10% of train back and supplies the eval set itself, the way hist_gbdt's "
+            "`early_stopping=True` + `validation_fraction` does, and reports both counts in "
+            "`internal_validation`. Those 10% are rows the fit does not see, so on a small "
+            "training split the loss can outweigh what the stop buys. What the executor "
+            "cannot forward is an eval set naming rows it did not split, or a callback list"
         ),
-        markers=("eval_set", "early_stopping_rounds", "callbacks"),
+        markers=("eval_set", "callbacks"),
     ),
     Capability(
         name="protocol_changes",
@@ -620,6 +627,95 @@ def describe(task: str | None = None) -> str:
         "Do not build a plan on anything in the second list. A plan that assumes it "
         "spends an attempt and then reports a configuration that never ran.",
     ]
+    return "\n".join(lines)
+
+
+# sklearn resolves ``early_stopping='auto'`` to ``n_samples > 10_000`` — strictly greater, and
+# counted on the rows handed to ``fit``, which is the train split rather than the file. Named
+# here because it is the one executor default whose *value* depends on the dataset: one config
+# file means early stopping on one card and no early stopping on another.
+EARLY_STOPPING_AUTO_MIN_ROWS = 10_000
+
+# The estimators that carve their own validation slice out of the training rows, and the share
+# they take when told to stop early and not told how much. Both are sklearn defaults, read off
+# this module rather than written into a prompt so a version bump lands in one place.
+SELF_VALIDATING_MODELS = ("hist_gbdt", "mlp")
+DEFAULT_VALIDATION_FRACTION = 0.1
+
+
+def describe_row_budget(n_rows: Any, *, grouped: bool = False) -> str:
+    """The planning prompt's block for how many rows the fit will actually see.
+
+    Why the card is not enough. It publishes ``n_rows`` and it publishes
+    ``baseline.protocol.train_fraction``, and it never publishes their product — but every
+    choice a plan makes about capacity and early stopping is made against the product. The
+    concrete cost: :data:`EARLY_STOPPING_AUTO_MIN_ROWS` is counted on training rows, so a file
+    between 10,001 and 16,667 rows falls on *opposite* sides of that boundary depending on which
+    of the two numbers is read. None of ``bench/``'s five datasets land in that window, which is
+    exactly why reading the wrong one would have gone unnoticed there.
+
+    The third bullet is the one worth the prompt space. ``early_stopping='auto'`` means a plan
+    that says nothing about early stopping is not a plan that runs without it: above the
+    boundary the fit silently holds back a tenth of the training rows. Two arms of the
+    ``bench/`` comparison set ``validation_fraction: 0.1`` and inherited it respectively, and on
+    the three large datasets those were the same treatment — which was written up as a
+    difference until the fitted objects were read.
+
+    On repeating the executor's arithmetic. :func:`automl_agent.scripts.train.describe_internal_validation`
+    deliberately does *not* compute the held-out count, because it can ask the fitted object.
+    This function has no fitted object — it runs before the attempt — so it forecasts, and a
+    forecast that disagrees with the measurement by a row would be worse than none. The test
+    suite pins the two against each other for that reason.
+
+    Never empty, and never silently partial: a card without a usable ``n_rows`` gets a block
+    saying which decision it can no longer inform.
+    """
+    try:
+        counts = row_counts(int(n_rows))
+    except (TypeError, ValueError):
+        return (
+            "(unknown — the card does not say how many rows the file has. In particular there "
+            "is no way to tell which side of the "
+            f"{EARLY_STOPPING_AUTO_MIN_ROWS:,}-training-row `early_stopping='auto'` boundary "
+            "this dataset falls on, so name `early_stopping` explicitly if the plan depends on "
+            "it either way.)"
+        )
+    train = counts["train"]
+    held_out = math.ceil(DEFAULT_VALIDATION_FRACTION * train)
+    auto_on = train > EARLY_STOPPING_AUTO_MIN_ROWS
+    models = " and ".join(f"`{name}`" for name in SELF_VALIDATING_MODELS)
+
+    lines = [
+        f"- **train {train:,} rows** / val {counts['val']:,} / test {counts['test']:,}, out of "
+        f"the card's {int(n_rows):,}. The card gives the fractions and the total but not this "
+        "product, and capacity and early-stopping choices are made against the product.",
+        f"- {models} early-stop on a slice of the **training** rows, not on the validation set "
+        "above — so that slice is subtracted from the number in the first bullet, and an "
+        "attempt that pays it is being compared on score against attempts that did not.",
+    ]
+    if auto_on:
+        lines.append(
+            f"- Their default `early_stopping='auto'` is **on** here ({train:,} > "
+            f"{EARLY_STOPPING_AUTO_MIN_ROWS:,}). Saying nothing about early stopping therefore "
+            f"does not mean running without it: at the default `validation_fraction` of "
+            f"{DEFAULT_VALIDATION_FRACTION:g} the fit sees {train - held_out:,} rows, not "
+            f"{train:,}. Setting `early_stopping: false` is what turns it off; the executor "
+            "reports what really happened in `internal_validation`."
+        )
+    else:
+        lines.append(
+            f"- Their default `early_stopping='auto'` is **off** here ({train:,} is not above "
+            f"{EARLY_STOPPING_AUTO_MIN_ROWS:,}), so the fit sees all {train:,} rows unless the "
+            f"plan asks for `early_stopping: true`. Asking costs `validation_fraction` of them "
+            f"— {held_out:,} rows at the default {DEFAULT_VALIDATION_FRACTION:g}, leaving "
+            f"{train - held_out:,}. On a training split this size that loss can outweigh what "
+            "the stop buys; the executor reports both counts in `internal_validation`."
+        )
+    if grouped:
+        lines.append(
+            "- These three counts are **approximate**: the split keeps every row of a group "
+            "together, and a group cannot be divided to make a share come out even."
+        )
     return "\n".join(lines)
 
 

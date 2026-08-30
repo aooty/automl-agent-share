@@ -120,6 +120,11 @@ class RunConfig:
     max_iterations: int = DEFAULT_MAX_ITERATIONS
     time_budget_sec: int = DEFAULT_TIME_BUDGET_SEC
     stall_limit: int = STALL_LIMIT
+    # Whether clearing the bar ends the run. Off by default, which is the historical
+    # behaviour and the one every recorded measurement in ``bench/`` was taken under —
+    # turning it on changes how much of the iteration budget a run spends, so it is a
+    # different experiment, not a better default. See automl_agent.graph.route.
+    search_past_goal: bool = False
     dry_run: bool = False
     # Which trajectory the mocked trainer follows under --dry-run.
     dry_run_scenario: str = "success"

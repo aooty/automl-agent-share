@@ -29,6 +29,12 @@ number in the report that no decision was selected against.
 proposed dict was narrowed to the parameters this model accepts. It, not the proposal,
 is what the report and the history digest quote.
 
+``internal_validation`` is present only when some of the training rows were kept back to stop
+on — ``hist_gbdt`` and ``mlp`` carve that slice themselves, and for ``xgboost`` the harness
+carves it (:func:`fit_estimator`); neither the log line nor the split sizes said so before. Its
+``fit_rows``, not the split's train count, is how many rows that attempt was fitted on; see
+:func:`describe_internal_validation`.
+
 ``metrics`` carries every registry metric of the target's *task* that the prediction
 supports, each one's ``train_`` counterpart that the Critic needs, ``train_val_gap`` on the
 goal metric, and on a binary target ``specificity`` plus ``balanced_accuracy_at_best_cut``
@@ -145,6 +151,11 @@ from automl_agent.scoring.splits import (  # noqa: E402 - needs the path fix abo
     protocol,
     split_three_way,
     val_fingerprint,
+)
+from automl_agent.threads import (  # noqa: E402 - needs the path fix above
+    describe_thread_state,
+    thread_state,
+    thread_state_changed,
 )
 
 LOG_TAIL_CHARS = 4000
@@ -453,11 +464,18 @@ SCALE_SENSITIVE = {"logreg", "mlp", "svc", "knn", "ridge", "linreg", "elasticnet
 NATIVE_NAN = {"hist_gbdt", "xgboost"}
 
 # Constructor arguments that are valid for the estimator but break at ``fit`` time in
-# this harness, so ``set_params`` accepts them and the run dies later. xgboost's
-# ``early_stopping_rounds`` needs an ``eval_set``, which a Pipeline cannot forward —
-# a plausible proposal that used to cost a whole iteration.
+# this harness, so ``set_params`` accepts them and the run dies later.
+#
+# ``early_stopping_rounds`` used to be on this list, because a Pipeline cannot forward an
+# ``eval_set``. Dropping it did stop the crash but left a worse problem: xgboost could only
+# ever run to its full ``n_estimators``, and the loss that produced was reported as
+# ``overfitting`` — a property of the family rather than of the harness (FINDINGS-mimic.md,
+# and again in ``test-1`` iteration 2). :func:`fit_estimator` supplies the eval set instead,
+# so the parameter is honoured now and only the two objects it cannot build remain refused:
+# an eval set naming rows this script did not split, and a callback list, which has no JSON
+# form to arrive in.
 UNSUPPORTED_BY_HARNESS: dict[str, tuple[str, ...]] = {
-    "xgboost": ("early_stopping_rounds", "eval_set", "callbacks"),
+    "xgboost": ("eval_set", "callbacks"),
 }
 
 
@@ -806,6 +824,130 @@ def _wrap_preprocessing(
     return Pipeline(steps)
 
 
+# The share of *train* held back to decide when to stop. Deliberately the same as
+# HistGradientBoosting's own ``validation_fraction`` default, so the two boosted families
+# stop on comparably sized evidence and a family comparison is not also a protocol
+# comparison.
+EARLY_STOPPING_FRACTION = 0.1
+# Below this many rows the stopping signal is noise deciding the round count, which is worse
+# than not stopping at all. Same order as the floor ``train_subsample`` keeps.
+MIN_EARLY_STOPPING_ROWS = 50
+
+
+def _early_stopping_split(
+    x: Any, y: Any, seed: int, stratify: bool, groups: Any
+) -> tuple[Any, Any, Any, Any]:
+    """Cut a stopping-evidence slice out of *train*, never out of val.
+
+    val decides which attempt wins, so an estimator that stopped on val would be choosing
+    its own round count against the rows it is later scored on — the same objection this
+    project makes to reporting ``best`` as the outcome, one layer down.
+
+    Groups are honoured when the run has them: a stopping slice sharing a patient with the
+    rows being fitted would report a later round as still improving.
+    """
+    import numpy as np
+
+    if groups is not None:
+        from sklearn.model_selection import GroupShuffleSplit
+
+        splitter = GroupShuffleSplit(
+            n_splits=1, test_size=EARLY_STOPPING_FRACTION, random_state=seed
+        )
+        fit_idx, stop_idx = next(iter(splitter.split(x, y, groups=groups)))
+    else:
+        from sklearn.model_selection import train_test_split
+
+        fit_idx, stop_idx = train_test_split(
+            np.arange(len(y)),
+            test_size=EARLY_STOPPING_FRACTION,
+            random_state=seed,
+            stratify=y if stratify else None,
+        )
+    return x[fit_idx], x[stop_idx], y[fit_idx], y[stop_idx]
+
+
+def fit_estimator(
+    pipeline: Any,
+    x: Any,
+    y: Any,
+    seed: int,
+    log: LogBuffer,
+    *,
+    stratify: bool = True,
+    groups: Any = None,
+) -> dict[str, Any]:
+    """Fit the pipeline, building the eval set itself when the estimator asked to stop early.
+
+    ``Pipeline.fit`` cannot forward an ``eval_set``: the estimator needs the *transformed*
+    matrix, and the transformers are not fitted until the pipeline's own fit has run. So
+    when the final step carries ``early_stopping_rounds`` this fits the preprocessing steps
+    on the fitting slice, transforms both slices with them, and hands the estimator the pair.
+
+    The steps it fits are the same objects the pipeline holds, so the pipeline is fitted when
+    this returns — ``predict`` and ``joblib.dump`` see an ordinary fitted Pipeline, and
+    ``scripts/predict.py`` needs to know none of this.
+
+    Preprocessing is fitted on the fitting slice alone, not on all of train: a stopping slice
+    that contributed to the impute median is not held back from the decision it is there to
+    make. That costs the estimator 10% of its rows, which is the price of the parameter.
+
+    Returns those rows in the shape :func:`describe_internal_validation` uses, and ``{}`` when
+    it held none back. Same field for both paths because they are the same fact to whoever reads
+    the attempt: some of the rows the log announced did not train the model. The count is the
+    length of the slice this function cut, not ``n * fraction`` recomputed — see that function's
+    docstring for why the arithmetic is never repeated.
+    """
+    final = pipeline.steps[-1][1]
+    rounds = getattr(final, "early_stopping_rounds", None)
+    if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds <= 0:
+        pipeline.fit(x, y)
+        return {}
+
+    x_fit, x_stop, y_fit, y_stop = _early_stopping_split(x, y, seed, stratify, groups)
+    if len(y_stop) < MIN_EARLY_STOPPING_ROWS:
+        # Turned off rather than worked around: a round count chosen on 30 rows is a number
+        # the report would have to disclaim, and the full n_estimators is at least honest.
+        log.write(
+            f"early_stopping_rounds={rounds} not applied: the stopping slice would hold "
+            f"{len(y_stop)} rows, under the {MIN_EARLY_STOPPING_ROWS} needed"
+        )
+        final.set_params(early_stopping_rounds=None)
+        pipeline.fit(x, y)
+        return {}
+
+    head = pipeline.steps[:-1]
+    if head:
+        from sklearn.pipeline import Pipeline
+
+        pre = Pipeline(list(head))
+        x_fit_t = pre.fit_transform(x_fit, y_fit)
+        x_stop_t = pre.transform(x_stop)
+    else:
+        x_fit_t, x_stop_t = x_fit, x_stop
+
+    final.fit(x_fit_t, y_fit, eval_set=[(x_stop_t, y_stop)], verbose=False)
+    best = getattr(final, "best_iteration", None)
+    reached = f", best_iteration={best}" if isinstance(best, int) else ""
+    log.write(
+        f"early_stopping_rounds={rounds}: fitted on {len(y_fit)} rows, stopped against "
+        f"{len(y_stop)} rows held out of train{reached}"
+    )
+    held_back: dict[str, Any] = {
+        "held_out_rows": len(y_stop),
+        "fit_rows": len(y_fit),
+        "validation_fraction": EARLY_STOPPING_FRACTION,
+    }
+    if isinstance(best, int) and not isinstance(best, bool):
+        # ``best_iteration`` counts from zero; the field means rounds fitted, so that the
+        # ``stopped_at_iter == max_iter`` reading holds here too — it says the stop never bit.
+        held_back["stopped_at_iter"] = best + 1
+    cap = getattr(final, "n_estimators", None)
+    if isinstance(cap, int) and not isinstance(cap, bool):
+        held_back["max_iter"] = cap
+    return held_back
+
+
 def describe_preprocessing(estimator: Any) -> dict[str, Any]:
     """What the pipeline *is*, read off the object rather than recomputed.
 
@@ -832,6 +974,95 @@ def describe_preprocessing(estimator: Any) -> dict[str, Any]:
         MISSING_INDICATOR: MISSING_INDICATOR in steps,
         MISSING_COUNT: MISSING_COUNT in steps,
     }
+
+
+def describe_internal_validation(estimator: Any, n_train: int) -> dict[str, Any]:
+    """The training rows an estimator's own early stopping kept back, read off the fitted object.
+
+    ``fitting on N rows`` says how many rows went *into* ``fit``, which under
+    ``early_stopping=True`` is not how many the model was fitted on: ``hist_gbdt``, ``mlp`` and
+    ``gradient_boosting`` all carve their own validation slice out of that N to decide when to
+    stop. spambase is why this exists — a plan set ``validation_fraction: 0.15`` on 2760 training
+    rows, the log announced 2760, the fit saw 2346, and nothing anywhere said so. The next
+    planning prompt then had no way to see that the attempt it was reading about had trained on
+    15% fewer rows than the attempt beside it, and the two were being compared on score.
+
+    Read off the object rather than derived from the config, for the same reason
+    :func:`describe_preprocessing` is. Here the config cannot answer in *either* direction:
+    ``early_stopping='auto'`` — the default — resolves to True only above 10k samples, so a
+    config that names nothing may still hold rows back; and ``early_stopping=True`` with
+    ``validation_fraction=None`` stops on the training loss and holds back nothing at all. Which
+    attribute settles it differs by estimator, so that reading is :func:`_held_rows_back`.
+
+    The row count comes from ``train_test_split`` rather than from ``n_train * fraction``
+    because that is the call all three make (``test_size=self.validation_fraction``), and it
+    takes an absolute row count as well as a fraction. Repeating its arithmetic here would be a
+    second code path free to disagree by a row — which is exactly what
+    :func:`automl_agent.capabilities.describe_row_budget` has to be, since it forecasts this
+    number before any fit exists; the tests pin the two together for that reason.
+
+    ``xgboost`` does not come through here, because it does not do this: it early-stops on an
+    ``eval_set``, and the split behind that set is made by :func:`fit_estimator`, which therefore
+    knows the two counts without reading anything back and returns them in this same shape. Both
+    paths fill one field, so a reader of ``internal_validation`` never has to know which
+    estimator held the rows back.
+
+    ``{}`` when nothing was held back, so the presence of the field is itself the answer.
+    """
+    from sklearn.model_selection import train_test_split
+
+    fraction = getattr(estimator, "validation_fraction", None)
+    if fraction is None or not _held_rows_back(estimator):
+        return {}
+    held_out = len(train_test_split(list(range(n_train)), test_size=fraction)[1])
+    described: dict[str, Any] = {
+        "held_out_rows": held_out,
+        "fit_rows": n_train - held_out,
+        "validation_fraction": fraction,
+    }
+    # Whether early stopping actually bit. ``stopped_at_iter == max_iter`` means the rows were
+    # spent and the cap was hit anyway — the configuration paid for a stop it never got.
+    stopped = getattr(estimator, "n_iter_", None)
+    if stopped is None:
+        # ``gradient_boosting`` counts stages, not iterations, and calls the count something
+        # else. Same quantity: how many rounds were fitted before the stop.
+        stopped = getattr(estimator, "n_estimators_", None)
+    cap = getattr(estimator, "max_iter", None)
+    if cap is None:
+        cap = getattr(estimator, "n_estimators", None)
+    if isinstance(stopped, int) and not isinstance(stopped, bool):
+        described["stopped_at_iter"] = stopped
+    if isinstance(cap, int) and not isinstance(cap, bool):
+        described["max_iter"] = cap
+    return described
+
+
+def _held_rows_back(estimator: Any) -> bool:
+    """Whether this fitted estimator really carved a validation slice out of its training rows.
+
+    Three estimators in the menu take a ``validation_fraction``, and no single attribute answers
+    for all three — which is why this is a function and not one ``getattr``:
+
+    * ``hist_gbdt`` and ``mlp`` fill ``validation_score_`` / ``validation_scores_`` only when a
+      held-out slice was really scored, so a non-empty one is the answer. Presence is not: the
+      attribute is set either way — to an empty array on ``hist_gbdt`` and to ``None`` on
+      ``mlp`` — and ``_use_validation_data`` is True under ``early_stopping=False`` too.
+    * ``gradient_boosting`` exposes *neither* attribute and splits anyway, whenever
+      ``n_iter_no_change`` is not None — sklearn's own condition, read back off the object. It
+      was missed on the first pass at this function, and it is reachable: ``build_estimator``
+      forwards any key ``get_params`` accepts, so the registry not advertising
+      ``n_iter_no_change`` does not stop a plan from setting it.
+
+    Hence ``hasattr`` for the branch and the value for the verdict. Falling through on a
+    ``None`` score list would put ``gradient_boosting``'s rule on ``mlp``, whose
+    ``n_iter_no_change`` is 10 by default and means nothing without ``early_stopping=True`` —
+    every MLP attempt would then report rows it never held back.
+    """
+    for attribute in ("validation_score_", "validation_scores_"):
+        if hasattr(estimator, attribute):
+            scores = getattr(estimator, attribute)
+            return scores is not None and len(scores) > 0
+    return getattr(estimator, "n_iter_no_change", None) is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -1194,6 +1425,12 @@ def save_predictions(
         arrays: dict[str, Any] = {
             "pred": np.asarray(pred),
             "fingerprint": np.asarray(str(fingerprint)),
+            # The thread state these numbers were produced in, travelling with them for the
+            # same reason the fingerprint does: the premise of a paired comparison is that
+            # the two vectors differ only by what the plan changed, and thread count changes
+            # them by more than some plans do (:mod:`automl_agent.threads`). The fingerprint
+            # sees the rows and cannot see this.
+            "threads": np.asarray(json.dumps(thread_state(), ensure_ascii=False, sort_keys=True)),
         }
         if proba is not None:
             arrays["proba"] = np.asarray(proba)
@@ -1256,6 +1493,13 @@ def paired_against_baseline(
             stored = str(loaded["fingerprint"])
             base_pred = np.asarray(loaded["pred"])
             base_proba = np.asarray(loaded["proba"]) if "proba" in loaded.files else None
+            # Absent in a file written before this field existed. ``None`` then, not a guess:
+            # ``thread_state_changed`` turns "not recorded" into silence rather than into
+            # "unchanged". ``JSONDecodeError`` is a ``ValueError``, so a damaged field lands
+            # in the same handler as a damaged file.
+            base_threads = (
+                json.loads(str(loaded["threads"])) if "threads" in loaded.files else None
+            )
     except (OSError, ValueError, KeyError) as exc:
         return skipped("baseline_missing", f"{path.name}: {type(exc).__name__}: {exc}")
 
@@ -1264,6 +1508,22 @@ def paired_against_baseline(
         # see :func:`automl_agent.scoring.splits.val_fingerprint` for what changes the rows without
         # changing the seed.
         return skipped("split_changed", f"{stored[:8]} != {fingerprint[:8]}")
+
+    # The second premise, and unlike the first one it is not fatal: the baseline's predictions
+    # are on disk, so the difference between the two vectors is still exactly the difference
+    # that happened. What a thread change costs is the *attribution* — part of the delta is
+    # then the environment rather than the plan — so it is published beside the delta instead
+    # of refusing it. ``None`` when either side is unrecorded, and ``None`` publishes nothing.
+    current_threads = thread_state()
+    changed = thread_state_changed(base_threads, current_threads)
+    if changed is not None:
+        block["threads_changed"] = changed
+    if changed:
+        log.write(
+            f"baseline iteration {iteration} was fitted in a different thread state: "
+            f"[{describe_thread_state(base_threads)}] -> [{describe_thread_state(current_threads)}]"
+            " — part of the delta below is the environment, not the plan"
+        )
 
     spec = METRICS.get(metric)
     if spec is not None and spec.needs_proba and (proba is None or base_proba is None):
@@ -1302,16 +1562,29 @@ def run_training(
     predictions_out: Path | None = None,
     schema_out: Path | None = None,
 ) -> tuple[
-    dict[str, float], dict[str, Any], list[str], dict[str, Any], str | None, dict[str, Any], str | None
+    dict[str, float],
+    dict[str, Any],
+    list[str],
+    dict[str, Any],
+    str | None,
+    dict[str, Any],
+    str | None,
+    dict[str, Any],
 ]:
-    """Fit and score. ``(metrics, applied, dropped, preprocessing, model_path, paired, schema_path)``.
+    """Fit and score.
 
-    Three of those seven say what the run was *configured* with rather than what it scored,
+    ``(metrics, applied, dropped, preprocessing, model_path, paired, schema_path,
+    internal_validation)``.
+
+    Four of those eight say what the run was *configured* with rather than what it scored,
     and they are returned rather than re-derived because only this function saw the
     estimator: the config is a request the executor is allowed to narrow. ``paired`` is the
     comparison against the run's best so far, which is empty unless the caller asked for one
     (:func:`paired_against_baseline`). ``schema_path`` is the other half of ``model_path`` —
     the encoding that model was fitted with, without which it can be loaded but not applied.
+    ``internal_validation`` is the training rows early stopping kept back — whoever made the
+    split, the estimator itself (:func:`describe_internal_validation`) or the harness
+    (:func:`fit_estimator`) — and is empty when none were kept.
 
     Scores are validation-set scores: the test slice
     (:mod:`automl_agent.scoring.splits`) is not read here at all, so nothing the loop selects on
@@ -1331,10 +1604,16 @@ def run_training(
         + f" {splits.sizes}"
     )
 
+    # Carried alongside x_train because ``fit_estimator`` may split it again; the two must
+    # stay the same length, so a subsample below cuts both.
+    groups_train = splits.groups_train
+
     subsample = (cfg.get("hyperparams") or {}).get("train_subsample")
     if isinstance(subsample, (int, float)) and 0 < float(subsample) < 1:
         keep = max(50, int(len(x_train) * float(subsample)))
         x_train, y_train = x_train[:keep], y_train[:keep]
+        if groups_train is not None:
+            groups_train = groups_train[:keep]
         log.write(f"train_subsample={subsample} -> {keep} rows")
 
     model, applied, dropped = build_estimator(
@@ -1351,7 +1630,36 @@ def run_training(
         task=task,
     )
     log.write(f"fitting on {len(x_train)} rows, validating on {len(x_val)} rows")
-    model.fit(x_train, y_train)
+    # Two estimators can hold training rows back, and only one of them can be asked afterwards.
+    # When the harness made the split itself (xgboost's eval set) ``fit_estimator`` returns the
+    # counts and has already logged them; when the estimator made its own, nothing but the
+    # fitted object knows, so it is read off there. Either way this is after the fit, because
+    # before it there is nothing to read.
+    internal_validation = fit_estimator(
+        model,
+        x_train,
+        y_train,
+        seed,
+        log,
+        stratify=not regression,
+        groups=groups_train,
+    )
+    if not internal_validation:
+        internal_validation = describe_internal_validation(
+            (getattr(model, "named_steps", None) or {}).get("model"), len(x_train)
+        )
+        if internal_validation:
+            stopped = (
+                f", iteration {internal_validation['stopped_at_iter']}"
+                f"/{internal_validation['max_iter']}에서 멈춤"
+                if {"stopped_at_iter", "max_iter"} <= internal_validation.keys()
+                else ""
+            )
+            log.write(
+                f"early_stopping이 위 {len(x_train)}행 중 "
+                f"{internal_validation['held_out_rows']}행을 자체 검증으로 떼어 갔습니다 — "
+                f"실제 학습은 {internal_validation['fit_rows']}행{stopped}"
+            )
     model_path = save_model(model, model_out, log) if model_out is not None else None
     # Written after the fit and beside the model, so the file on disk describes the encoding
     # of the matrix this estimator actually saw rather than one derived separately later.
@@ -1448,6 +1756,7 @@ def run_training(
         model_path,
         paired,
         schema_path,
+        internal_validation,
     )
 
 
@@ -1593,6 +1902,7 @@ def write_result(
     model_path: str | None = None,
     schema_path: str | None = None,
     paired: dict[str, Any] | None = None,
+    internal_validation: dict[str, Any] | None = None,
     split: str = "val",
 ) -> None:
     payload = {
@@ -1615,12 +1925,25 @@ def write_result(
         "status": status,
         "error_type": error_type,
         "log_tail": log_tail,
+        # The environment these numbers were produced in, on every result including the failed
+        # ones — the cheapest field in the file and the one that decides whether two of them
+        # are comparable at all (:mod:`automl_agent.threads`). Deliberately not in
+        # ``privacy.PUBLIC_RESULT_FIELDS``: it is free-form text out of the environment, it has
+        # no diagnostic use in a prompt, and the one bit a consumer needs from it — did it
+        # change between the two attempts being compared — is carried as a boolean inside the
+        # paired block.
+        "threads": thread_state(),
     }
     if paired:
         # A block of scalars about a *comparison*, not about this model on these rows —
         # which is why it is not folded into ``metrics``. Kept even when it says "skipped",
         # so a reader can tell "not compared, and here is why" from "compared, found nothing".
         payload[PAIRED_KEY] = paired
+    if internal_validation:
+        # Omitted rather than written empty, unlike ``applied_hyperparams``: absent means
+        # "the estimator held no rows back", which is the common case and needs no field.
+        # An empty block would read as "held back, amount unknown".
+        payload["internal_validation"] = internal_validation
     if model_path:
         # Local only. Not in ``privacy.PUBLIC_RESULT_FIELDS``, so it never enters a state
         # channel a prompt is rendered from — a fitted model is data-equivalent.
@@ -1661,6 +1984,7 @@ def write_result(
                 "status": status,
                 "error_type": error_type,
                 "log_tail": f"{log_tail}\nresult.json could not be serialised strictly: {exc}",
+                "threads": thread_state(),
                 NONFINITE_KEY: nonfinite or ["<unknown>"],
             },
             indent=2,
@@ -1728,7 +2052,16 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         apply_simulation(cfg, log)
-        metrics, applied, dropped, preprocessing, model_path, paired, schema_path = run_training(
+        (
+            metrics,
+            applied,
+            dropped,
+            preprocessing,
+            model_path,
+            paired,
+            schema_path,
+            internal_validation,
+        ) = run_training(
             cfg,
             log,
             model_out=out_path.parent / MODEL_FILENAME,
@@ -1762,6 +2095,7 @@ def main(argv: list[str] | None = None) -> int:
         model_path=model_path,
         schema_path=schema_path,
         paired=paired,
+        internal_validation=internal_validation,
     )
     return 0
 

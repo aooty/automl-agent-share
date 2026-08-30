@@ -113,6 +113,7 @@ from automl_agent.scoring.splits import (  # noqa: E402 - needs the path fix abo
 # imports are pure-python package modules — sklearn arrives inside the branches — so this
 # costs no import-time dependency this script does not already have.
 from automl_agent.scripts.train import scorers  # noqa: E402 - needs the path fix above
+from automl_agent.threads import thread_state  # noqa: E402 - needs the path fix above
 
 # Bucket edges. Chosen to be coarse enough that no single record moves a bucket.
 DISTINCT_EDGES: tuple[tuple[int, str], ...] = ((1, "constant"), (2, "binary"), (10, "low"), (100, "medium"))
@@ -422,6 +423,13 @@ def reference_scores(
         # run's protocol disagrees with it, instead of silently comparing a bar derived
         # here against scores measured over different rows — automl_agent.scoring.splits.
         "protocol": protocol(seed, group_column, stratified=not regression),
+        # Its neighbour above says which rows produced these numbers; this says which
+        # environment did. Both are here for the same reason: in ``auto`` mode these scores
+        # *are* the bar the loop is judged against, and a bar measured in one thread state
+        # against attempts fitted in another is off by up to 0.0077 balanced_accuracy
+        # (:mod:`automl_agent.threads`) — enough to decide whether iteration 1 already cleared
+        # it. Costs four lines of the planning prompt, which is what ``protocol`` costs.
+        "threads": thread_state(),
         "scores": scores,
         "chance": chance,
     }

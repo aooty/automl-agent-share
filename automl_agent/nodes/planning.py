@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from ..capabilities import describe as describe_capabilities
-from ..capabilities import explain_claims, unsupported_claims
+from ..capabilities import describe_row_budget, explain_claims, unsupported_claims
 from ..config import RunConfig
 from ..dataset.caveats import describe_caveats
 from ..llm.client import LLMClient, LLMUnavailable, archive_prompt_only, render_prompt
@@ -106,6 +106,15 @@ def planning(state: AutoMLState, *, config: RunConfig) -> dict:
         "critic": critic_verdict or "(no critic verdict yet — this is the first attempt)",
         "available_models": available_models(task),
         "executor_capabilities": describe_capabilities(task),
+        # The card's row count multiplied through the split, and what that product decides —
+        # automl_agent.capabilities.describe_row_budget. Only the planning prompt gets this:
+        # from iteration 2 on the executor has reported the real counts in the result's
+        # ``internal_validation``, and the Critic reads the result. Iteration 1 has no result,
+        # which is where every attempt in bench/ chose its early-stopping setting.
+        "row_budget": describe_row_budget(
+            (state.get("dataset_card") or {}).get("n_rows"),
+            grouped=bool(_grouped_by(state)),
+        ),
     }
 
     plan: dict[str, Any] | None = None
@@ -463,6 +472,20 @@ def _requested_preprocessing(attempt: Mapping[str, Any]) -> dict[str, Any]:
         return dict(plan["preprocessing"])
     applied = (attempt.get("result") or {}).get("applied_preprocessing")
     return dict(applied) if isinstance(applied, Mapping) else {}
+
+
+def _grouped_by(state: AutoMLState) -> str | None:
+    """The column the split kept whole, or ``None`` on the row-level path.
+
+    Read from the card's published protocol rather than from the private ``data`` block,
+    which :func:`automl_agent.privacy.public_card` has already stripped by the time this node
+    runs. A card built with ``--no-baseline`` has no protocol block, and ``None`` is then the
+    honest answer for the only thing the caller does with it — deciding whether to call the
+    row counts approximate.
+    """
+    protocol = ((state.get("dataset_card") or {}).get("baseline") or {}).get("protocol")
+    column = protocol.get("grouped_by") if isinstance(protocol, Mapping) else None
+    return str(column) if column else None
 
 
 def _family_of(model: Any, task: str | None = None) -> str | None:

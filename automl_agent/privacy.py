@@ -334,6 +334,11 @@ APPLIED_HYPERPARAMS_KEY = "applied_hyperparams"
 # {"impute": "median", "scale": true} — the pipeline the executor built, so a write-up can
 # state the preprocessing that ran instead of the preprocessing the card suggested.
 APPLIED_PREPROCESSING_KEY = "applied_preprocessing"
+# {"held_out_rows": 414, "fit_rows": 2346, ...} — the rows the estimator's own early stopping
+# kept back. Row *counts*, like the split sizes already in every prompt, not row contents; the
+# filter is here for the same reason it is on the other two, to keep a future key from
+# arriving as an object. Absent when nothing was held back, which is the common case.
+INTERNAL_VALIDATION_KEY = "internal_validation"
 
 
 def _public_params(params: Any) -> dict[str, Any]:
@@ -394,6 +399,16 @@ def _public_paired(block: Any) -> dict[str, Any]:
         value = raw.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             clean[key] = value
+    if isinstance(raw.get("threads_changed"), bool):
+        # The one boolean here, so it needs its own line: the loop above rejects ``bool``
+        # because ``True`` where a delta belongs would render as a score. What this field says
+        # is that the two prediction vectors were produced in different thread states, which is
+        # what stops a reader from reading the delta as the plan's doing
+        # (:mod:`automl_agent.threads`). The blocks it was derived from stay private — not
+        # because they are data, but because they are free-form strings out of the
+        # environment, and this block's rule is that every string in it is checked against a
+        # closed set. A boolean has no free-text room to grow into.
+        clean["threads_changed"] = raw["threads_changed"]
     return clean
 
 
@@ -412,7 +427,7 @@ def public_result(result: dict[str, Any]) -> dict[str, Any]:
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         }
     }
-    for key in (APPLIED_HYPERPARAMS_KEY, APPLIED_PREPROCESSING_KEY):
+    for key in (APPLIED_HYPERPARAMS_KEY, APPLIED_PREPROCESSING_KEY, INTERNAL_VALIDATION_KEY):
         if key in raw:
             clean[key] = _public_params(raw[key])
     if PAIRED_KEY in raw:

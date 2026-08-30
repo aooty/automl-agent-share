@@ -35,6 +35,7 @@ from ..state import (
     AutoMLState,
     build_attempt,
     effective_hyperparams,
+    goal_met,
     is_better,
     metric_value,
 )
@@ -158,6 +159,11 @@ def critic(state: AutoMLState, *, config: RunConfig) -> dict:
     """Produce ``{failure_type, evidence, direction, concrete_changes}`` and log the attempt."""
     task = task_of_state(state)
     variables = {
+        # What this node is being asked, which is not always "explain the shortfall": under
+        # ``--search-past-goal`` the attempt may have cleared the bar. Rendered rather than
+        # written into the template because the template's opening sentence used to assert the
+        # miss — see describe_verdict_frame.
+        "frame": describe_verdict_frame(state, config),
         "goal": state.get("goal") or {},
         # The bar in prose. It is the same dict above, but "this bar sits above the
         # baseline ranking's ceiling" is an obligation and ``"exceeds_ranking_ceiling":
@@ -207,6 +213,57 @@ def critic(state: AutoMLState, *, config: RunConfig) -> dict:
             f"{explain_claims(list(verdict['unsupported_claims']))}"
         )
     return {"critic": verdict, "history": [build_attempt(state, verdict)]}
+
+
+def cleared_the_bar(state: AutoMLState, config: RunConfig) -> bool:
+    """Whether the attempt being judged is already at or past the goal.
+
+    Only reachable under :attr:`automl_agent.config.RunConfig.search_past_goal`: without it
+    ``route`` sends a passing attempt straight to the report and this node never sees it. Which
+    is why every sentence in here used to be free to assert the miss, and why they are not now —
+    a run that clears the bar at iteration 1 and then keeps searching would otherwise be told,
+    four times over, that it missed a bar it passed.
+
+    Read off the same ``goal_met`` the router uses, on the same ``result`` channel, so the two
+    cannot disagree about which side of the bar an attempt is on.
+    """
+    if not config.search_past_goal:
+        return False
+    return goal_met(dict(state.get("result") or {}), dict(state.get("goal") or {}))
+
+
+def describe_verdict_frame(state: AutoMLState, config: RunConfig) -> str:
+    """The prompt's opening: what the Critic is being asked about *this* attempt.
+
+    The template asserted "did not reach the goal" as its first sentence, which is the one
+    statement a prompt cannot afford to get wrong — everything after it is read in that light,
+    and an LLM told a passing attempt failed will find a failure to report.
+
+    The past-goal wording says three things beyond the correction. That there is no shortfall,
+    so none should be invented. That fragility is still worth naming, because a wide train/
+    validation gap on a passing attempt is real and is the one thing a single passing score
+    hides. And that ``best`` is val-best, so a worse next attempt cannot cost the run its
+    result — which is what makes the remaining budget cheap to spend and is exactly the
+    property the flag exists to use.
+    """
+    if not cleared_the_bar(state, config):
+        return (
+            "The most recent training attempt did not reach the goal. Diagnose *why*, citing "
+            "the numbers, and name one concrete change for the next attempt."
+        )
+    return (
+        "The most recent training attempt **already cleared the bar**. The run is continuing "
+        "because it was started with `--search-past-goal`, which spends the remaining iteration "
+        "budget instead of stopping at the first pass.\n\n"
+        "So there is no shortfall to explain, and you must not invent one. Say what is still "
+        "worth trying, citing the numbers: where the remaining headroom is, and whether "
+        "anything about this attempt is fragile — a wide train/validation gap or an interval "
+        "that reaches back below the bar is worth naming even on a passing attempt, and a "
+        "single passing score is exactly what hides it.\n\n"
+        "`best` is chosen by validation score, so a next attempt that scores worse cannot cost "
+        "the run its result. That is what makes this budget cheap to spend: prescribe the change "
+        "that would teach the most, not the safest one."
+    )
 
 
 def validate_verdict(verdict: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -281,6 +338,13 @@ def heuristic_verdict(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
             else float(train_score) - score
         )
 
+    # Whether this attempt is on the far side of the bar — only possible under
+    # ``--search-past-goal``, and it changes what several of the branches below may claim.
+    # Overfitting and the operating-point branches are deliberately *not* gated on it: a wide
+    # train/validation gap is a real finding about a passing attempt, and it is the finding a
+    # single passing score hides.
+    cleared = cleared_the_bar(state, config)
+
     direction_override: str | None = None
     changes_override: dict[str, Any] | None = None
     if isinstance(gap, (int, float)) and _overfits(metric, float(gap), train_score):
@@ -302,9 +366,14 @@ def heuristic_verdict(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
         # baseline's recall 0.229 always looked like.
         failure_type = "hyperparam"
         evidence, direction_override, changes_override = skew
-    elif isinstance(train_score, (int, float)) and _underfits(
-        metric, float(train_score), threshold
+    elif (
+        not cleared
+        and isinstance(train_score, (int, float))
+        and _underfits(metric, float(train_score), threshold)
     ):
+        # Gated on the miss, not just worded for it. An attempt whose validation score cleared
+        # the bar is not capacity-starved whatever its training score says, and prescribing
+        # *more* capacity there is the one direction that also widens a gap.
         failure_type = "underfitting"
         evidence = (
             f"train_{metric}={float(train_score):.4f}, {metric}={score:.4f} 모두 목표 {threshold}에 "
@@ -313,8 +382,11 @@ def heuristic_verdict(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
     elif _family_plateaued(history, state):
         failure_type = "wrong_model_family"
         evidence = (
-            f"같은 계열 모델로 {len(history) + 1}회 시도했으나 {metric}={score:.4f}로 목표 {threshold}에 "
-            f"정체됨."
+            f"같은 계열 모델로 {len(history) + 1}회 시도했으나 {metric}={score:.4f}에서 더 오르지 "
+            f"않음 — 목표 {threshold}는 이미 넘었고 남은 여유는 이 계열 안에 없어 보인다."
+            if cleared
+            else f"같은 계열 모델로 {len(history) + 1}회 시도했으나 {metric}={score:.4f}로 목표 "
+            f"{threshold}에 정체됨."
         )
     elif (limited := _ranking_limited(metric, metrics, threshold)) is not None:
         # After the plateau check, whose evidence spans attempts and is therefore stronger,
@@ -323,6 +395,17 @@ def heuristic_verdict(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
         failure_type = "wrong_model_family"
         evidence = limited
         direction_override = RANKING_LIMIT_DIRECTION
+    elif cleared:
+        # The branch --search-past-goal actually lands on most of the time. It has to be its
+        # own case rather than the miss wording with a different number: "목표에 미달" about a
+        # score above the bar is a false sentence, and it rides into the next planning prompt
+        # as this verdict's ``evidence``.
+        failure_type = "hyperparam"
+        evidence = (
+            f"{metric}={score:.4f}로 목표 {threshold}를 이미 넘었고 과적합 징후도 뚜렷하지 않다 — "
+            f"고칠 실패가 없으므로 남은 예산은 같은 계열 안에서 여유를 더 찾는 데 쓴다. best는 "
+            f"검증 최고로 고르므로 더 나쁜 다음 시도가 이 결과를 깎지 않는다."
+        )
     else:
         failure_type = "hyperparam"
         evidence = f"{metric}={score:.4f}로 목표 {threshold}에 미달하나 과적합/과소적합 징후는 뚜렷하지 않음."
