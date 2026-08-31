@@ -18,7 +18,7 @@ from ..dataset.caveats import describe_caveats
 from ..llm.client import LLMClient, LLMUnavailable, archive_prompt_only, render_prompt
 from ..scoring.goal import describe, goal_threshold
 from ..scoring.intervals import contains, describe_interval, interval_of
-from ..state import AutoMLState, build_attempt, goal_met
+from ..state import AutoMLState, build_attempt, describe_budget, goal_met, loop_budget_exhausted
 from .holdout import describe as describe_holdout
 from .model_selection import _history_digest, digest_attempt, task_of_state
 
@@ -26,6 +26,9 @@ STOP_REASON_LABELS = {
     "goal_reached": "목표 지표 달성",
     "max_iterations": "최대 반복 횟수 도달",
     "stalled": "연속 미개선(정체)으로 조기 종료",
+    # Only used when the clock is what ended a loop that was otherwise still going — see the
+    # ordering note in ``automl_agent.graph.route``.
+    "out_of_time": "시간 예산 소진으로 조기 종료",
     "unknown": "알 수 없는 사유",
 }
 
@@ -185,6 +188,8 @@ def stop_reason(state: AutoMLState, config: RunConfig) -> str:
         return "max_iterations"
     if int(state.get("stall_count", 0) or 0) >= config.stall_limit:
         return "stalled"
+    if loop_budget_exhausted(state):
+        return "out_of_time"
     return "unknown"
 
 
@@ -236,7 +241,11 @@ def fallback_report(
         "## 요약",
         "",
         f"{verdict_line} {best_line} 총 {iterations}회 시도했고(최대 {max_iterations}회), "
-        f"종료 사유는 **{STOP_REASON_LABELS.get(reason, reason)}**입니다.",
+        f"종료 사유는 **{STOP_REASON_LABELS.get(reason, reason)}**입니다. "
+        # Next to the iteration count rather than in a resources section, because the two
+        # budgets are read together: "2 of 5 iterations" on its own does not say why the other
+        # three went unspent.
+        f"시간 예산 사용: {describe_budget(dict(state.get('budget') or {}))}.",
         "",
         # In the summary and not only in 원인 분석, because "목표 지표 달성" at iteration 1 is
         # read as the loop having worked — and at iteration 1 the loop did not run.
@@ -446,6 +455,11 @@ def _write_artifacts(
             # the missing column: the five-dataset comparison could not tell that four of its
             # runs never entered the loop without re-deriving it from every attempt's ``critic``.
             "critic_runs": sum(1 for item in history if item.get("critic")),
+            # What the run actually cost against what it was given. Recorded because
+            # ``--time-budget-sec`` is now a bound the loop obeys, and a bound nobody can read
+            # afterwards is indistinguishable from the one that was ignored: a run that stopped
+            # at iteration 2 of 5 needs this to say whether the clock or the stall guard did it.
+            "budget": state.get("budget"),
             "best": state.get("best"),
             "holdout": state.get("holdout"),
             # Which model files this run still has. Without it, "iteration 3의 모델이 없다"

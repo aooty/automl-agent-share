@@ -10,6 +10,8 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Literal, TypedDict
 
+from .config import HOLDOUT_RESERVE_FRACTION, MIN_FIT_TIMEOUT_SEC
+
 # --------------------------------------------------------------------------- #
 # Vocabularies
 # --------------------------------------------------------------------------- #
@@ -99,6 +101,12 @@ class AutoMLState(TypedDict):
     # *not* merged into ``result``, because ``route`` and ``goal_met`` read that channel
     # and a held-back number that steered the loop would not be held back.
     holdout: dict
+    # ``{"spent_sec": 812.4, "total_sec": 3600.0}`` — the run's time budget, accounted for
+    # rather than assumed. Written by the graph's node wrapper (``graph._bind``) so every node
+    # is counted, including the ones that spend their time inside an LLM call. Cumulative and
+    # therefore resume-safe: ``--time-budget-sec`` bounds the seconds the run *works*, not the
+    # wall clock since it started, so an interrupted run resumes with what it already spent.
+    budget: dict
 
 
 # --------------------------------------------------------------------------- #
@@ -170,6 +178,110 @@ def build_attempt(state: AutoMLState, critic: dict | None = None) -> Attempt:
         result=dict(state.get("result") or {}),
         critic=dict(critic) if critic else None,
     )
+
+
+# --------------------------------------------------------------------------- #
+# The time budget, as arithmetic over the ``budget`` channel
+# --------------------------------------------------------------------------- #
+#
+# ``--time-budget-sec`` used to be handed to every training subprocess as *its own* timeout and
+# read by nothing else, so at the defaults (5 iterations, 3600s) the worst case was 21,600
+# seconds of fits and the flag bounded no run. These helpers are what make it a run budget: one
+# accrues, one decides the loop is over, two divide what is left, and the rest read the channel.
+#
+# Every one of them treats a missing or non-positive ``total_sec`` as "no budget" and answers
+# ``None``/``False``. A node invoked directly (the unit tests, a hand-edited checkpoint) then
+# behaves exactly as it did before this channel existed, and a budget that cannot be read never
+# becomes a budget of zero — being cut off by an absent number would be the worse failure.
+
+
+def accrue_budget(previous: dict | None, seconds: float, total_sec: float) -> dict:
+    """Add ``seconds`` to what the run has spent. The only writer of the channel."""
+    spent = float((previous or {}).get("spent_sec", 0.0) or 0.0) + max(0.0, float(seconds))
+    return {"spent_sec": round(spent, 3), "total_sec": float(total_sec)}
+
+
+def budget_total_sec(state: AutoMLState) -> float | None:
+    """The run's whole budget, or ``None`` when there is none to enforce."""
+    raw = (state.get("budget") or {}).get("total_sec")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+        return None
+    return float(raw)
+
+
+def budget_spent_sec(state: AutoMLState) -> float:
+    raw = (state.get("budget") or {}).get("spent_sec")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return 0.0
+    return max(0.0, float(raw))
+
+
+def loop_time_remaining_sec(state: AutoMLState) -> float | None:
+    """What the *loop* may still spend — the budget less holdout's reserved share.
+
+    The loop does not get the whole budget, because the number this run reports is the one
+    ``holdout`` measures after the loop stops. A budget the loop can spend down to zero is a
+    budget that deletes the run's own answer, and ``holdout`` failing on a timeout is recorded
+    as ``skipped`` — the report would then be written from selected-on validation scores with
+    nothing to correct them.
+    """
+    total = budget_total_sec(state)
+    if total is None:
+        return None
+    return total * (1.0 - HOLDOUT_RESERVE_FRACTION) - budget_spent_sec(state)
+
+
+def loop_budget_exhausted(state: AutoMLState) -> bool:
+    """Whether another iteration would spend time the run does not have."""
+    remaining = loop_time_remaining_sec(state)
+    return remaining is not None and remaining <= 0.0
+
+
+def fit_share_sec(state: AutoMLState) -> float | None:
+    """One fit's slice: what the loop has left, divided by the iterations that may still run.
+
+    Divided rather than handed over whole. Either choice bounds the run, but giving the whole
+    remainder to the next fit lets iteration 1 spend the run — and a loop that cannot reach
+    iteration 2 is not the thing this repository is measuring. The current iteration counts
+    itself, so at iteration 1 of 5 a fit gets a fifth and at iteration 5 it gets the rest.
+
+    Can come back non-positive: ``route`` checks the budget between iterations, and the
+    planning and model-selection calls that follow its decision also cost time. The caller
+    decides what to do with that (``nodes/training.py`` declines to start the fit) — clamping
+    it to something positive here would spend budget the run does not have.
+    """
+    remaining = loop_time_remaining_sec(state)
+    if remaining is None:
+        return None
+    iteration = int(state.get("iteration", 0) or 0)
+    max_iterations = int(state.get("max_iterations", 0) or 0)
+    left = max(1, max_iterations - iteration + 1)
+    share = remaining / left
+    return share if share <= 0 else max(MIN_FIT_TIMEOUT_SEC, share)
+
+
+def holdout_share_sec(state: AutoMLState) -> float | None:
+    """What is left for the final scoring pass, and never less than the reserve.
+
+    Never less, because a fit already in flight can overrun the loop's share — its own timeout
+    is a slice of what remained when it started, and the LLM calls around it are not bounded
+    at all. The reserve is what the loop was kept away from, so holdout gets it even when the
+    accounting says the run is already over.
+    """
+    total = budget_total_sec(state)
+    if total is None:
+        return None
+    reserve = total * HOLDOUT_RESERVE_FRACTION
+    return max(reserve, total - budget_spent_sec(state))
+
+
+def describe_budget(budget: dict) -> str:
+    """``2,913초 / 3,600초 (81%)`` for the console and the report."""
+    spent = float(budget.get("spent_sec", 0.0) or 0.0)
+    total = budget.get("total_sec")
+    if isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0:
+        return f"{spent:,.0f}초 / {float(total):,.0f}초 ({spent / float(total):.0%})"
+    return f"{spent:,.0f}초 (예산 없음)"
 
 
 def goal_met(result: dict, goal: dict) -> bool:

@@ -61,6 +61,7 @@ from .scoring.goal import (
     resolve_goal,
 )
 from .scoring.metrics import GOAL_METRICS
+from .state import describe_budget
 from .threads import thread_state
 
 RUN_CONFIG_FILE = "run_config.json"
@@ -391,6 +392,10 @@ def print_outcome(state: dict[str, Any], config: RunConfig) -> None:
     goal = dict(state.get("goal") or {}) or config_goal(config)[0]
     print(f"목표: {describe(goal)}")
     print(f"총 반복: {state.get('iteration')} / {state.get('max_iterations')}")
+    # Next to the iteration count, because they are the same kind of fact and one of them used
+    # to be unenforced: --time-budget-sec was a per-fit timeout, so the seconds a run spent were
+    # nowhere on this screen and nowhere in its artifacts.
+    print(f"시간 예산: {describe_budget(dict(state.get('budget') or {}))}")
     print(f"아티팩트: {config.run_dir}")
     report_path = config.run_dir / "report.md"
     if report_path.exists():
@@ -871,10 +876,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         dest="caveats",
         metavar="문장",
+        # ``%%`` and not ``%``: argparse runs every help string through ``%``-formatting, so a
+        # bare percent sign followed by anything that is not a format character raises
+        # ValueError — from inside ``--help``, which is where nobody has a workaround.
         help="집계만으로는 드러나지 않는 이 데이터의 주의사항. 카드에 기록되고 실행 시 모든 추론 "
         "프롬프트에 실립니다. 여러 번 쓸 수 있습니다. 원본을 직접 본 사람의 지식이 들어오는 "
-        "유일한 통로입니다 — 예: \"결측이 0%인 플래그인데도 뜻이 행 순서에 따라 바뀌니(앞 2%, "
-        "뒤 43%), 모델이 중증도가 아니라 차팅 체계를 학습할 수 있습니다\"",
+        "유일한 통로입니다 — 예: \"결측이 0%%인 플래그인데도 뜻이 행 순서에 따라 바뀌니(앞 2%%, "
+        "뒤 43%%), 모델이 중증도가 아니라 차팅 체계를 학습할 수 있습니다\"",
     )
     profile_parser.add_argument(
         "--group-column",
@@ -952,7 +960,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--time-budget-sec",
         type=int,
         default=DEFAULT_TIME_BUDGET_SEC,
-        help="학습 1회당 시간 예산(초). 초과 시 too_slow로 기록됩니다.",
+        help=(
+            "실행 하나가 일하는 초의 상한 (기본: 3600). 10%%는 holdout 몫으로 예약되고, "
+            "적합 하나의 몫은 남은 시간 ÷ 남은 반복 수입니다. 몫을 넘긴 적합은 too_slow, "
+            "예산을 다 쓰고 끊긴 실행은 out_of_time으로 기록됩니다."
+        ),
     )
     run_parser.add_argument(
         "--search-past-goal",

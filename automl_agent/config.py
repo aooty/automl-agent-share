@@ -72,6 +72,20 @@ DEFAULT_MAX_ITERATIONS = 5
 DRY_RUN_SCENARIOS = ("success", "fail", "oom", "stall", "slow", "crash")
 DEFAULT_TIME_BUDGET_SEC = 3600
 STALL_LIMIT = 2  # consecutive non-improving iterations before giving up
+
+# The share of ``--time-budget-sec`` the loop is kept away from, so the run's reported number
+# survives its own budget. ``holdout`` scores one already-fitted model over the test 20% — no
+# search, no fitting — which is cheap next to the fits that preceded it, so a tenth is generous
+# rather than tight. A fraction and not a constant because the caller sets the scale: a
+# ten-minute run and a ten-hour run do not need the same number of seconds held back.
+HOLDOUT_RESERVE_FRACTION = 0.1
+# The floor under one fit's slice of the remaining time. Only reached at the very end of a
+# budget, and it exists so the slice is a number a subprocess timeout can take: below a second
+# the spawn itself is most of it, and the attempt would be recorded as ``too_slow`` for the
+# spawn rather than for the fit. ``nodes/training.py`` declines to start a fit whose slice is
+# already gone, so this is not a way to spend past the budget.
+MIN_FIT_TIMEOUT_SEC = 1.0
+
 # Profiling reads the file once and computes column aggregates; it is bounded
 # separately from training because it runs before the loop's time budget applies.
 PROFILE_TIMEOUT_SEC = 900.0
@@ -302,7 +316,15 @@ class RunConfig:
 
     @property
     def train_timeout_sec(self) -> float:
-        """subprocess timeout. Exceeding it is recorded as ``too_slow``."""
+        """Ceiling for one training subprocess. Exceeding it is recorded as ``too_slow``.
+
+        The whole budget, and therefore only a bound on a *single* fit — no fit may outlast the
+        run it belongs to. It is not what the loop actually hands a fit: that is
+        :func:`automl_agent.state.fit_share_sec`, a slice of what remains, and this value is the
+        fallback for a call with no budget accounting in state (the unit tests, a hand-edited
+        checkpoint). Handing this number to each of five fits, which is what the loop did before
+        the ``budget`` channel existed, made ``--time-budget-sec 3600`` a 21,600-second run.
+        """
         return float(self.time_budget_sec)
 
 

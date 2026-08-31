@@ -43,6 +43,22 @@ belongs to the *baseline's* ranking and a better family beats it: ``m-llm7``'s b
 warning errs low by construction, and what it says — "the ranking itself has to improve" —
 is what that run did. See :mod:`automl_agent.scoring.ranking`.
 
+**One reachability check does move the bar, upward.** The ceiling comparison above was
+one-directional — it caught a bar above what the baseline's ranking permits at any cut, and
+said nothing about a bar that ranking already clears at *some* cut. The second case is a
+real defect in the same number: ``baseline`` is measured at the 0.5 cut, so a metric the
+0.5 cut treats badly hands the derivation a deflated starting point and the bar inherits the
+deficit. Measured on the bench cards, ``bank-marketing``'s ``balanced_accuracy`` bar of
+0.7465 sat under the 0.8400 that re-cutting the *same logreg* reaches — and both the
+rule-based fallback arm (val 0.7833) and the LLM arm (val 0.8780) cleared it, so the bar
+separated nothing. Validation scores because that is the channel ``route()`` compares the
+bar against; ``bench/runs/artifacts/{nollm,llm}-bank-marketing-seed42/history.json``.
+``auto`` now floors the bar at that number, which is the exception
+:data:`MIN_LIFT` already makes read one step further: a goal the baseline's own ranking
+already meets at some cut is not a goal either. Only ``balanced_accuracy`` has the identity
+this needs, and measurement says it is also the only metric whose cut deficit outruns the
+margin — see :func:`_raise_to_ranking_floor` for the table.
+
 **Resolution is disclosed too, on the same terms.** A bar can also be bad by being too
 *close*: derived from a baseline whose own 95% interval is wider than the margin, so the
 validation slice cannot resolve the difference the goal asks for. ``auto`` records that
@@ -211,6 +227,7 @@ def derive_threshold(
             # majority-class predictor already clears.
             threshold = chance + MIN_LIFT  # chance 우선 — CEILING으로 되돌리지 않는다
             reference["raised_to_clear_chance"] = True
+        threshold = _raise_to_ranking_floor(reference, card or {}, metric, threshold, baseline)
         if threshold > CEILING:
             # Kept honest rather than quietly lowered: this metric cannot separate a real
             # model from the majority class on this dataset, and ``describe`` says so.
@@ -225,6 +242,80 @@ def derive_threshold(
     if chance is not None:
         reference["chance"] = round(chance, 4)
     return round(threshold, 4), reference
+
+
+def _raise_to_ranking_floor(
+    reference: dict[str, Any],
+    card: dict[str, Any],
+    metric: str,
+    threshold: float,
+    baseline: float,
+) -> float:
+    """Raise the bar to the baseline ranking's own best cut, when the bar sits under it.
+
+    The mirror of :func:`_note_ranking_ceiling`, which was one-directional: it disclosed a
+    bar the baseline's ranking cannot reach at *any* cut and said nothing about a bar that
+    ranking already reaches at *some* cut. Both are the same defect in the same number,
+    because ``baseline`` is measured at the 0.5 cut — ``profile.py`` calls ``predict()``, like
+    every attempt does — so whatever the cut costs the baseline is subtracted from the bar
+    derived from it.
+
+    Measured on the four bench cards, that cost is ``balanced_accuracy``'s alone. The
+    threshold-dependent metrics all lose something at 0.5, but only here does the loss
+    outrun what the margin adds:
+
+    ======================  ==============  ============  ===========================
+    bank-marketing          0.5 cut         best cut       margin 0.25 adds
+    ======================  ==============  ============  ===========================
+    ``f1``                  0.4552          0.5834         0.1362 — covers the 0.1282
+    ``accuracy``            0.9026          0.9051         0.0244 — covers the 0.0025
+    ``balanced_accuracy``   0.6620          0.8400         0.0845 — under the 0.1780
+    ======================  ==============  ============  ===========================
+
+    The 0.5-cut column and the last one are recomputable from
+    ``bench/cards/bank-marketing-seed42.json`` — ``baseline.scores`` and
+    ``(1 - score) * 0.25``. The ``balanced_accuracy`` best cut is in the same card
+    (``baseline.balanced_accuracy_at_best_cut``, the ``(1 + ks) / 2`` this module reads). The
+    other two best cuts are **not**, and this module cannot derive them: ``card_ceiling``
+    returns ``None`` off ``SYMMETRIC_METRICS`` precisely because no identity exists there.
+    They were measured once off the baseline's own validation probabilities, and a reader who
+    wants to check them has to redo that rather than read a card.
+
+    Not a coincidence of this dataset. ``balanced_accuracy`` weights the two error rates
+    equally, which is both why the KS identity holds for it (see
+    :mod:`automl_agent.scoring.ranking`) and why the 0.5 cut costs most under imbalance — the
+    recall collapses to 0.3478 and half of that lands in the score. ``accuracy`` is carried
+    by the majority class, ``f1`` never counts the negatives. So the metric this fires for is
+    the metric that needs it, and ``card_ceiling`` returning ``None`` for the rest is the
+    right answer rather than a gap. ``precision`` and ``recall`` are excluded for a further
+    reason: their best cut is 1.0000 by predicting nothing or everything, so a floor there
+    would be degenerate rather than demanding.
+
+    **This moves the bar, which the rest of this module does not do.** The exception is the
+    one :data:`MIN_LIFT` already makes, in the same direction and for the same reason: a goal
+    a constant predictor already meets is not a goal, and neither is one that re-cutting the
+    baseline's own ranking already meets. Both only ever make the bar harder. What it costs
+    is that ``--margin`` stops moving the bar below the floor — 0.25 through 0.526 all
+    produce 0.8400 on bank-marketing — so the floored margin is disclosed and
+    :func:`describe` prints it, because a bar that ignores the flag it was given has to say so.
+
+    Clamped at :data:`CEILING` rather than allowed past it: a ranking with KS above 0.98
+    would otherwise push the bar over the clamp and collect the ``exceeds_ceiling``
+    disclosure, whose wording blames ``chance`` and would be false here.
+    """
+    _ks, ceiling = card_ceiling(card, metric)
+    if ceiling is None or threshold >= ceiling:
+        return threshold
+    reference["raised_to_ranking_floor"] = True
+    reference["ranking_floor"] = ceiling
+    # The bar this card's margin actually produced, kept because it is the only number in the
+    # disclosure the reader cannot recompute from the others — and because a run whose bar was
+    # moved should be able to say what it was moved from.
+    reference["margin_bar"] = round(threshold, 4)
+    floored = passable_margin(baseline, ceiling)
+    if floored is not None:
+        reference["floored_margin"] = floored
+    return min(ceiling, CEILING)
 
 
 def _note_ranking_ceiling(
@@ -476,6 +567,8 @@ def describe(goal: dict[str, Any]) -> str:
             detail = f"기준선 {baseline} + 남은 여유의 {float(margin):.0%}"
         if reference.get("raised_to_clear_chance"):
             detail += ", chance 수준을 넘도록 상향"
+        if reference.get("raised_to_ranking_floor"):
+            detail += ", 기준선 랭킹의 최적 컷을 넘도록 상향"
         if reference.get("lowered_to_clear_chance"):
             detail += ", chance보다 낮도록 하향"
         chance = reference.get("chance")
@@ -496,6 +589,23 @@ def describe(goal: dict[str, Any]) -> str:
                 f"실제 허용 오차를 알고 있다면 --goal-mode fixed --threshold <{metric} 값>으로 "
                 "직접 지정하십시오"
             )
+        if reference.get("raised_to_ranking_floor"):
+            # The counterpart of the ``exceeds_ranking_ceiling`` line below, and it has to
+            # carry two numbers the reader cannot recompute: what the margin would have
+            # produced, and why the flag they passed stopped mattering. Silently ignoring
+            # ``--margin`` is the failure mode this wording exists to prevent.
+            line += (
+                f" — margin이 낸 바는 {reference.get('margin_bar')}였지만, 같은 기준선의"
+                f" 랭킹을 최적 컷에서 자르면 {reference.get('ranking_floor')}"
+                f" (KS {reference.get('ks')})입니다: 기준선을 다시 자른 것이 이미 넘는 점수는"
+                " 목표가 아니므로 그 값으로 올렸습니다"
+            )
+            floored = reference.get("floored_margin")
+            if floored is not None:
+                line += (
+                    f". 이 카드에서 --margin {floored} 이하는 모두 같은 바를 냅니다 —"
+                    " 더 어려운 목표를 원하면 그보다 크게 주십시오"
+                )
         if reference.get("exceeds_ranking_ceiling"):
             # A different kind of out of reach from the one above: not the metric's own
             # limit but this ranking's. Worth naming as such — the fix is a better

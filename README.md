@@ -116,7 +116,8 @@ python -m automl_agent.main graph --out graph.png
 | `--metric` | 분류 `f1` `accuracy` `balanced_accuracy` `precision` `recall` `roc_auc` `pr_auc` / 회귀 `r2` `mae` `rmse`. 목록은 [metrics.py](automl_agent/scoring/metrics.py) 한 곳에서 나옵니다 |
 | `--goal-mode {auto,fixed}` | 기본 `auto`(기준선에서 도출). `--threshold`를 주면 `fixed`로 간주 |
 | `--threshold` / `--margin` | 각각 `fixed`의 목표값 / `auto`가 요구할 남은 여유의 비율(기본 `0.25`). 모드와 어긋나면 거부 |
-| `--max-iterations` / `--time-budget-sec` / `--seed` | 반복 예산 |
+| `--max-iterations` / `--seed` | 반복 상한 / 시드 |
+| `--time-budget-sec` | **실행 하나가 일하는 초의 상한**(기본 `3600`). 학습 하나의 timeout이 아니라 모든 노드의 소요를 누적한 값입니다 — 10%는 holdout 몫으로 예약되고, 적합 하나의 몫은 `남은 시간 ÷ 남은 반복 수`입니다. 몫을 넘긴 적합은 `too_slow`, 예산을 다 쓰고 끊긴 루프는 `out_of_time` |
 | `--search-past-goal` | 목표를 넘어도 멈추지 않고 예산을 다 씁니다. `auto`의 바는 기준선에서 도출되므로 첫 시도가 넘는 일이 흔하고, 그러면 Critic이 한 번도 안 돕니다 — 진단·재계획 경로를 실제로 돌려 보려면 이 플래그입니다. 바를 올리지도, 우승자 규칙(val 최고)을 바꾸지도 않습니다 |
 | `--no-llm` | 학습은 **실제로** 하고 추론 노드만 규칙 기반 폴백. 자격 증명 불필요 |
 | `--dry-run` / `--scenario` | LLM과 학습을 **모두** 모킹. `--scenario {success,fail,oom,stall,slow,crash}` |
@@ -201,6 +202,14 @@ $files | Select-String -Pattern "<파일명>"    # 출력 없음이 정상
 - `chance`(다수 클래스 예측기)보다 낮은 바는 `chance + 0.02`까지 **끌어올립니다.**
   상한 `0.99`도 있는데, **상한을 먼저 걸고 chance를 나중에 봅니다** — 순서가 반대일 때
   다수 클래스 99.5% 코호트에서 목표가 상수 예측기가 이미 넘는 값으로 되돌아갔습니다.
+- **`balanced_accuracy`에서는 기준선 랭킹 자신의 최적 컷까지도 끌어올립니다.** 기준선은
+  0.5 컷에서 측정되므로(실행기는 항상 `predict()`를 부릅니다) 그 컷이 보는 손해만큼 바가
+  덜 나오고, 그러면 **같은 logreg를 다시 자른 것이 이미 넘는 점수**가 목표가 됩니다. 그건
+  목표가 아니라서 KS로 계산한 그 값까지 올립니다. 이 지표만 그렇습니다 — 다른 지표는
+  margin이 붙는 폭이 컷 손해보다 크고, `precision`·`recall`은 아무것도/전부 예측해서
+  최적 컷이 1.0이라 바닥이 무의미합니다. **바가 올라가면 그 밑의 `--margin`은 아무것도
+  바꾸지 않으므로**, 목표 줄이 margin이 낸 바와 같은 바를 내는 `--margin` 상한을 함께
+  출력합니다. 조용히 무시된 플래그를 남기지 않기 위해서입니다.
 - 보정은 목표를 **더 어렵게만** 만듭니다. 바가 도달 불가가 되면 조용히 낮추지 않고
   `(도달 불가)`로 표시하며 `--metric balanced_accuracy` 같은 대안을 말합니다.
 - `mae`·`rmse`에는 `fixed` **기본값이 없습니다.** 정답 열의 단위로 나오는 지표에
@@ -278,15 +287,22 @@ $files | Select-String -Pattern "<파일명>"    # 출력 없음이 정상
   있는지 랭킹에 있는지 구분해 줍니다. 실행기는 항상 `predict()`를 부르므로 도달한
   점수로 인용하면 안 됩니다.
 
-## 루프가 끝나는 세 가지 경우 — `route()`
+## 루프가 끝나는 네 가지 경우 — `route()`
 
 1. 목표 지표 달성 (`--search-past-goal`이면 이 조건만 해제됩니다)
 2. `iteration >= max_iterations`
 3. 정체: `stall_count >= 2` (개선 없는 반복 연속 2회)
+4. 시간 예산 소진: `--time-budget-sec`에서 holdout 몫을 뺀 나머지를 다 씀
 
 2·3번이 함께 무한 루프를 불가능하게 만듭니다 — `--search-past-goal`도 예산을 **더 쓸
 수는 있어도 넘길 수는 없습니다.** 목표를 못 채워도 `best` 스냅샷을 근거로 보고서는
 **반드시** 작성됩니다.
+
+**4번은 맨 마지막에 검사합니다.** 순서가 종료 사유의 *이름*을 정하기 때문입니다. 앞의
+셋은 시계가 멈춰 있었어도 이 실행을 끝냈을 조건들이고, `out_of_time`은 **그 밖에도 계속
+갈 수 있었던 루프를 시계가 끊은 경우**만 가리킵니다. 쓴 예산은 콘솔과 `history.json`의
+`budget` 블록에 남으므로, 반복 2/5에서 멈춘 실행이 시계 때문인지 정체 때문인지 사후에
+구분할 수 있습니다.
 
 1번이 먼저 검사되므로 **첫 시도가 바를 넘으면 `critic`은 한 번도 실행되지
 않습니다.** 진단·재계획 경로가 돌지 않은 실행이고, 보고서와 `history.json`의

@@ -65,7 +65,7 @@ from ..privacy import public_result
 from ..scoring.intervals import CI_LEVEL, contains, interval_of
 from ..scoring.metrics import MINIMIZE, direction_of
 from ..scoring.splits import TEST_FRACTION
-from ..state import AutoMLState
+from ..state import AutoMLState, holdout_share_sec
 
 # What the report prints when there is nothing to measure. Keys, not sentences, so the
 # report can phrase them and the CLI can branch on them.
@@ -119,9 +119,11 @@ def holdout(state: AutoMLState, *, config: RunConfig) -> dict:
             encoding="utf-8",
             errors="replace",
             env=utf8_env(),
-            # One pass over 20% of the rows with an already-fitted model, so the training
-            # budget is generous here rather than tight.
-            timeout=config.train_timeout_sec,
+            # One pass over 20% of the rows with an already-fitted model, so the share held
+            # back for it is generous rather than tight — and it is held back on purpose. The
+            # loop is stopped before it can spend this, because a run whose budget deleted its
+            # own held-out score would report the numbers it selected on and nothing else.
+            timeout=holdout_share_sec(state) or config.train_timeout_sec,
             check=False,
         )
         console = (completed.stdout or "") + (completed.stderr or "")

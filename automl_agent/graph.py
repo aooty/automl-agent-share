@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
+import time
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -27,7 +28,7 @@ from .config import (
     STALL_LIMIT,
     RunConfig,
 )
-from .state import AutoMLState, goal_met
+from .state import AutoMLState, accrue_budget, goal_met, loop_budget_exhausted
 
 Route = Literal["report", "critic"]
 
@@ -37,15 +38,25 @@ def route(
 ) -> Route:
     """Decide whether to write the report or to critique and replan.
 
-    Terminates on any of three conditions:
+    Terminates on any of four conditions:
 
     1. the goal metric is reached — unless ``search_past_goal``,
     2. the iteration budget is exhausted,
-    3. the run has stalled (``stall_count`` consecutive non-improving iterations).
+    3. the run has stalled (``stall_count`` consecutive non-improving iterations),
+    4. the time budget is exhausted (``--time-budget-sec``, less holdout's reserved share).
 
     Anything else continues the loop through the critic. Conditions 2 and 3 are what make an
     infinite loop impossible, and they hold with or without ``search_past_goal`` — which is why
     that flag can only ever cost iterations, never unbound them.
+
+    Condition 4 is checked *last*, and the order is the whole point of it. The first three are
+    conditions the loop reached on its own terms — it found what it was looking for, or it spent
+    what it was given, or it stopped moving — and any of them would have ended this run with the
+    clock stopped. The budget is only the reason a run ended when it is the thing that cut a loop
+    short that was otherwise still going, so ``out_of_time`` in the report names exactly that and
+    nothing else. Checked here at all because it was checked nowhere: ``--time-budget-sec`` was
+    handed to each training subprocess as its own timeout and read by nothing else, so five
+    iterations at the 3600s default bounded the run at 21,600 seconds.
 
     On condition 1 being checked first, and what ``search_past_goal`` changes. In ``auto`` mode
     the bar is derived from the card's baseline, so a first attempt that clears it ends the run
@@ -72,6 +83,9 @@ def route(
         return "report"
 
     if int(state.get("stall_count", 0) or 0) >= stall_limit:
+        return "report"
+
+    if loop_budget_exhausted(state):
         return "report"
 
     return "critic"
@@ -122,10 +136,32 @@ def _bind(node: Callable[..., dict], config: RunConfig) -> NodeFn:
     A plain ``partial(node, config=config)`` would still expose a parameter named
     ``config``, which LangGraph reads as a request for its own ``RunnableConfig``
     and warns about. Wrapping keeps the node's own naming intact.
+
+    The run's clock is kept here too, for one reason: this is the only place every node passes
+    through. A budget that counts the nodes which remembered to report their own time is not a
+    budget, and the nodes whose time is easiest to forget are the reasoning ones — an LLM call
+    that retries through the backoff can cost minutes while measuring nothing itself. So the
+    wrapper times the call and folds the seconds into the ``budget`` channel, and a node stays a
+    function of ``state`` that knows nothing about the clock.
+
+    ``monotonic`` rather than wall clock because the number being accumulated is a duration; a
+    system clock adjustment mid-fit must not hand the run more budget or less. The accumulated
+    total is what survives in the checkpoint, so ``resume`` continues the budget instead of
+    restarting it — and instead of counting the hours the process was not running.
+
+    A node that returns its own ``budget`` keeps it. Nothing does; the check is there so that if
+    something ever needs to (a node that corrects the accounting for time it knows was not
+    spent), the wrapper does not silently overwrite it.
     """
 
     def wrapped(state: AutoMLState) -> dict:
-        return node(state, config=config)
+        started = time.monotonic()
+        update = node(state, config=config)
+        if isinstance(update, dict) and "budget" not in update:
+            update["budget"] = accrue_budget(
+                state.get("budget"), time.monotonic() - started, config.time_budget_sec
+            )
+        return update
 
     wrapped.__name__ = getattr(node, "__name__", "node")
     return wrapped

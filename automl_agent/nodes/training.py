@@ -30,7 +30,7 @@ from ..dataset.targets import DEFAULT_TARGET_MISSING_POLICY, TARGET_MISSING_POLI
 from ..privacy import public_result, register_private
 from ..scoring.goal import goal_threshold
 from ..scoring.metrics import TASK_CLASSIFICATION, TASK_REGRESSION, card_task
-from ..state import AutoMLState
+from ..state import AutoMLState, fit_share_sec
 
 
 def training(state: AutoMLState, *, config: RunConfig) -> dict:
@@ -40,6 +40,17 @@ def training(state: AutoMLState, *, config: RunConfig) -> dict:
         # Through the same filter as a real result, so the mocked path cannot drift
         # into a different shape than the one the Critic sees in production.
         return {"result": public_result(_mocked_result(state, config, iteration))}
+
+    # What this fit is allowed: its slice of the run's remaining time, not the whole budget.
+    # ``None`` when no budget is being accounted for, and then the old ceiling applies.
+    share = fit_share_sec(state)
+    if share is not None and share <= 0:
+        # Nothing is spawned. ``route`` checks the budget between iterations, but the planning
+        # and model-selection calls after its decision cost time too, so the budget can run out
+        # in the gap. Spending a subprocess to have it killed a second later would record the
+        # spawn as the slow thing; this records the reason, and ``route`` ends the run next.
+        return {"result": public_result(_out_of_time(iteration))}
+    timeout = config.train_timeout_sec if share is None else min(share, config.train_timeout_sec)
 
     work_dir = config.iteration_dir(iteration)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -82,7 +93,7 @@ def training(state: AutoMLState, *, config: RunConfig) -> dict:
             encoding="utf-8",
             errors="replace",
             env=utf8_env(),
-            timeout=config.train_timeout_sec,
+            timeout=timeout,
             check=False,
         )
         console = (completed.stdout or "") + (completed.stderr or "")
@@ -111,7 +122,7 @@ def training(state: AutoMLState, *, config: RunConfig) -> dict:
             "train_time_sec": round(elapsed, 3),
             "status": "error",
             "error_type": "too_slow",
-            "log_tail": _tail(console) or f"exceeded the time budget of {config.train_timeout_sec:.0f}s",
+            "log_tail": _tail(console) or f"exceeded this fit's share of the time budget ({timeout:.0f}s)",
         }
     elif result is None:
         # No parsable result file: the child died before it could write one.
@@ -341,6 +352,35 @@ def _unwritable(iteration: int, path: Path, exc: OSError) -> dict[str, Any]:
         "error_type": "write_failed",
         "returncode": -1,
         "log_tail": f"could not write {path.name}: {exc}",
+    }
+
+
+def _out_of_time(iteration: int) -> dict[str, Any]:
+    """The attempt the run budget had no room for, shaped like every other failed attempt.
+
+    ``too_slow`` and not a name of its own, because from the loop's side it is the same fact as a
+    fit that overran: this iteration produced no score and the reason is the clock.
+    ``critic.ERROR_TYPE_MAP`` already routes that to a diagnosis about cost, and the Critic will
+    not run again anyway — ``route`` ends the run on the same budget this checked.
+
+    ``train_time_sec`` is 0.0 and that is the honest value: nothing was fitted. An attempt that
+    reads as zero-cost and failed is exactly what happened, and it is how a reader tells this
+    apart from the timeout case, where the seconds were really spent.
+    """
+    print(
+        f"  [training] iteration {iteration}: 시간 예산이 이 시도를 시작하기 전에 소진됐습니다 "
+        "— 학습을 시작하지 않았습니다.\n"
+        "    --time-budget-sec를 올리거나 --max-iterations를 줄이십시오 (반복마다 남은 시간을 "
+        "나눠 씁니다)"
+    )
+    return {
+        "metrics": {},
+        "train_time_sec": 0.0,
+        "wall_time_sec": 0.0,
+        "status": "error",
+        "error_type": "too_slow",
+        "returncode": -1,
+        "log_tail": "the run's time budget was exhausted before this fit started; nothing was spawned",
     }
 
 
