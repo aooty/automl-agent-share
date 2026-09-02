@@ -62,8 +62,12 @@ MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "max_depth",
             "max_leaf_nodes",
             "l2_regularization",
+            "class_weight",
+            "early_stopping",
         ],
-        "notes": "strong default for tabular data; also accepts n_estimators as an alias of max_iter",
+        "notes": "strong default for tabular data; also accepts n_estimators as an alias of "
+        "max_iter. `early_stopping` defaults to 'auto', which is *on* above 10k rows, so "
+        "saying nothing about it does not mean fitting on every train row",
     },
     {
         "id": "random_forest",
@@ -90,14 +94,31 @@ MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "id": "xgboost",
         "family": "gbdt",
         "cost": 4,
-        "params": ["n_estimators", "learning_rate", "max_depth", "reg_lambda", "subsample"],
-        "notes": "requires the xgboost package",
+        "params": [
+            "n_estimators",
+            "learning_rate",
+            "max_depth",
+            "reg_lambda",
+            "subsample",
+            "scale_pos_weight",
+            "early_stopping_rounds",
+        ],
+        "notes": "requires the xgboost package. `early_stopping_rounds` needs nothing else "
+        "from the plan — the executor holds its own stopping slice back and supplies the eval "
+        "set; `eval_set` and `callbacks` are the two keys it refuses",
     },
     {
         "id": "mlp",
         "family": "neural",
         "cost": 5,
-        "params": ["hidden_layer_sizes", "alpha", "learning_rate_init", "batch_size", "max_iter"],
+        "params": [
+            "hidden_layer_sizes",
+            "alpha",
+            "learning_rate_init",
+            "batch_size",
+            "max_iter",
+            "early_stopping",
+        ],
         "notes": "highest capacity available here, and the most likely to hit the memory budget",
     },
     {
@@ -178,8 +199,11 @@ REGRESSION_REGISTRY: tuple[dict[str, Any], ...] = (
             "max_depth",
             "max_leaf_nodes",
             "l2_regularization",
+            "early_stopping",
         ],
-        "notes": "strong default for tabular data; also accepts n_estimators as an alias of max_iter",
+        "notes": "strong default for tabular data; also accepts n_estimators as an alias of "
+        "max_iter. `early_stopping` defaults to 'auto', which is *on* above 10k rows, so "
+        "saying nothing about it does not mean fitting on every train row",
     },
     {
         "id": "random_forest",
@@ -206,14 +230,30 @@ REGRESSION_REGISTRY: tuple[dict[str, Any], ...] = (
         "id": "xgboost",
         "family": "gbdt",
         "cost": 4,
-        "params": ["n_estimators", "learning_rate", "max_depth", "reg_lambda", "subsample"],
-        "notes": "requires the xgboost package",
+        "params": [
+            "n_estimators",
+            "learning_rate",
+            "max_depth",
+            "reg_lambda",
+            "subsample",
+            "early_stopping_rounds",
+        ],
+        "notes": "requires the xgboost package. `early_stopping_rounds` needs nothing else "
+        "from the plan — the executor holds its own stopping slice back and supplies the eval "
+        "set; `eval_set` and `callbacks` are the two keys it refuses",
     },
     {
         "id": "mlp",
         "family": "neural",
         "cost": 5,
-        "params": ["hidden_layer_sizes", "alpha", "learning_rate_init", "batch_size", "max_iter"],
+        "params": [
+            "hidden_layer_sizes",
+            "alpha",
+            "learning_rate_init",
+            "batch_size",
+            "max_iter",
+            "early_stopping",
+        ],
         "notes": "highest capacity available here, and the most likely to hit the memory budget",
     },
     {
