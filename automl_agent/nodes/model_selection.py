@@ -105,7 +105,9 @@ MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         ],
         "notes": "requires the xgboost package. `early_stopping_rounds` needs nothing else "
         "from the plan — the executor holds its own stopping slice back and supplies the eval "
-        "set; `eval_set` and `callbacks` are the two keys it refuses",
+        "set; `eval_set` and `callbacks` are the two keys it refuses. `scale_pos_weight` is "
+        "**binary only** — xgboost ignores it on a multiclass objective, so above two classes "
+        "the executor drops it and the attempt records that in `dropped_hyperparams`",
     },
     {
         "id": "mlp",
@@ -119,7 +121,9 @@ MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "max_iter",
             "early_stopping",
         ],
-        "notes": "highest capacity available here, and the most likely to hit the memory budget",
+        "notes": "highest capacity available here, and the most likely to hit the memory "
+        "budget. Its `early_stopping` is a boolean only — the `'auto'` spelling belongs to "
+        "hist_gbdt, and the executor drops it here rather than letting `fit` raise on it",
     },
     {
         "id": "svc",
@@ -254,7 +258,9 @@ REGRESSION_REGISTRY: tuple[dict[str, Any], ...] = (
             "max_iter",
             "early_stopping",
         ],
-        "notes": "highest capacity available here, and the most likely to hit the memory budget",
+        "notes": "highest capacity available here, and the most likely to hit the memory "
+        "budget. Its `early_stopping` is a boolean only — the `'auto'` spelling belongs to "
+        "hist_gbdt, and the executor drops it here rather than letting `fit` raise on it",
     },
     {
         "id": "svr",
@@ -301,6 +307,20 @@ LIMITS: dict[str, tuple[float, float]] = {
     # same guess this repo refuses to make about a default `mae` bar.
     "epsilon": (0.0, 1e9),
     "C": (1e-4, 1e4),
+    # xgboost's half of the imbalance lever, bounded on the same terms as the
+    # ``class_weight`` map below — it is the same request against a different estimator, and
+    # an unbounded one degenerates every metric. The floor is 1e-3 rather than 0 because 0
+    # weights the positive class *out*, which is not a weaker version of what was asked for.
+    "scale_pos_weight": (1e-3, 1000.0),
+    # 0 means "no early stopping" and ``fit_estimator`` says so in the log; a negative round
+    # count means the same thing, so it lands there instead of on a surprise. The ceiling is
+    # only a runaway guard: a patience above the round count never bites.
+    "early_stopping_rounds": (0, 1000),
+    # How much of *train* the self-validating estimators hold back once early stopping is on.
+    # sklearn accepts anything in (0, 1), so an unclamped 0.9 fits on a tenth of the rows the
+    # log announced. The ceiling is half: past that the stop is deciding on more rows than the
+    # fit sees, which is not a tuning choice any card here justifies.
+    "validation_fraction": (0.01, 0.5),
     "batch_size": (1, 8192),
     "n_neighbors": (1, 200),
     "subsample": (0.05, 1.0),
@@ -309,6 +329,18 @@ LIMITS: dict[str, tuple[float, float]] = {
 }
 
 ALLOWED_STRINGS = {"class_weight", "weights", "kernel", "precision", "solver", "penalty"}
+
+# Keys whose string form has exactly one spelling that means anything. A key list is too
+# coarse for these: ``early_stopping`` is a boolean everywhere except for the one string
+# sklearn also accepts, and the prompt quotes that string — ``capabilities`` renders
+# ``early_stopping='auto'`` when it tells a plan which side of the 10k-row boundary it is on,
+# and the registry's own notes repeat it. Before this map the quoted value came back as a
+# proposal and was dropped *here*, ahead of the config, so it never reached the executor and
+# never showed up in ``dropped_hyperparams`` either — the same silence the weight-map branch
+# below exists to end. Which estimators actually take the string is a fact about them, so the
+# executor decides that (``scripts/train.py::STRING_EARLY_STOPPING``); this map only stops
+# the spellings that mean nothing anywhere.
+ALLOWED_STRING_VALUES: dict[str, frozenset[str]] = {"early_stopping": frozenset({"auto"})}
 
 # ``class_weight`` is the one key that may also arrive as a mapping, because it is the
 # only imbalance lever the executor has and ``'balanced'`` is not its optimum: on the
@@ -499,7 +531,10 @@ def sanitise_hyperparams(raw: Any) -> dict[str, Any]:
             clamped = min(max(float(value), low), high)
             cleaned[key] = int(clamped) if isinstance(value, int) and float(clamped).is_integer() else clamped
         elif isinstance(value, str):
-            if key in ALLOWED_STRINGS:
+            if key in ALLOWED_STRING_VALUES:
+                if value in ALLOWED_STRING_VALUES[key]:
+                    cleaned[key] = value
+            elif key in ALLOWED_STRINGS:
                 cleaned[key] = value
         elif isinstance(value, dict) and key in WEIGHT_MAP_KEYS:
             mapping = _weight_map(value)

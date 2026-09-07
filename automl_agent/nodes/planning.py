@@ -76,8 +76,26 @@ def plan_schema(task: str | None = None) -> dict[str, Any]:
 # Order the deterministic planner walks when told the family itself is wrong.
 FAMILY_ROTATION = ("gbdt", "bagging", "linear", "neural", "tree", "kernel", "instance")
 RESOURCE_FAILURES = {"oom", "too_slow"}
-# Settings the executor honours for every model, on top of the registry's own params.
-EXECUTOR_PARAMS = frozenset({"train_subsample", "precision", "batch_size", "class_weight"})
+# Settings the executor honours on top of the registry's own params, so that a retune of only
+# these still reads as a new plan. They are here rather than on the menu on purpose: the
+# registry is rendered into the prompt, and widening it widens what the LLM is invited to tune.
+#
+# The last two are the early-stopping pair. Neither is advertised, and both change what the fit
+# sees once the stop is on — ``validation_fraction`` decides how much of train is held back
+# (``capabilities`` quotes the number to the plan when it announces the ``'auto'`` boundary) and
+# ``n_iter_no_change`` is the patience that decides when it bites. Without them a plan whose one
+# change is "hold back less" fingerprints identically to the attempt it is trying to differ
+# from, and the novelty guard sends it to a family swap it did not ask for.
+EXECUTOR_PARAMS = frozenset(
+    {
+        "train_subsample",
+        "precision",
+        "batch_size",
+        "class_weight",
+        "validation_fraction",
+        "n_iter_no_change",
+    }
+)
 
 
 def planning(state: AutoMLState, *, config: RunConfig) -> dict:
@@ -321,9 +339,11 @@ def enforce_novelty(
         return plan
     # What the executor is known to apply to each model, from its own report rather than from
     # the advertised menu. ``registry`` publishes a curated list — widening it would also widen
-    # what the prompt invites the LLM to tune — but ``min_samples_leaf``, ``early_stopping`` and
-    # ``min_child_weight`` are all applied and none are on it, so a retune of only those read as
-    # a repeat too. ``applied_hyperparams`` is the executor saying what it took.
+    # what the prompt invites the LLM to tune — and keys off it read as a repeat when they are
+    # the only change. ``EXECUTOR_PARAMS`` covers the ones worth naming ahead of time;
+    # ``applied_hyperparams`` covers the rest, because it is the executor saying what it took.
+    # ``min_child_weight`` is the example that only this half catches. (``early_stopping`` used
+    # to be one too — it is on the menu now, for the reason ``bench/REGISTRY-GAP.md`` records.)
     applied_keys: dict[str, set[str]] = {}
     for item in history:
         applied = (item.get("result") or {}).get("applied_hyperparams")

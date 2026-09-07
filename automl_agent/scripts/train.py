@@ -478,6 +478,22 @@ UNSUPPORTED_BY_HARNESS: dict[str, tuple[str, ...]] = {
     "xgboost": ("eval_set", "callbacks"),
 }
 
+# ``early_stopping`` is a key both of these take, but only one of them takes it as a string.
+# sklearn's HistGradientBoosting pair resolves ``'auto'`` against the row count; MLP's own
+# constraint is boolean, so the same spelling raises inside ``fit`` — after the pipeline is
+# built and the memory guard has passed, which costs the whole iteration. The prompt quotes
+# ``'auto'`` (``capabilities`` renders the boundary it decides), so a plan repeating the value
+# back is an ordinary thing to happen and belongs in ``dropped_hyperparams``, not in a
+# traceback. Key-level lists cannot express this, which is why it is its own name.
+STRING_EARLY_STOPPING = frozenset({"hist_gbdt"})
+
+# Levers whose *objective* has to be binary for them to do anything. xgboost accepts
+# ``scale_pos_weight`` against ``multi:softprob`` and then says "Parameters: {
+# "scale_pos_weight" } are not used" on stderr — while ``get_params`` still reports it, so
+# without this the attempt records it under ``applied_hyperparams`` and a plan can credit a
+# cut it never moved. The registry's notes say the same thing on the way in.
+BINARY_ONLY_PARAMS = frozenset({"scale_pos_weight"})
+
 
 def weight_map(value: dict[Any, Any], labels: Sequence[Any] | None) -> dict[int, float] | None:
     """A ``class_weight`` mapping sklearn will accept, or ``None`` when it will not.
@@ -712,6 +728,20 @@ def build_estimator(
                 dropped.append(raw_key)
                 continue
             value = repaired
+        if param == "early_stopping" and isinstance(value, str) and key not in STRING_EARLY_STOPPING:
+            log.write(
+                f"dropped early_stopping={value!r}: {key} takes this as a boolean only, and "
+                "the string would raise inside fit"
+            )
+            dropped.append(raw_key)
+            continue
+        if param in BINARY_ONLY_PARAMS and labels is not None and len(set(labels)) > 2:
+            log.write(
+                f"dropped {raw_key}={value!r}: {len(set(labels))} classes, and this lever only "
+                "acts on a binary objective"
+            )
+            dropped.append(raw_key)
+            continue
         if param in accepted:
             if param == "hidden_layer_sizes" and isinstance(value, list):
                 value = tuple(value)
@@ -901,6 +931,23 @@ def fit_estimator(
     final = pipeline.steps[-1][1]
     rounds = getattr(final, "early_stopping_rounds", None)
     if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds <= 0:
+        if isinstance(rounds, int) and not isinstance(rounds, bool):
+            # Said out loud on the same terms as the too-few-rows branch below. A round count
+            # of 0 reaches here from a plan that meant "no early stopping", and a negative one
+            # from a config that skipped ``sanitise_hyperparams`` — a hand-edited file or
+            # ``bench/random_search.py``. Both fit on every train row, a fact the record has to
+            # carry because ``applied_hyperparams`` still shows the number that was asked for.
+            log.write(
+                f"early_stopping_rounds={rounds} not applied: a round count of {rounds} is not "
+                "a stop, so the fit sees every train row"
+            )
+            # And cleared off the estimator, not just skipped here: xgboost installs its
+            # early-stopping callback for any non-zero count, negatives included, and then raises
+            # ``Must have at least 1 validation dataset for early stopping`` inside ``fit`` —
+            # which is the whole iteration, for a number this branch has already decided to
+            # ignore. 0 is falsy there and would survive, but one rule for the branch is cheaper
+            # than a second condition that encodes which counts one library tolerates.
+            final.set_params(early_stopping_rounds=None)
         pipeline.fit(x, y)
         return {}
 
