@@ -130,12 +130,20 @@ RANKING_LIMIT_DIRECTION = (
 # the weight that closes it, so with one observation the branch names a direction and one
 # step, and the loop re-measures. Once two observations straddle the crossing, the step is
 # replaced by interpolation between them — see ``_interpolated_weight``.
+#
+# The step applies from the second rung on. The first one comes from the card instead — see
+# ``_first_rung`` for the measurement that moved it.
 WEIGHT_STEP = 1.5
 
 # Bounded by what the sanitiser will actually pass through: a weight outside
 # ``WEIGHT_RANGE`` is dropped before it reaches the executor, so prescribing one would
 # spend the next iteration on a map that never gets applied.
 MIN_WEIGHT, MAX_WEIGHT = WEIGHT_RANGE
+
+# No weighting at all. ``_weight_value`` returns exactly this for an absent ``class_weight``
+# and for a map that puts the same number on both codes, and both are the same thing to the
+# estimator, so both take the first rung.
+UNWEIGHTED = 1.0
 
 # Training-level error types map straight through; no inference needed.
 ERROR_TYPE_MAP: dict[str, str] = {
@@ -1017,9 +1025,24 @@ def _operating_point_skew(
     weight = _positive_weight(state)
     # One step by default; the interpolation replaces it as soon as there is a bracket, and
     # is skipped if it rounds to where the weight already is — a no-op prescription would
-    # spend an iteration re-measuring the same point.
-    proposed = _clamp_weight(weight * (WEIGHT_STEP if skew < 0 else 1 / WEIGHT_STEP))
+    # spend an iteration re-measuring the same point. From an unweighted attempt the card
+    # names the rung instead of the step — see ``_first_rung``.
+    from_nothing = skew < 0 and weight == UNWEIGHTED
+    proposed = _clamp_weight(
+        _first_rung(state)
+        if from_nothing
+        else weight * (WEIGHT_STEP if skew < 0 else 1 / WEIGHT_STEP)
+    )
     how = ""
+    if from_nothing and proposed != _clamp_weight(WEIGHT_STEP):
+        # Where the number came from, because the next attempt is planned off this sentence and
+        # "1 → 5.07" with no source reads as a guess. Only when the card is what chose it: on a
+        # nearly balanced card ``_first_rung`` returns the step, and saying otherwise would put
+        # a false attribution into the prompt.
+        how = (
+            f"가중치가 없던 시도이므로 한 스텝을 밟는 대신 카드가 적은 클래스 불균형 비율 "
+            f"{_frequency_ratio(state):g}에서 시작한다. "
+        )
     bracket = _interpolated_weight([*_weight_history(state), (weight, skew)])
     if bracket is not None and _clamp_weight(bracket[0]) != _clamp_weight(weight):
         crossing, below, above = bracket
@@ -1162,6 +1185,29 @@ def _weight_value(params: Mapping[str, Any], state: AutoMLState) -> float:
     if current == "balanced":
         return _frequency_ratio(state)
     return 1.0
+
+
+def _first_rung(state: AutoMLState) -> float:
+    """Where the weight goes when the last attempt carried none: the card's ratio.
+
+    ``bench/WEIGHT-LEVER.md`` measured what climbing from 1 by :data:`WEIGHT_STEP` costs when
+    the Critic picks this branch once. On speeddating it froze at 1.5 against a card asking
+    for 5.07, and putting 5.07 into the recorded winner's *own* config — one key, nothing else
+    — recovered 67%, 84% and 114% of the delta ``bench/HARD-BAR.md`` had recorded as the LLM
+    arm's contribution across three seeds. Validation moved with it (+0.0623 / +0.0499 /
+    +0.0506), so the ladder's own selection rule would have taken it.
+
+    ``max`` rather than the ratio outright, because this branch is reached when the positive
+    class needs *more* weight: on a nearly balanced card the ratio sits below one step, and
+    handing it back as the prescription would lower the weight while the evidence says raise
+    it. spambase (ratio 1.54 against a step of 1.5) is the card that makes that case real and
+    almost invisible, which is the point — the same experiment measured |Δ| ≤ 0.0040 there.
+
+    Only the first rung. Once a weight is on, the step and then the interpolation own the
+    search: the ratio is a starting point the card knows, not the optimum, and treating it as
+    the optimum would give this arm a grid sweep neither arm ran.
+    """
+    return max(WEIGHT_STEP, _frequency_ratio(state))
 
 
 def _frequency_ratio(state: AutoMLState) -> float:
