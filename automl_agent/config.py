@@ -25,7 +25,8 @@ PROJECT_ROOT = PACKAGE_DIR.parent
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
 TRAIN_SCRIPT = PACKAGE_DIR / "scripts" / "train.py"
 PROFILE_SCRIPT = PACKAGE_DIR / "scripts" / "profile.py"
-PREDICT_SCRIPT = PACKAGE_DIR / "scripts" / "predict.py"
+# No PREDICT_SCRIPT to match: nothing in the graph spawns scripts/predict.py. It is a CLI a
+# person runs against a saved model, not a node the loop shells out to.
 PROMPTS_DIR = PACKAGE_DIR / "llm" / "prompts"
 CHECKPOINT_DB = ARTIFACTS_ROOT / "checkpoints.sqlite"
 

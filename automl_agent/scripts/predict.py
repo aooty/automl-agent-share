@@ -266,22 +266,6 @@ def positive_class_proba(proba: Any, model: Any) -> Any:
     return proba[:, codes.index(1)]
 
 
-class ScoreLog(LogBuffer):
-    """``LogBuffer`` that collects instead of printing.
-
-    ``evaluate_split`` writes its skip reasons ("roc_auc skipped: only one class present") to a
-    log as it goes. In the trainer those belong in the live output; here they belong in the
-    summary block next to the score they explain, rather than scattered above it.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.lines: list[str] = []
-
-    def write(self, message: str) -> None:
-        self.lines.append(message)
-
-
 def encode_batch_labels(series: Any, schema: dict[str, Any]) -> tuple[Any, Any, dict[str, int]]:
     """True labels as the codes the model predicts, plus a mask of which rows are usable.
 
@@ -365,7 +349,9 @@ def score_batch(
     average = "binary" if n_classes == 2 else "macro"
     metric = schema.get("metric")
     metric = canonical(str(metric)) if metric else None
-    log = ScoreLog()
+    # Collect without printing: the skip reasons belong in the summary block beside the score
+    # they explain, not scattered above it.
+    log = LogBuffer(echo=False)
 
     kept_pred = pred[keep]
     kept_proba = None if proba is None else proba[keep]

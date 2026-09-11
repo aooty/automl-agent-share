@@ -1,5 +1,6 @@
-"""The single place where LLM calls happen. Nodes never touch the SDK directly."""
+"""The single place where LLM calls happen. Nodes never touch the SDK directly.
 
-from .client import LLMClient, LLMUnavailable, archive_prompt_only, render_prompt
-
-__all__ = ["LLMClient", "LLMUnavailable", "archive_prompt_only", "render_prompt"]
+Everything lives in ``client``; import from there. This file re-exported four of its names for
+a while and nothing ever used the facade — every node and every test reaches for
+``automl_agent.llm.client`` directly.
+"""

@@ -182,17 +182,25 @@ CUT_DIAGNOSTICS: tuple[str, str] = ("balanced_accuracy_at_best_cut", "cut_headro
 
 
 class LogBuffer:
-    """Collects progress lines; the tail is shipped back inside result.json."""
+    """Collects progress lines; the tail is shipped back inside result.json.
 
-    def __init__(self) -> None:
-        self._lines: list[str] = []
+    ``echo=False`` collects without printing. ``scripts/predict.py`` scores a labelled batch
+    and wants ``evaluate_split``'s skip reasons ("roc_auc skipped: only one class present")
+    beside the score they explain rather than scattered above it, so it reads :attr:`lines`
+    afterwards instead of letting them go to stdout.
+    """
+
+    def __init__(self, echo: bool = True) -> None:
+        self.lines: list[str] = []
+        self._echo = echo
 
     def write(self, message: str) -> None:
-        self._lines.append(message)
-        print(message, flush=True)
+        self.lines.append(message)
+        if self._echo:
+            print(message, flush=True)
 
     def tail(self, limit: int = LOG_TAIL_CHARS) -> str:
-        return "\n".join(self._lines)[-limit:]
+        return "\n".join(self.lines)[-limit:]
 
 
 # --------------------------------------------------------------------------- #

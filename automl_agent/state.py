@@ -38,16 +38,6 @@ FAILURE_TYPES: tuple[str, ...] = (
     "unknown",
 )
 
-GoalDirection = Literal["maximize", "minimize"]
-
-
-class Goal(TypedDict):
-    """Target metric the loop is optimizing toward."""
-
-    metric: str
-    threshold: float
-    direction: str  # "maximize" | "minimize"
-
 
 class Attempt(TypedDict):
     """One full trip around the loop, appended to ``history``."""
