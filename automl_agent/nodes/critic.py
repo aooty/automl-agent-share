@@ -1190,10 +1190,10 @@ def _weight_value(params: Mapping[str, Any], state: AutoMLState) -> float:
 def _first_rung(state: AutoMLState) -> float:
     """Where the weight goes when the last attempt carried none: the card's ratio.
 
-    ``bench/WEIGHT-LEVER.md`` measured what climbing from 1 by :data:`WEIGHT_STEP` costs when
+    ``docs/WEIGHT-LEVER.md`` measured what climbing from 1 by :data:`WEIGHT_STEP` costs when
     the Critic picks this branch once. On speeddating it froze at 1.5 against a card asking
     for 5.07, and putting 5.07 into the recorded winner's *own* config — one key, nothing else
-    — recovered 67%, 84% and 114% of the delta ``bench/HARD-BAR.md`` had recorded as the LLM
+    — recovered 67%, 84% and 114% of the delta ``docs/HARD-BAR.md`` had recorded as the LLM
     arm's contribution across three seeds. Validation moved with it (+0.0623 / +0.0499 /
     +0.0506), so the ladder's own selection rule would have taken it.
 

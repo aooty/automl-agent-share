@@ -343,7 +343,7 @@ def enforce_novelty(
     # the only change. ``EXECUTOR_PARAMS`` covers the ones worth naming ahead of time;
     # ``applied_hyperparams`` covers the rest, because it is the executor saying what it took.
     # ``min_child_weight`` is the example that only this half catches. (``early_stopping`` used
-    # to be one too — it is on the menu now, for the reason ``bench/REGISTRY-GAP.md`` records.)
+    # to be one too — it is on the menu now, for the reason ``docs/REGISTRY-GAP.md`` records.)
     applied_keys: dict[str, set[str]] = {}
     for item in history:
         applied = (item.get("result") or {}).get("applied_hyperparams")

@@ -60,7 +60,7 @@ def route(
 
     On condition 1 being checked first, and what ``search_past_goal`` changes. In ``auto`` mode
     the bar is derived from the card's baseline, so a first attempt that clears it ends the run
-    at iteration 1 and the Critic never runs — four of the five datasets in ``bench/RESULTS.md``
+    at iteration 1 and the Critic never runs — four of the five datasets in ``docs/RESULTS.md``
     ended exactly that way, which means the diagnose-and-replan path the benchmark was comparing
     did not execute on either arm. ``search_past_goal`` is how a run keeps going anyway: it does
     not raise the bar and it does not change which attempt wins (``best`` is still val-best), it

@@ -123,7 +123,7 @@ def describe_replanning(history: list[dict[str, Any]]) -> str:
     ``goal_reached`` is checked before anything else in :func:`automl_agent.graph.route`, and the
     bar in ``auto`` mode is derived from the baseline — so a first attempt that clears it ends the
     run at iteration 1 and the Critic never runs at all. Four of the five datasets in
-    ``bench/RESULTS.md`` ended that way. Nothing said so: the report's stop reason read
+    ``docs/RESULTS.md`` ended that way. Nothing said so: the report's stop reason read
     "목표 지표 달성", the attempt table's ``critic 진단`` column read "—", and a reader comparing
     the LLM arm against the rule-based arm had no way to see that the whole diagnose-and-replan
     path — the thing the comparison was about — had not executed on either side.
