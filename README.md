@@ -17,8 +17,8 @@
             ├──► goal  (목표 임계값 — auto 모드는 기준선에서 도출)
             │                         │
             └──► dataset_card         │       ← 데이터에서 추론으로 넘어가는
-                    │ (집계만)         │         유일한 통로, 그리고 그것은
-                    ▼                 ▼         노드 경계다
+                    │ (집계만)         │         유일한 통로
+                    ▼                 ▼      
             [planning] ──► [model_selection] ──► [training] ──► [evaluate]
                  ▲             LLM                subprocess         │
                  │                                                   │
