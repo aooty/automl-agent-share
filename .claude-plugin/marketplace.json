@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "automl-agent",
+  "description": "AutoML 루프를 Claude Code에서 돌리는 플러그인. 이 저장소 자체가 소스다.",
+  "owner": {
+    "name": "aooty",
+    "url": "https://github.com/aooty/automl-agent-dist"
+  },
+  "plugins": [
+    {
+      "name": "automl-agent",
+      "description": "데이터셋을 프로파일링해 카드를 만들고 AutoML 루프를 돌리고 결과를 읽는다. 제안자는 ollama gemma4:12b, 심판은 Claude.",
+      "source": "./",
+      "category": "data-science"
+    }
+  ]
+}

@@ -403,10 +403,10 @@ python -m automl_agent.main run --dataset-card local\my_card.json --max-iteratio
 | `no confidence interval (split too small…)` | 재표집 단위가 20개 미만입니다. 정상 동작이고, 없는 구간을 지어내지 않은 것입니다 — 이 실행에서는 작은 차이를 개선으로 읽지 마세요 |
 | `out_of_time`으로 끝남 | 루프가 `--time-budget-sec`을 다 썼습니다. 목표·상한·정체를 먼저 검사하므로 **이 이름은 계속 갈 수 있었던 루프만** 가리킵니다. `history.json`의 `budget`으로 어디에 들어갔는지 보세요 — LLM 호출 시간도 포함됩니다 |
 | 적합이 `too_slow`인데 로그가 없음 | 그 시도의 몫이 이미 없어서 `subprocess`를 **띄우지 않았습니다.** 1초 뒤에 죽일 프로세스를 띄우면 기록에 남는 것이 적합이 아니라 spawn이 됩니다. 예산을 키우거나 `--max-iterations`를 줄여 몫을 늘리세요 |
-| 바를 못 넘고 `stalled`로 끝남 | 지표의 상한이 아니라 **이 데이터의 랭킹 품질**이 상한일 수 있습니다. `roc_auc`는 그대로인데 `balanced_accuracy`만 낮으면 운영점 문제이고, 임계값 튜닝으로도 거의 오르지 않습니다 |
+| 바를 못 넘고 `stalled`로 끝남 | 지표의 상한이 아니라 **이 데이터의 랭킹 품질**이 상한일 수 있습니다. `roc_auc`는 그대로인데 `balanced_accuracy`만 낮으면 운영점 문제이고, 그때 `balanced_accuracy_cut_headroom`이 크면 `tune_threshold`가 가장 싼 레버입니다 — 작으면 컷에는 살 것이 없습니다. `--margin`을 낮추거나 `--metric roc_auc`로 재세요 |
 | `recall`이 `specificity`보다 훨씬 낮음(또는 반대) | `balanced_accuracy`는 두 값의 평균이라 **둘이 같아지는 지점이 최적**입니다. 차이가 0.08을 넘으면 규칙 기반 진단이 낮은 쪽을 인용해 양성 가중치를 ×1.5 또는 ÷1.5 하라고 처방합니다 |
 | 가중치를 올렸다 내렸다 하며 제자리 | 부호가 한 번 뒤집혔으면 그 두 점이 최적을 감싼 것이니 **사이를 재세요**. 모델을 바꾸면 그 짝은 무효입니다 |
-| 운영점을 더 밀어볼 가치가 있나 | `result.json`의 `cut_headroom`을 보세요 — **임계값을 골랐다면 얻었을 정확한 양**입니다. 실행기는 항상 `predict()`를 부르므로 도달한 점수로 인용하면 안 됩니다 |
+| 운영점을 더 밀어볼 가치가 있나 | `result.json`의 `balanced_accuracy_cut_headroom`을 보세요 — **더 나은 컷이 이 행들에서 아직 값하는 정확한 양**입니다. 크면 계획에 `tune_threshold`를 주면 되고(학습 행 20%가 비용), 작으면 컷에 살 것이 없고 남은 격차는 랭킹에 있습니다. **도달한 점수로 인용하면 안 됩니다** — 그 시도가 쓰지 않은 컷에서 잰 값입니다. 목표 지표가 무엇이든 이 값은 `balanced_accuracy`로 재므로 `f1` 목표까지 남은 거리와 나눠서 비율로 읽으면 안 됩니다 |
 | 보고서의 하이퍼파라미터가 제안과 다름 | 정상입니다 — 실제 적용된 `applied_hyperparams`를 인용합니다. 버려진 이름은 `result.json`의 `dropped_hyperparams`에 |
 | `계획이 실행기에 없는 기능을 전제한 것으로 보입니다` | 산문이 threshold 튜닝·교차검증·특성 공학 같은 없는 기능에 의존하는 것으로 읽혔습니다. 실행은 계속되고 그 부분만 실행되지 않으며 `plan.unsupported_claims`로 남습니다. **부분 문자열 탐지라 오탐 가능** — 목록은 [capabilities.py](automl_agent/capabilities.py) |
 | `predict`: `인코딩 스키마가 없습니다` | 합성 데이터 실행이거나 이 파일이 저장되기 전 버전입니다. 새 파일에서 인코딩을 다시 유도하는 건 폭이 우연히 맞으면 어긋난 컬럼으로 예측이 나오는 일이라 하지 않습니다 — 같은 데이터로 다시 학습하세요 |

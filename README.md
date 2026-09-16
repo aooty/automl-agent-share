@@ -41,10 +41,36 @@
 Python 3.11+.
 
 ```bash
-python -m pip install -e ".[dev]"
+python -m pip install -e .
 python -m pip install -e ".[xgboost]"   # 선택: xgboost 모델까지
 python -m pip install -e ".[bedrock]"   # 선택: Bedrock 경유 LLM 호출
 ```
+
+### Claude Code 플러그인으로 쓰기
+
+이 저장소 자체가 Claude Code 플러그인입니다([.claude-plugin/plugin.json](.claude-plugin/plugin.json)).
+설치하면 스킬 두 개가 붙습니다 — [skills/automl-run](skills/automl-run/SKILL.md)이 카드를 만들고
+실행을 띄우고, [skills/automl-results](skills/automl-results/SKILL.md)가 끝난 실행을 읽습니다.
+
+```
+/plugin marketplace add <이 저장소 경로 또는 URL>
+/plugin install automl-agent@automl-agent
+```
+
+**모델 조합은 플러그인이 고정합니다** — planning·model_selection은 로컬
+`ollama:gemma4:12b`, critic·report는 `claude-opus-5`입니다. 임의로 정한 조합이 아니라
+어느 절반에 코드 검증이 걸려 있는지가 정합니다: 제안자의 출력만 `validate_plan`·레지스트리
+화이트리스트·클램프를 통과하므로 **약한 모델을 놓을 수 있는 자리가 거기뿐**이고, critic과
+report에는 그 관문이 없습니다.
+
+그래서 이 조합은 `ANTHROPIC_API_KEY`(또는 Bedrock)와 **로컬 ollama 둘 다** 필요합니다.
+아래 [자격 증명](#자격-증명)의 사전 점검이 검사하는 것은 앞쪽뿐이므로 — ollama가 죽어 있으면
+실행은 멈추지 않고 계획이 규칙 폴백으로 조용히 넘어갑니다. 스킬이 돌리기 전에 `ollama list`를
+확인하고 끝난 실행에서 `plan_source`를 가장 먼저 보게 하는 이유입니다.
+
+스킬은 **원본 CSV 행을 읽지 않습니다.** 그 보장은 그래프의 프롬프트에 대한 것이라 대화창에서
+행을 읽으면 아래 [1번 근거](#1-llm은-원본-데이터를-보지-않는다--채널과-프로세스로)만 조용히
+깨집니다.
 
 ## 데이터
 
@@ -66,11 +92,19 @@ API 키는 **환경변수로만** 읽고 코드·로그·아티팩트에 남기�
 | --- | --- | --- |
 | Anthropic API 직접 | `ANTHROPIC_API_KEY` | 없음 |
 | Bedrock 경유 | `AUTOML_USE_BEDROCK=1`, `AWS_REGION` (+ 표준 AWS 자격 증명 체인) | `.[bedrock]` |
+| 제안자만 로컬로 | 위 둘 중 하나 + `--proposer-model ollama:<모델>` (서버 주소는 `OLLAMA_HOST`, 기본 `http://localhost:11434`) | 없음 — HTTP로 나갑니다 |
 | 자격 증명 없이 | `--dry-run` 또는 `--no-llm` | 없음 |
 
 자격 증명이나 botocore가 없는 상태로 LLM 모드를 실행하면 **시작 전에** 안내와 함께
 종료합니다. Bedrock에서는 구조화 출력이 강제 tool use로 자동 강등되고, 어느 쪽이
 쓰였는지는 아티팩트의 `structured_mode`에 남습니다.
+
+**사전 점검이 검사하는 것은 Anthropic 쪽뿐입니다** — 로컬 서버가 살아 있는지는 확인하지
+않습니다. 그래서 제안자를 로컬로 돌리는데 그 서버가 죽어 있으면 실행은 멈추지 않고 계획만
+규칙 폴백으로 넘어갑니다(호출이 실패하면 `fallback_plan`이 받습니다). 학습·채점·홀드아웃은
+그대로 유효하므로 실행이 망가진 것은 아니지만, **그 실행이 잰 것은 모델이 아니라 규칙입니다.**
+매 반복이 `history.json`에 `plan_source`를 남기므로 끝난 뒤 그것으로 확인하세요 —
+`llm`/`fallback`/`rules` 중 하나이고, `fallback`이 호출은 나갔는데 답이 안 쓰인 반복입니다.
 
 ## 명령
 
@@ -124,6 +158,12 @@ python -m automl_agent.main graph --out graph.png
 | `--force` | 같은 `--thread-id`의 기존 체크포인트를 지우고 처음부터 |
 | `--on-missing-target {reject,drop}` | 정답이 빈 행의 처리. 기본은 개수를 알리고 중단 |
 | `--keep-models {best,all}` | 실행이 끝날 때 진 시도의 `model.joblib`을 지울지 |
+| `--group-column` | **한 값에 속한 행들이 train/val/test로 흩어지면 안 되는 컬럼**(예: 환자 ID). 한 행이 방문 1건이고 한 사람이 여러 행을 가지면 이걸 줘야 합니다 — 안 주면 같은 사람이 학습과 검증 양쪽에 들어가 모델이 상태 대신 그 사람을 외웁니다. **그 부풀림은 홀드아웃까지 같이 오염되므로 실행 안에서 탐지할 수 없습니다.** 주면 그 컬럼은 특성에서 빠지고 모든 점수가 처음 보는 그룹에 대한 성능이 됩니다. 카드에 기록돼 있으면 `run`에서 생략해도 따릅니다 |
+| `--caveat` | 집계가 보여주지 못하는 것을 아는 사람의 지식이 들어오는 **유일한 통로**. 여러 번 줄 수 있고 모든 추론 프롬프트에 실립니다 — 그래서 **행 단위 사실을 적으면 안 됩니다** |
+| `--model` | 심판(critic·report)이 쓸 Claude 모델 ID. 기본 `claude-opus-5` |
+| `--proposer-model` | planning·model_selection에만 쓸 모델. 생략하면 `--model`과 같습니다. `ollama:<모델>`을 주면 로컬 Ollama로 나갑니다(예: `ollama:gemma4:12b`). **이 둘만 코드 검증(`validate_plan`·레지스트리 화이트리스트·클램프)을 통과하므로 약한 모델을 놓을 수 있는 절반입니다** — critic·report에는 그 관문이 없습니다. 제안자는 `check_credentials`가 검사하지 않으므로 로컬 서버가 죽어 있으면 실행은 계속 돌고 계획만 규칙 폴백이 됩니다. 끝난 뒤 `history.json`의 `plan_source`로 확인하세요 |
+| `--direction {maximize,minimize}` | **지표가 이미 정하므로 생략이 기본입니다** — `mae`는 `minimize`, `f1`은 `maximize`. 함의와 다르게 주면 선호가 아니라 실수이므로 거부합니다 |
+| `--artifacts-root` | 아티팩트 루트 재지정. 두 실행을 나란히 돌릴 때 |
 
 `--force` 없이 이미 쓴 `thread_id`로 `run`을 다시 호출하면 **거부합니다** — 두 실행의
 `history`가 `operator.add`로 조용히 이어붙기 때문입니다. 모순되는 플래그 조합
@@ -283,9 +323,19 @@ $files | Select-String -Pattern "<파일명>"    # 출력 없음이 정상
 - 확률 품질은 [calibration.py](automl_agent/scoring/calibration.py)가 따로 잽니다
   (`brier`, 구간별 오차). **진단이고 목표로 삼을 수 없습니다** — 모델을 바꾸지 않습니다.
 - 랭킹 상한은 [ranking.py](automl_agent/scoring/ranking.py)가 KS로 잽니다.
-  `cut_headroom`은 **임계값을 골랐다면 얻었을 정확한 양**이라, 남은 격차가 운영점에
-  있는지 랭킹에 있는지 구분해 줍니다. 실행기는 항상 `predict()`를 부르므로 도달한
-  점수로 인용하면 안 됩니다.
+  `balanced_accuracy_cut_headroom`은 **더 나은 컷이 이 행들에서 아직 값하는 정확한
+  양**이라, 남은 격차가 운영점에 있는지 랭킹에 있는지 구분해 줍니다. **도달한 점수로
+  인용하면 안 됩니다** — 그 시도가 쓰지 않은 컷에서 잰 값입니다.
+  - **이름의 `balanced_accuracy`는 실수가 아닙니다.** 목표 지표가 `f1`이든 `roc_auc`든
+    이 값은 항상 `balanced_accuracy`로 잽니다. 그래서 그 목표까지 남은 거리와 나란히
+    놓고 비율로 읽으면 단위가 어긋나고, 이름이 그 사실을 들고 있게 하려고 붙인
+    접두사입니다 — `f1` 실행 두 번이 이 숫자를 `f1`의 여유로 읽고 컷을 요청한 뒤에
+    개명했습니다. 그 이전에 나온 결과와 로그에는 `cut_headroom`으로 남아 있습니다.
+  - 컷을 **실제로 옮긴** 시도에서도 이 값은 남습니다. 컷은 따로 뗀 행에서 골랐고 이
+    값은 val에서 재므로, 남은 것은 그 선택이 옮겨오지 못한 나머지입니다.
+    적용된 컷의 위치는 `applied_threshold`이고, **없으면 고정 0.5**라는 뜻입니다.
+    계획이 컷을 요청했는지와 거부됐다면 그 이유는 `internal_validation`의
+    `cut_requested`·`cut_declined`에 있습니다.
 
 ## 루프가 끝나는 네 가지 경우 — `route()`
 
@@ -340,6 +390,7 @@ automl_agent/          최상위 6개는 오케스트레이션 척추 — 그래
     ranking.py         랭킹 상한(KS) — 운영점이 아직 살 수 있는 것이 무엇인지
   dataset/             표의 열을 어떻게 읽는가 (데이터 행은 여기 없습니다 — 규칙과 어휘만)
     features.py        특성 열 정책 — 수치 통과, 저카디널리티 one-hot, 나머지는 이름과 함께 제외
+    pipeline.py        전처리 step을 정렬된 spec으로 — 이름이 붙은 순서만 실행됩니다
     targets.py         정답 열 인코딩 + task 판정(detect_task) + 결측 정책(reject/drop)
     sentinels.py       측정값처럼 생긴 결측(`-9999`) 후보 — 경고는 하고 변환은 안 함
     caveats.py         집계가 보여주지 못하는 것을 카드가 싣는 채널
@@ -362,6 +413,8 @@ automl_agent/          최상위 6개는 오케스트레이션 척추 — 그래
     prompts/*.md       프롬프트는 코드가 아닌 .md 파일
 examples/
   dataset_card*.json   손으로 쓴 카드 — 원본 데이터 없이 돌아감
+.claude-plugin/        Claude Code 플러그인 manifest (plugin.json + 로컬 marketplace.json)
+skills/                그 플러그인이 붙이는 스킬 둘 — automl-run / automl-results
 artifacts/<thread_id>/ 실행 산출물 (git 무시)
 local/                 배포하면 안 되는 것 전부 (git 무시)
 ```
@@ -450,12 +503,14 @@ iter 3 달성) · `stall`(동일 점수 3회 → 조기 종료). `--no-llm` 실�
 
 - 실행 명령: [RUNBOOK.md](RUNBOOK.md)
 - 각 규칙의 근거: 해당 모듈의 docstring. 위 트리의 파일 이름이 곧 목차입니다
-- **개발 저장소: https://github.com/aooty/automl-agent** — 이 저장소가 싣지 않는 것이 전부
-  거기 있습니다. `docs/` 22개(설계 8 + 사전 등록 측정 12 + 임상 기록 2), `bench/`의 판정
-  모듈과 실행 아카이브 151개, 테스트 스위트. docstring이 `docs/RESULTS.md`나 `bench/paired.py`
-  같은 경로를 인용할 때 가리키는 곳이고, 인용이 쓰인 시점의 커밋으로 못박아 두었습니다
-  ([`automl_agent/__init__.py`](automl_agent/__init__.py)에 해시가 있습니다)
-- 테스트 스위트(1797개)와 임상 데이터 측정 기록은 배포본에 없습니다 — 개발 저장소의
+- **개발 저장소: https://github.com/aooty/AutoML-Agent** — 이 저장소가 싣지 않는 것이 전부
+  거기 있습니다. `docs/` 25개(설계·계약 9 + 사전 등록 측정 14 + 임상 기록 2),
+  `bench/`의 판정 모듈과 실행 아카이브 151개, 테스트 스위트. docstring이 `docs/rationale.md`나
+  `bench/paired.py` 같은 경로를 인용할 때 가리키는 곳이고, 인용이 쓰인 시점의 커밋으로 못박아
+  두었습니다 ([`automl_agent/__init__.py`](automl_agent/__init__.py)에 해시가 있습니다)
+- **`docs/rationale.md`가 특별히 중요합니다.** 이 패키지의 가드 뒤에 있는 논증은 docstring에서
+  그 파일로 옮겨졌습니다 — 그래서 여기 주석은 규칙을 말하고 근거는 인용만 하는 형태가 많습니다
+- 테스트 스위트(1,873개)와 임상 데이터 측정 기록은 배포본에 없습니다 — 개발 저장소의
   `tests/`와 `docs/FINDINGS-mimic.md`입니다. 이 문서가 하는 주장을 실제로 검증하는 것이 그
   스위트이므로, 코드를 고칠 생각이라면 그쪽에서 작업하세요
 

@@ -1,0 +1,10 @@
+{
+  "name": "automl-agent",
+  "version": "0.1.0",
+  "description": "이 저장소의 AutoML 루프를 Claude Code에서 돌린다. 계획·모델 선택은 로컬 ollama gemma4:12b, 비평·보고는 Claude. CSV 원본 행은 프롬프트에 들어가지 않는다.",
+  "author": {
+    "name": "aooty",
+    "url": "https://github.com/aooty/automl-agent-dist"
+  },
+  "keywords": ["automl", "machine-learning", "ollama", "langgraph"]
+}
