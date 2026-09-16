@@ -7,19 +7,15 @@ is why nothing it writes goes anywhere near a state channel.
 
 Why this exists
 ---------------
-``model.joblib`` on its own is not a usable model. The matrix it was fitted on was produced
-by :func:`automl_agent.dataset.features.encode_features`, which reads the level set, the column order
-and whether a column got its own missing column off the file in front of it. Handed a second
-file, that function answers differently: a level that happens to be absent removes a column,
-a new level adds none, and the column order follows the new file's. When the widths differ,
-sklearn raises. When they *match* — which is the ordinary case for a monthly export of the
-same table — nothing raises and every prediction is computed from columns that mean something
-else. That failure is invisible in the output and in every metric over it.
+**``model.joblib`` on its own is not a usable model.** The encoder reads the level set, the column
+order and the missing-column decision off *the file in front of it*, so a second file encodes
+differently. Differing widths make sklearn raise; **matching widths — the ordinary case for a monthly
+export of the same table — raise nothing and compute every prediction from columns that mean
+something else**, invisibly in the output and in every metric over it.
 
-So the encoding is saved at fit time (``feature_schema.json``, written by
-``scripts/train.py``) and replayed here by :func:`automl_agent.dataset.features.encode_with_schema`.
-This script's job is to refuse everything that cannot be replayed and to disclose everything
-that was replayed with a caveat:
+So the encoding is saved at fit time and replayed here by
+:func:`~automl_agent.dataset.features.encode_with_schema`. This script refuses everything that cannot
+be replayed and discloses everything replayed with a caveat:
 
 * a source column the fit needs and this file does not have — refused
   (:class:`automl_agent.dataset.features.FeatureSchemaMismatch`);
@@ -33,30 +29,27 @@ that was replayed with a caveat:
 
 Scoring a batch that already has its labels
 -------------------------------------------
-``--label-column`` names a column of true labels in the input file, and turns the run into a
-backtest: the batch is predicted exactly as it would be without the flag, and then scored.
-Three things about that score are deliberate.
+``--label-column`` names a column of true labels and turns the run into a backtest: predicted
+exactly as it would be without the flag, then scored. Three things about that score are
+deliberate.
 
-It is **not the run's protocol.** The holdout in ``result.json`` is rows held back before any
-model was fitted, scored once, gating nothing — a number whose meaning comes from how it was
-produced. How *this* file was assembled is unknown to this script: it may be a later month, a
-different site, or the training rows themselves. So the score is reported with that said out
-loud, because "0.71 on the holdout, 0.62 here" is a fact about two different things until
-someone says which two.
+**Not the run's protocol.** The holdout in ``result.json`` is rows held back before any fit,
+scored once, gating nothing — its meaning comes from how it was produced. How *this* file was
+assembled is unknown here: a later month, a different site, or the training rows themselves. So
+the score says that out loud, because "0.71 on the holdout, 0.62 here" is a fact about two
+different things until someone says which two.
 
-It is scored on **the metric the run was steered by** (``schema["metric"]``, recorded at fit
-time) rather than on whatever the person scoring the batch picks, so the two numbers are the
-same measurement over different rows.
+**The metric the run was steered by** (``schema["metric"]``, recorded at fit time), not one the
+person scoring the batch picks — so the two numbers are one measurement over different rows.
 
-The labels are coded through **the schema's** ``classes`` list, never re-derived from this
-file. Re-deriving is the same defect this whole script exists to prevent, one level up: a
-batch where one class happens to be absent would code the remaining labels to different
-integers, and the model's ``1`` would be scored against the file's other class. Rows whose
-label is missing or is not in the schema's list are excluded from the score and counted.
+**The schema's ``classes`` list**, never re-derived from this file. Re-deriving is this script's
+own defect one level up: a batch missing one class would code the rest to different integers and
+score the model's ``1`` against the file's other class. Rows whose label is missing or unknown
+to the schema are excluded and counted.
 
-Nothing about the score changes the model. It is measured after the fact on rows this process
-is not entitled to fit anything on — see :mod:`automl_agent.scoring.calibration` for the same argument
-about the probabilities.
+Nothing about the score changes the model — it is measured after the fact on rows this process
+may not fit anything on (:mod:`automl_agent.scoring.calibration` makes the same argument about
+the probabilities).
 
 Contract
 --------
@@ -85,6 +78,7 @@ from typing import Any
 if __package__ in (None, ""):  # pragma: no cover - only when run as a file
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from automl_agent.config import DECISION_FILENAME  # noqa: E402 - needs the path fix above
 from automl_agent.dataset.features import (  # noqa: E402 - needs the path fix above
     FeatureSchemaMismatch,
     describe_drift,
@@ -108,6 +102,8 @@ from automl_agent.scoring.metrics import (  # noqa: E402 - needs the path fix ab
 from automl_agent.scripts.train import (  # noqa: E402 - needs the path fix above
     LogBuffer,
     evaluate_split,
+    label_at_cut,
+    load_decision,
 )
 
 # The column the predicted label lands in, and the prefix each class probability gets. Named
@@ -147,16 +143,14 @@ def prepare_features(
 ) -> tuple[Any, list[str]]:
     """Drop the columns that were never features, and say which were dropped.
 
-    The target and the group column are dropped by *name from the schema*, not by guessing:
-    a new file may well carry the true label (a backtest) or the patient id, and both were
-    excluded from the matrix at fit time. Without this they would be reported as columns the
-    training file did not have, which is true and useless.
+    Target and group column are dropped by *name from the schema*, not guessed: a new file may carry
+    the true label (a backtest) or the patient id, and both were excluded from the matrix at fit time.
+    Otherwise they get reported as columns the training file did not have — true and useless.
 
-    ``label_column`` is dropped for the same reason and named in the same list. It is usually
-    the schema's target column under the same name, in which case it is already handled — but a
-    backtest export that calls it ``outcome_actual`` would otherwise reach the encoder as an
-    unexpected extra column, i.e. reported as drift when in fact it is the thing being scored
-    against.
+    ``label_column`` is dropped for the same reason, into the same list. Usually it *is* the schema's
+    target column under the same name and already handled, but a backtest export calling it
+    ``outcome_actual`` would otherwise reach the encoder as an unexpected extra column — reported as
+    drift when it is the thing being scored against.
     """
     dropped: list[str] = []
     for key in ("target_column", "group_column"):
@@ -171,14 +165,14 @@ def prepare_features(
 def check_width(model: Any, n_columns: int) -> None:
     """Refuse a matrix the estimator was not fitted on, before it silently accepts one.
 
-    The encoder already asserted that it produced the schema's columns, so this only fires
-    when the schema and the model are not the pair they were saved as — a file copied out of
-    one iteration's directory next to another's. sklearn would catch a width mismatch itself,
-    with a message about arrays; this one names the cause.
+    The encoder already asserted it produced the schema's columns, so this only fires when schema and
+    model are not the pair they were saved as — a file copied out of one iteration's directory next to
+    another's. sklearn would catch the width itself, with a message about arrays; this one names the
+    cause.
 
-    ``n_features_in_`` is absent on an estimator that was never fitted and on a few that do not
-    record it. Absent means "cannot check", not "mismatch": refusing there would reject working
-    pairs to protect against a case that has not happened.
+    ``n_features_in_`` is absent on an unfitted estimator and on a few that do not record it. Absent
+    means "cannot check", not "mismatch" — refusing there would reject working pairs to guard a case
+    that has not happened.
     """
     expected = getattr(model, "n_features_in_", None)
     if expected is None or int(expected) == int(n_columns):
@@ -428,6 +422,23 @@ def run_prediction(
     matrix = np.asarray(encoded.to_numpy(), dtype="float64")
     raw = model.predict(matrix)
     proba = probability_matrix(model, matrix, schema)
+    positive = positive_class_proba(proba, model)
+
+    # The rule the labels in this CSV are made with. Read from beside the model, never chosen
+    # here: the cut this attempt earned its score at was chosen on its training rows, and a
+    # caller applying a different one would get labels the run's reported numbers do not
+    # describe. No file is the ordinary case and means sklearn's fixed 0.5 rule.
+    decision_log = LogBuffer(echo=False)
+    threshold = load_decision(model_path.parent / DECISION_FILENAME, decision_log)
+    if threshold is not None and positive is None:
+        decision_log.write(
+            "저장된 결정 규칙이 있지만 이 모델에서는 양성 클래스 확률을 얻을 수 없어 기본 규칙으로 "
+            "라벨을 만들었습니다 — 이 실행이 기록한 점수와 다른 규칙입니다"
+        )
+        threshold = None
+    if threshold is not None:
+        raw = label_at_cut(positive, threshold)
+
     predictions = label_predictions(raw, schema)
     # The id column first, so the output can be joined back without positional trust, then the
     # prediction, then the probabilities. The input's other columns are deliberately not copied:
@@ -454,14 +465,20 @@ def run_prediction(
         # was fed to the model as a feature".
         "dropped_non_features": dropped,
         "drift": drift,
-        "warnings": describe_drift(drift),
+        # ``load_decision`` says nothing when there is simply no rule to apply, so anything it
+        # did say means a file that exists and could not be used — which changes every label in
+        # the output and belongs in the block a reader is told to read. When it *was* applied,
+        # the summary line prints the cut itself instead.
+        "warnings": describe_drift(drift) + (decision_log.lines if threshold is None else []),
     }
+    if threshold is not None:
+        summary["threshold"] = threshold
     if label_column:
         scored = score_batch(
             model,
             matrix,
             frame[label_column],
-            positive_class_proba(proba, model),
+            positive,
             raw,
             schema,
         )
@@ -575,6 +592,14 @@ def summarise(summary: dict[str, Any]) -> str:
     if summary.get("dropped_non_features"):
         names = ", ".join(summary["dropped_non_features"])
         lines.append(f"피처가 아닌 컬럼은 제외했습니다: {names}")
+    if summary.get("threshold") is not None:
+        # Printed every time, not only when it is surprising: the labels in the CSV are not what
+        # ``predict_proba`` at 0.5 would have said, and a caller comparing this file to another
+        # model's output has to know that before comparing anything.
+        lines.append(
+            f"라벨은 이 모델과 함께 저장된 결정 규칙으로 만들었습니다 — 양성 확률 "
+            f"{summary['threshold']} 이상 (sklearn 기본값 0.5가 아닙니다)"
+        )
     if summary.get("score"):
         lines += describe_score(dict(summary["score"]))
     warnings = list(summary.get("warnings") or [])

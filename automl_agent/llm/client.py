@@ -59,6 +59,64 @@ class TextCompletion(NamedTuple):
 # Name of the single tool used when structured output has to be enforced via tool use.
 STRUCTURED_TOOL_NAME = "submit_result"
 
+# A model id beginning with this goes to a locally served model instead of the API. A prefix on
+# the id and not a separate flag, because "which model" and "which transport" are one decision
+# here: there is no configuration in which a caller wants ``gemma3`` sent to Anthropic.
+OLLAMA_PREFIX = "ollama:"
+OLLAMA_HOST_ENV = "OLLAMA_HOST"
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+
+
+def needs_anthropic(config: RunConfig) -> bool:
+    """Whether any node in this run will reach the Anthropic API.
+
+    The two halves resolve separately — the proposer follows ``proposer_model`` when it is set
+    and ``llm_model`` otherwise — so a run can be fully local, fully remote, or split. Only the
+    fully local case needs no credentials, and ``main.check_credentials`` refuses before the
+    graph starts on the strength of this. Without it ``--model ollama:...`` was refused by a
+    guard written for a route it does not use.
+    """
+    proposer = config.proposer_model or config.llm_model
+    return not (
+        config.llm_model.startswith(OLLAMA_PREFIX) and proposer.startswith(OLLAMA_PREFIX)
+    )
+
+
+def ollama_host() -> str:
+    """Where the local server is. ``OLLAMA_HOST`` is Ollama's own variable, so a machine that
+    already runs it elsewhere needs nothing set here."""
+    host = (os.environ.get(OLLAMA_HOST_ENV) or "").strip() or DEFAULT_OLLAMA_HOST
+    return host if "://" in host else f"http://{host}"
+
+
+class OllamaTextBlock(NamedTuple):
+    """One text block, shaped like the SDK's so :func:`extract_text` needs no branch."""
+
+    text: str
+    type: str = "text"
+
+
+class OllamaUsage(NamedTuple):
+    """Ollama's token counts under the names the archive already writes.
+
+    No cache fields on purpose: ``_archive`` reads them with ``getattr(..., None)``, so their
+    absence records ``null`` — which is the honest answer for a route that has no prompt cache
+    to hit rather than a route that missed one.
+    """
+
+    input_tokens: int | None
+    output_tokens: int | None
+
+
+class OllamaCompletion(NamedTuple):
+    """Enough of a ``Message`` for :func:`extract_text`, :func:`extract_structured` and the
+    archive. Deliberately not more — a fuller imitation would invite code that treats the two
+    routes as interchangeable in ways they are not."""
+
+    content: list[OllamaTextBlock]
+    usage: OllamaUsage
+    stop_reason: str
+
 # How structured output is enforced, cached per transport for the life of the process.
 # Every node builds its own LLMClient, so holding this per instance would make each
 # node re-pay a rejected `output_config` round-trip before downgrading again.
@@ -70,6 +128,50 @@ def _route_key() -> str:
 
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
+
+# Where a prompt's cacheable prefix ends. Written in the ``.md`` file rather than decided here
+# because *which* blocks are stable is a property of the prompt, and this repository keeps
+# prompts out of the code. See ``docs/rationale.md``.
+CACHE_MARKER = "<!-- cache -->"
+# The API allows four per request; a prompt asking for more is a mistake worth naming rather
+# than a 400 from inside the transport.
+MAX_CACHE_BREAKPOINTS = 4
+# 1h and not the 5-minute default: the gap between two calls to the same node is a whole
+# iteration — a fit that may take minutes — and a 5-minute entry is measured from the *start*
+# of the request that wrote it, so it is usually cold by the next call. The 1h write costs 2x
+# instead of 1.25x and needs three reads to pay for itself; a run does nine.
+CACHE_TTL = "1h"
+
+
+def prompt_content(prompt: str) -> str | list[dict[str, Any]]:
+    """One user message's content, split into cache blocks at every :data:`CACHE_MARKER`.
+
+    Returns the string unchanged when the prompt carries no marker, so a prompt that has not
+    been ordered for caching (``report.md`` — one call per run, nothing to reuse) keeps the
+    shape it always had.
+
+    The marker is left in the text that is sent. It costs a handful of tokens and it keeps
+    :meth:`LLMClient._archive` honest: what the archive shows is still byte-for-byte what the
+    model was sent, and a reader of the archive can see where the breakpoints were.
+    """
+    if CACHE_MARKER not in prompt:
+        return prompt
+    head, *rest = prompt.split(CACHE_MARKER)
+    # Each marker ends the block before it, so the marker text belongs to that block.
+    chunks = [head + CACHE_MARKER, *rest[:-1]]
+    chunks = [chunk if index == 0 else chunk + CACHE_MARKER for index, chunk in enumerate(chunks)]
+    if len(chunks) > MAX_CACHE_BREAKPOINTS:
+        raise ValueError(
+            f"{len(chunks)} cache breakpoints requested, the API allows {MAX_CACHE_BREAKPOINTS}"
+        )
+    blocks: list[dict[str, Any]] = [
+        {"type": "text", "text": chunk, "cache_control": {"type": "ephemeral", "ttl": CACHE_TTL}}
+        for chunk in chunks
+    ]
+    tail = rest[-1]
+    if tail:
+        blocks.append({"type": "text", "text": tail})
+    return blocks
 
 
 def render_prompt(name: str, variables: dict[str, Any], prompts_dir: Path = PROMPTS_DIR) -> str:
@@ -151,10 +253,17 @@ def _next_index(directory: Path) -> int:
 class LLMClient:
     """Thin, logged wrapper around ``messages.create``."""
 
-    def __init__(self, config: RunConfig) -> None:
+    def __init__(self, config: RunConfig, *, proposer: bool = False) -> None:
+        """``proposer=True`` for the two nodes that propose rather than judge.
+
+        A keyword and not a model string, so the two callers say *which node they are* and this
+        module owns the mapping. The alternative — every node reading ``config`` and picking a
+        field — puts the same three-line decision in four places, and a fifth node added later
+        gets it wrong silently.
+        """
         self.config = config
         self._client: Any | None = None
-        self._model = config.llm_model
+        self._model = (config.proposer_model if proposer else "") or config.llm_model
 
     @property
     def _structured_mode(self) -> str:
@@ -193,7 +302,20 @@ class LLMClient:
                 timeout=self.config.llm_timeout_sec,
                 max_retries=DEFAULT_LLM_MAX_RETRIES,
             )
-            if not self._model.startswith("anthropic."):
+            # Bedrock names the vendor in the model id, so the default ``claude-opus-5`` has to
+            # become ``anthropic.claude-opus-5`` — which is the form this route wants, and the
+            # reason the prefixing exists at all.
+            #
+            # The test is for the vendor *anywhere* in the id rather than at the front, and that
+            # is about an id the caller passes explicitly. Bedrock also has cross-region
+            # inference profiles, which put a scope in front of the vendor
+            # (``global.anthropic.claude-opus-5``, ``us.anthropic.claude-...``). Anchored at the
+            # front, ``--model global.anthropic.claude-opus-5`` picked up a second prefix and
+            # became ``anthropic.global.anthropic.claude-opus-5``; the call 404s, and because
+            # ``planning`` treats an unavailable LLM as a fallback rather than an error, the run
+            # would go on to produce a rule-based result with one printed line about the outage.
+            # A scoped id may not be right for every endpoint, but mangling it is right for none.
+            if "anthropic." not in self._model:
                 self._model = f"anthropic.{self._model}"
         else:
             if not os.environ.get(API_KEY_ENV):
@@ -245,6 +367,11 @@ class LLMClient:
         max_tokens: int,
         schema: dict[str, Any] | None,
     ) -> Any:
+        if self._model.startswith(OLLAMA_PREFIX):
+            return self._create_ollama(
+                messages, system=system, max_tokens=max_tokens, schema=schema
+            )
+
         import anthropic
 
         client = self._ensure_client()
@@ -273,6 +400,100 @@ class LLMClient:
         except anthropic.APIConnectionError as exc:
             raise LLMUnavailable(f"could not reach the API: {exc}") from exc
 
+    def _create_ollama(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system: str | None,
+        max_tokens: int,
+        schema: dict[str, Any] | None,
+    ) -> Any:
+        """The same call against a locally served model.
+
+        ``urllib`` and not a client library: this is one POST with a JSON body, and the reason
+        the Anthropic SDK is worth a dependency — retries, signing, streaming, typed errors —
+        does not apply to a request to localhost.
+
+        Structured output is Ollama's ``format`` field, which takes the JSON schema directly.
+        That is the whole reason this route is viable: the enforcement the nodes rely on
+        (``validate_plan``, the registry, the clamps) sits *behind* the schema, and a route with
+        no schema at all would push every malformed answer onto those guards and record it as a
+        fallback. It is a different mechanism from forced tool use, not a weaker one — but
+        whether a given local model *obeys* it is unmeasured, which is what ``plan_source`` in
+        each attempt exists to report.
+
+        ``temperature`` 0 and the run's own ``seed``, because everything else in this repository
+        pins its seed and a proposer that does not would make two legs of one comparison differ
+        for a reason the comparison is not about.
+        """
+        import urllib.error
+        import urllib.request
+
+        chat: list[dict[str, str]] = []
+        if system:
+            chat.append({"role": "system", "content": system})
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, list):
+                # Cache breakpoints are an Anthropic billing feature; here they are just blocks
+                # to join back. Dropping the marker text would make the archive disagree with
+                # what was sent, so it stays in — see :func:`prompt_content`.
+                content = "".join(str(block.get("text", "")) for block in content)
+            chat.append({"role": str(message.get("role") or "user"), "content": str(content)})
+
+        payload: dict[str, Any] = {
+            "model": self._model[len(OLLAMA_PREFIX) :],
+            "messages": chat,
+            "stream": False,
+            # Off, and this is the difference between this route working and not. A thinking
+            # model puts its reasoning in ``message.thinking`` and the answer in
+            # ``message.content``, and both come out of one output allowance. On the real
+            # planning prompt ``gemma4:12b`` spent all 8,000 tokens thinking, returned
+            # ``done_reason: length`` with **empty content**, and the node recorded a fallback —
+            # so the first measurement of that model scored 0% and was measuring this, not the
+            # model. With thinking off the same call answers in 6 output tokens.
+            #
+            # Safe on models that do not think: Ollama accepts the flag and ignores it (checked
+            # on qwen2.5-coder:14b and medgemma:4b). And the two nodes on this route have their
+            # answers read by a code gate rather than by a person, so the reasoning was never
+            # consumed by anything — unlike the Critic's ``evidence``, which is why the Critic
+            # stays on the other route.
+            "think": False,
+            "options": {"num_predict": max_tokens, "temperature": 0, "seed": self.config.seed},
+        }
+        if schema is not None:
+            payload["format"] = schema
+
+        request = urllib.request.Request(
+            f"{ollama_host()}/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.config.llm_timeout_sec) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # The body carries Ollama's own message ("model 'x' not found"), which is the one
+            # thing that makes a 404 here actionable.
+            detail = exc.read().decode("utf-8", errors="replace")[:200]
+            raise LLMUnavailable(f"ollama returned {exc.code}: {detail}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise LLMUnavailable(f"could not reach ollama at {ollama_host()}: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise LLMUnavailable(f"ollama sent a body that is not JSON: {exc}") from exc
+
+        message = body.get("message") or {}
+        return OllamaCompletion(
+            content=[OllamaTextBlock(text=str(message.get("content") or ""))],
+            usage=OllamaUsage(
+                input_tokens=body.get("prompt_eval_count"),
+                output_tokens=body.get("eval_count"),
+            ),
+            # Ollama says ``length`` where the Anthropic route says ``max_tokens``; every caller
+            # reads the latter, so the translation belongs here rather than in each of them.
+            stop_reason="max_tokens" if body.get("done_reason") == "length" else "end_turn",
+        )
+
     # -- public API -------------------------------------------------------- #
 
     def complete_text(
@@ -293,7 +514,7 @@ class LLMClient:
         label = archive_label(prompt_name, iteration=iteration)
         try:
             response = self._create(
-                [{"role": "user", "content": prompt}],
+                [{"role": "user", "content": prompt_content(prompt)}],
                 system=system,
                 max_tokens=max_tokens or self.config.llm_max_tokens,
                 schema=None,
@@ -321,7 +542,7 @@ class LLMClient:
         the calling node is responsible for the deterministic fallback.
         """
         prompt = render_prompt(prompt_name, variables)
-        messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+        messages: list[dict[str, Any]] = [{"role": "user", "content": prompt_content(prompt)}]
         last_error = ""
 
         for attempt in (1, 2):
@@ -415,6 +636,12 @@ class LLMClient:
             "usage": {
                 "input_tokens": getattr(usage, "input_tokens", None),
                 "output_tokens": getattr(usage, "output_tokens", None),
+                # Whether the cache breakpoints in the prompt actually held. Recorded because
+                # a miss is invisible everywhere else: the run works, the numbers are right,
+                # and only the bill moves — so without these two fields "we turned caching on"
+                # is a claim no artifact can check. ``None`` on a route that reports neither.
+                "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
+                "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", None),
             },
             "stop_reason": getattr(response, "stop_reason", None),
         }

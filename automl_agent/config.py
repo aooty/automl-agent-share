@@ -23,10 +23,10 @@ from .scoring.metrics import DEFAULT_METRICS, GOAL_METRICS, TASK_CLASSIFICATION,
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_DIR.parent
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
+# Only the two scripts the graph spawns. ``scripts/predict.py`` is a CLI command run in-process
+# after the loop, so it needs no path constant here.
 TRAIN_SCRIPT = PACKAGE_DIR / "scripts" / "train.py"
 PROFILE_SCRIPT = PACKAGE_DIR / "scripts" / "profile.py"
-# No PREDICT_SCRIPT to match: nothing in the graph spawns scripts/predict.py. It is a CLI a
-# person runs against a saved model, not a node the loop shells out to.
 PROMPTS_DIR = PACKAGE_DIR / "llm" / "prompts"
 CHECKPOINT_DB = ARTIFACTS_ROOT / "checkpoints.sqlite"
 
@@ -60,6 +60,22 @@ PREDICTIONS_FILENAME = "val_predictions.npz"
 # are cell values. So it stays inside ``artifacts/``, its path is absent from
 # ``privacy.PUBLIC_RESULT_FIELDS``, and no reasoning node reads it.
 SCHEMA_FILENAME = "feature_schema.json"
+
+# How this model's probabilities become labels, when that is not sklearn's fixed 0.5 rule:
+# ``{"threshold": 0.137, "chosen_on": "train", "metric": "balanced_accuracy"}``. Written only
+# when a plan asked for a tuned cut, and its *absence* means the default rule — so every
+# model saved before this file existed keeps scoring exactly as it did.
+#
+# A separate file rather than a key in the schema, because the two have different lifetimes:
+# the schema is ``None`` on the synthetic path (there is no encoding to replay) while a cut
+# still has to survive to the holdout, and folding it in would mean writing a column-less
+# schema that ``features.encode_with_schema`` would have to be taught to refuse.
+#
+# Unlike its two neighbours this one is *not* data-equivalent — it is a single scalar in
+# [0, 1], the same grade of aggregate as a metric — which is why ``applied_threshold`` is in
+# ``privacy.PUBLIC_RESULT_FIELDS``. The Critic cannot reason about the operating point
+# without knowing where the cut landed.
+DECISION_FILENAME = "decision_rule.json"
 
 # Read from the registry rather than restated, so the CLI default and the metric a
 # classification run falls back to after a substitution are the same name by construction.
@@ -148,6 +164,18 @@ class RunConfig:
     no_llm: bool = False
     seed: int = 42
     llm_model: str = DEFAULT_LLM_MODEL
+    # The model that plans and selects, when it is not the one above. Empty means "the same
+    # one", which is what every run recorded before this field existed did.
+    #
+    # The split is the loop's own: ``planning`` and ``model_selection`` *propose* — both of
+    # their answers pass a code gate afterwards (``validate_plan``, the model registry, the
+    # hyperparameter clamps), so a weaker model there fails loudly rather than quietly.
+    # ``critic`` and ``report`` do not have that: the Critic's diagnosis steers the next plan
+    # and the report is prose, and neither has a validator that can catch a bad one. So the
+    # proposer is the half that can be moved off the paid model, and this is the field that
+    # moves it. What it is worth is not measured — ``plan_source`` in each attempt is how a
+    # run says whether the proposer actually decided anything (``nodes/planning.py``).
+    proposer_model: str = ""
     llm_max_tokens: int = DEFAULT_LLM_MAX_TOKENS
     llm_timeout_sec: float = DEFAULT_LLM_TIMEOUT_SEC
     dataset_card_path: Path | None = None
@@ -290,6 +318,14 @@ class RunConfig:
         """
         return self.iteration_dir(iteration) / SCHEMA_FILENAME
 
+    def decision_path(self, iteration: int) -> Path:
+        """Where that iteration's decision rule was saved, if it tuned one.
+
+        Beside its model for the same reason ``schema_path`` is: a cut belongs to one fitted
+        estimator, and a rule paired with the wrong model would relabel every row.
+        """
+        return self.iteration_dir(iteration) / DECISION_FILENAME
+
     def predictions_path(self, iteration: int) -> Path:
         """Where that iteration's validation-row predictions were saved, if it scored any.
 
@@ -307,11 +343,10 @@ class RunConfig:
     def fallback_threshold(self) -> float:
         """A float threshold for code that needs one outside the ``goal`` channel.
 
-        The graph always reads ``state["goal"]``, whose threshold is a real number by the
-        time any node inside the loop runs: a metric in the target's own units can leave it
-        unset, and ``profiling`` refuses the run rather than letting it start against a bar
-        that does not exist. This exists for the ``goal.get("threshold", ...)`` defaults,
-        which would otherwise have to spell out a ``None`` branch each.
+        The graph reads ``state["goal"]``, whose threshold is a real number by the time any node in
+        the loop runs — a metric in the target's own units can leave it unset, and ``profiling``
+        refuses the run rather than start against a bar that does not exist. This exists so the
+        ``goal.get("threshold", ...)`` defaults need not each spell out a ``None`` branch.
         """
         return DEFAULT_THRESHOLD if self.threshold is None else self.threshold
 
@@ -319,12 +354,11 @@ class RunConfig:
     def train_timeout_sec(self) -> float:
         """Ceiling for one training subprocess. Exceeding it is recorded as ``too_slow``.
 
-        The whole budget, and therefore only a bound on a *single* fit — no fit may outlast the
-        run it belongs to. It is not what the loop actually hands a fit: that is
-        :func:`automl_agent.state.fit_share_sec`, a slice of what remains, and this value is the
-        fallback for a call with no budget accounting in state (the unit tests, a hand-edited
-        checkpoint). Handing this number to each of five fits, which is what the loop did before
-        the ``budget`` channel existed, made ``--time-budget-sec 3600`` a 21,600-second run.
+        The whole budget, so only a bound on a *single* fit — no fit may outlast its run. Not what
+        the loop actually hands a fit (that is :func:`automl_agent.state.fit_share_sec`, a slice of
+        what remains); this is the fallback when state carries no budget accounting (unit tests, a
+        hand-edited checkpoint). Handing it to each of five fits — what the loop did before the
+        ``budget`` channel — made ``--time-budget-sec 3600`` a 21,600-second run.
         """
         return float(self.time_budget_sec)
 
@@ -332,17 +366,15 @@ class RunConfig:
 def file_size_text(size: float) -> str:
     """``509234754`` as ``485.6 MB``. Bytes below a kilobyte, then KB, MB, GB.
 
-    The byte case is not decoration: without it every file under 1 KB reads as ``0 KB``, and
-    "0 KB" is what a *failed* write looks like.
+    The byte case is not decoration: without it every file under 1 KB reads ``0 KB``, which is what a
+    *failed* write looks like.
 
-    Lives here rather than beside its callers because both sides of the subprocess boundary
-    print artifact sizes — the training script when it saves a model, the report node when it
-    deletes one — and ``scripts/train.py`` cannot be imported from a node (it pulls in
-    sklearn, and the orchestrator process does not).
+    Lives here because both sides of the subprocess boundary print artifact sizes (the training script
+    saving a model, the report node deleting one) and ``scripts/train.py`` cannot be imported from a
+    node — it pulls in sklearn, which the orchestrator process does not.
 
-    The model line used to be printed as KB unconditionally, which turned the one number that
-    would have made this repository's 1.9 GB of artifacts visible ("509234 KB") into a number
-    nobody reads.
+    The model line used to print KB unconditionally, turning the one number that would have made this
+    repository's 1.9 GB of artifacts visible ("509234 KB") into a number nobody reads.
     """
     if size < 1024:
         return f"{size:.0f} B"
@@ -356,11 +388,10 @@ def file_size_text(size: float) -> str:
 def utf8_env() -> dict[str, str]:
     """Environment for a child script, with its stdio pinned to UTF-8.
 
-    Both child scripts are spawned with ``encoding="utf-8"`` on the parent side. Without
-    this the child would still *encode* with the console code page (cp949 on a Korean
-    Windows), so the profiler's Korean summary came back mangled — or, when the parent
-    left decoding to the locale, blew up inside subprocess' reader thread and lost the
-    whole log.
+    Both child scripts are spawned with ``encoding="utf-8"`` on the parent side. Without this the
+    child still *encodes* with the console code page (cp949 on a Korean Windows), so the profiler's
+    Korean summary came back mangled — or, when the parent left decoding to the locale, blew up inside
+    subprocess' reader thread and lost the whole log.
     """
     return {**os.environ, "PYTHONIOENCODING": "utf-8"}
 

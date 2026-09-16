@@ -6,50 +6,33 @@ decided against validation scores. This node is the one measurement that was not
 loads the model file the winning iteration saved and scores it on the test slice
 :mod:`automl_agent.scoring.splits` carved off before the first fit.
 
-Why that matters enough to be its own node: with five attempts, ``best`` is the maximum
-of five noisy validation numbers, so quoting it as the run's result overstates the model
-by an amount the run itself cannot measure. The test score can be quoted without that
-caveat, and the gap between the two *is* the caveat, in the metric's own units.
+``best`` is the maximum of several noisy validation numbers, so quoting it overstates the model; the
+test score can be quoted without that caveat, and **the gap between the two *is* the caveat**. The
+score arrives with its own interval, and this node reports whether the validation score falls inside
+it — a gap smaller than the interval is one this measurement cannot distinguish from zero.
 
-The test score arrives with its own bootstrap interval (:mod:`automl_agent.scoring.intervals`),
-and this node reports whether the validation score falls inside it. That is the second
-question about the same gap and it is not the same as the first: a gap of 0.004 on a slice
-whose interval spans 0.06 is a gap this measurement cannot distinguish from zero, and
-printing the number without the width invites reading it as a measured amount of bias.
+**This is the acceptance channel and it has to stay one.** Steering is decided inside the loop on the
+paired interval, tuned for sensitivity. Acceptance is decided here, once, on rows no plan and no
+diagnosis ever saw.
 
-**This is the acceptance channel, and it has to stay one.** Two different decisions are made
-about differences in this system and they carry different costs. Steering — what to prescribe
-next — is decided inside the loop on the paired interval
-(:func:`automl_agent.scoring.intervals.paired_delta`), where being sensitive is the point and a false
-positive costs one iteration. Acceptance — the claim that the run improved on something — is
-decided here, once, on rows no plan and no diagnosis ever saw.
+**So this number must never gate which iteration wins.** The moment ``best`` is chosen, confirmed or
+overruled by a test score, the test slice joins the selection set — and the promise
+``capabilities._CLASSIFICATION_SCORING`` makes to every plan is false from that instant, with nothing
+left able to measure what it cost. A gate needs a fourth split or repeated CV.
 
-So this number must never be promoted into a gate on which iteration wins. The moment
-``best`` is chosen, confirmed or overruled by a test score, the test 20% is part of the
-selection set, and the promise ``capabilities._CLASSIFICATION_SCORING`` makes to every plan —
-carved off first, scored exactly once after the loop ends, never visible to a plan or a
-diagnosis — is false from that instant, with nothing left in the run able to measure what it
-cost. A gate needs a fourth split or repeated cross-validation; it does not need this one.
+``selection_gap`` is **no substitute for the multiplicity argument** in
+:mod:`automl_agent.scoring.intervals`: one is a *size*, the other a *rate*.
 
-``selection_gap`` is also not a substitute for the multiplicity argument in
-:mod:`automl_agent.scoring.intervals`. The 0.0078 measured on the MIMIC sample is the *size* of one
-realisation of the selection effect; multiplicity is a *rate*. A small gap on one run says
-nothing about how often a sensitive decision line fires on noise, and the two numbers cannot
-stand in for each other in either direction.
+**Never fatal, never a route decision.** No saved model is recorded as such and said in the report —
+refusing to write one because the final measurement was unavailable would throw away the evidence the
+run did accumulate.
 
-Never fatal, and never a route decision. If there is no saved model — a dry run, a run
-whose every attempt failed, an old run from before models were persisted — the node
-records why and the report says so. Refusing to write a report because the final
-measurement was unavailable would throw away the evidence the run did accumulate.
+Third member of the raw-data boundary, same terms as ``training``: path from the private ``data_ref``
+channel, work in a subprocess, return through :func:`automl_agent.privacy.public_result`. Nothing here
+prints — ``main.ConsoleReporter`` calls :func:`describe` *after* flushing the buffered iteration
+summary, since the console only sees a node's update once it has returned.
 
-Third member of the raw-data boundary, on the same terms as ``training``: the path comes
-from the private ``data_ref`` channel, the work happens in a subprocess, and what returns
-to state goes through :func:`automl_agent.privacy.public_result`.
-
-Nothing here prints. :func:`describe` renders the one line and ``main.ConsoleReporter``
-calls it *after* flushing the iteration summary that ``evaluate`` left buffered — a print
-from inside this function would land before that line, since the console only sees a node's
-state update once the node has already returned.
+Rationale: ``docs/rationale.md``.
 """
 
 from __future__ import annotations

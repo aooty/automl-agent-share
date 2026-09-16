@@ -342,12 +342,11 @@ ALLOWED_STRINGS = {"class_weight", "weights", "kernel", "precision", "solver", "
 # the spellings that mean nothing anywhere.
 ALLOWED_STRING_VALUES: dict[str, frozenset[str]] = {"early_stopping": frozenset({"auto"})}
 
-# ``class_weight`` is the one key that may also arrive as a mapping, because it is the
-# only imbalance lever the executor has and ``'balanced'`` is not its optimum: on the
-# MIMIC sample ``'balanced'`` pins the ratio at the class frequency (8.08) where the best
-# measured ratio was 10 (balanced_accuracy 0.7849 -> 0.7895). Until this branch existed a
-# proposed map was dropped here *silently* — it never reached the executor, so it could
-# not even show up in ``dropped_hyperparams``.
+# ``class_weight`` is the one key that may also arrive as a mapping, because it is the only
+# imbalance lever the executor has and ``'balanced'`` is not its optimum — that keyword pins the
+# ratio at the class frequency, and the best measured ratio has sat above it. Until this branch
+# existed a proposed map was dropped here *silently*: it never reached the executor, so it could not
+# even show up in ``dropped_hyperparams``.
 WEIGHT_MAP_KEYS = {"class_weight"}
 # Weights are per class code, so a plausible map is small. The bounds only exist to stop
 # a runaway value (1e9 makes every metric degenerate) from reaching the estimator.
@@ -431,12 +430,13 @@ def model_selection(state: AutoMLState, *, config: RunConfig) -> dict:
         )
     else:
         try:
-            choice = LLMClient(config).complete_json(
+            choice = LLMClient(config, proposer=True).complete_json(
                 "model_selection", variables, selection_schema(task), iteration=iteration
             )
         except (LLMUnavailable, KeyError, OSError) as exc:
             print(f"  [model_selection] LLM 호출 실패({exc}) — 계획의 후보 모델로 폴백합니다")
 
+    proposed = bool(choice)
     if not choice:
         choice = fallback_selection(plan, task)
 
@@ -444,7 +444,9 @@ def model_selection(state: AutoMLState, *, config: RunConfig) -> dict:
     hyperparams = sanitise_hyperparams(
         {**(plan.get("hyperparams") or {}), **(choice.get("hyperparams") or {})}
     )
-    return {"model": model, "hyperparams": hyperparams}
+    # Same three states as ``plan["source"]`` and for the same reason — see ``nodes/planning.py``.
+    source = "llm" if proposed else ("fallback" if config.use_llm else "rules")
+    return {"model": model, "hyperparams": hyperparams, "selection_source": source}
 
 
 def fallback_selection(plan: dict[str, Any], task: str | None = None) -> dict[str, Any]:
@@ -516,8 +518,35 @@ def _weight_map(value: Mapping[Any, Any]) -> dict[int, float] | None:
     return clean
 
 
+def _string_allowed(key: str, value: str) -> bool:
+    """Whether ``value`` is a string this key may carry.
+
+    Two lists, checked in order, because they answer different questions: a key in
+    :data:`ALLOWED_STRING_VALUES` has an enumerated option set and anything outside it is dropped,
+    while a key in :data:`ALLOWED_STRINGS` takes any string. A key in the first list is *not*
+    consulted against the second — that is what makes the option set a whitelist rather than a hint.
+    """
+    if key in ALLOWED_STRING_VALUES:
+        return value in ALLOWED_STRING_VALUES[key]
+    return key in ALLOWED_STRINGS
+
+
+def _clamped_number(key: str, value: int | float) -> int | float:
+    """``value`` inside this key's :data:`LIMITS`, keeping ``int`` an ``int`` where it still is one."""
+    low, high = LIMITS.get(key, (-1e12, 1e12))
+    clamped = min(max(float(value), low), high)
+    if isinstance(value, int) and float(clamped).is_integer():
+        return int(clamped)
+    return clamped
+
+
 def sanitise_hyperparams(raw: Any) -> dict[str, Any]:
-    """Keep values the executor can use, clamped to sane ranges; drop the rest."""
+    """Keep values the executor can use, clamped to sane ranges; drop the rest.
+
+    One ``elif`` per value *type*, each arm a single assignment — the two arms that needed a nested
+    test delegate it (:func:`_string_allowed`, :func:`_weight_map`) so this loop reads as the
+    whitelist it is rather than as a decision tree.
+    """
     if not isinstance(raw, dict):
         return {}
     cleaned: dict[str, Any] = {}
@@ -527,15 +556,9 @@ def sanitise_hyperparams(raw: Any) -> dict[str, Any]:
         if isinstance(value, bool):
             cleaned[key] = value
         elif isinstance(value, (int, float)):
-            low, high = LIMITS.get(key, (-1e12, 1e12))
-            clamped = min(max(float(value), low), high)
-            cleaned[key] = int(clamped) if isinstance(value, int) and float(clamped).is_integer() else clamped
-        elif isinstance(value, str):
-            if key in ALLOWED_STRING_VALUES:
-                if value in ALLOWED_STRING_VALUES[key]:
-                    cleaned[key] = value
-            elif key in ALLOWED_STRINGS:
-                cleaned[key] = value
+            cleaned[key] = _clamped_number(key, value)
+        elif isinstance(value, str) and _string_allowed(key, value):
+            cleaned[key] = value
         elif isinstance(value, dict) and key in WEIGHT_MAP_KEYS:
             mapping = _weight_map(value)
             if mapping is not None:
@@ -574,6 +597,20 @@ def digest_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:
         # whenever the requested strategy was downgraded. Absent for runs recorded before
         # the executor reported it, which is why the report prompt has a fallback.
         "preprocessing": result.get("applied_preprocessing") or {},
+        # The ordered form of the line above, when the attempt declared a spec: one rendered step
+        # per line, in order, with the columns each touched. Both are here because
+        # ``applied_preprocessing`` cannot express either half of what a spec adds — it reports
+        # ``impute: per_column`` for a ``ColumnTransformer`` and has no place at all for the
+        # sequence. Absent for an attempt that used the flags, which is what says it used them.
+        #
+        # This key is the reason the field exists in the digest rather than only in ``result``.
+        # The Critic is handed the attempt it judges as a whole ``result``, so it saw the spec
+        # already; the *Planner* only ever sees these digests, so without this line an attempt
+        # that named three columns for constant imputation reached the next plan as
+        # ``impute: per_column`` — the fact that a spec ran, with no way to tell which one, and
+        # therefore no way to vary it deliberately. Found by running the loop and reading what
+        # iteration 2 was actually given.
+        "applied_pipeline": result.get("applied_pipeline") or [],
         # Beside ``preprocessing`` for the same reason: it is what the executor did rather than
         # what was asked for. This attempt's ``hyperparams`` may say ``validation_fraction:
         # 0.15`` and nothing else said what that cost, so a Planner comparing two attempts on
@@ -581,6 +618,12 @@ def digest_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:
         # held no rows back, and absent for runs recorded before the executor reported it.
         "internal_validation": result.get("internal_validation") or {},
         "unsupported_claims": plan.get("unsupported_claims") or [],
+        # Who decided this attempt. In the digest and not only in the run config because the
+        # answer can differ *per iteration*: a proposer that fails schema validation on
+        # iteration 3 and not on 1 produced two different arms inside one run, and a reader
+        # comparing those iterations has no other way to see it.
+        "plan_source": plan.get("source") or "",
+        "selection_source": attempt.get("selection_source") or "",
         "status": result.get("status"),
         "error_type": result.get("error_type"),
         # ``result["paired"]`` is deliberately not here. This digest feeds the Planner and the

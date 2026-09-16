@@ -1,22 +1,16 @@
 """Which BLAS/OpenMP thread state a fit ran in, recorded because it moves the score.
 
-Measured on the MIMIC card with ``tree_method="hist"``: two runs of a key-for-key identical
-training config *in the same shell* agree to the last bit across all 9,429 validation rows,
-and the same config across ``OMP_NUM_THREADS`` 1..20 spans balanced_accuracy 0.007691 — 0.99x
-the half-width of a single paired verdict on that run — with ``max |delta proba|`` 0.34.
-Histogram summation over a different number of partial buffers adds in a different order, and
-floating-point addition is not associative.
+**"Same seed, same config" is not "same numbers".** Histogram summation over a different number of
+partial buffers adds in a different order, and floating-point addition is not associative — so the
+same config across thread counts moves the score by about as much as a paired verdict's half-width,
+while two runs in the *same* shell agree to the last bit (``FINDINGS-mimic.md``). Without this, a run
+directory could hold two attempts fitted under different thread counts and the ledger would publish
+the difference as the plan's doing.
 
-So "same seed, same config" is not "same numbers", and until this module existed the harness
-wrote down every input to a fit *except* the one that decides which of the two it is. A run
-directory could hold two attempts fitted under different thread counts, and the ledger would
-publish the difference between them as the plan's doing.
-
-This module only *records*. It does not set the variables and does not warn about a value:
-pinning a fit to one thread would make it reproducible and several times slower, and that
-trade belongs to whoever is running it. What is not theirs to make is the choice to leave the
-number out of the record — a measurement whose environment is unstated cannot be compared
-against another one.
+**This module only records.** It does not set the variables and does not warn about a value — pinning
+a fit to one thread is reproducible and several times slower, and that trade belongs to whoever is
+running it. What is not theirs is leaving the number out of the record: a measurement whose
+environment is unstated cannot be compared against another one.
 """
 
 from __future__ import annotations

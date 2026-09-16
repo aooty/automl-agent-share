@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import TRAIN_SCRIPT, RunConfig, decode_output, read_json_object, utf8_env
+from ..dataset.pipeline import STEPS as PIPELINE_STEPS
 from ..dataset.targets import DEFAULT_TARGET_MISSING_POLICY, TARGET_MISSING_POLICIES
 from ..privacy import public_result, register_private
 from ..scoring.goal import goal_threshold
@@ -175,6 +176,20 @@ def build_train_config(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
         "task": card_task(card) or TASK_CLASSIFICATION,
         "seed": config.seed,
     }
+    steps = pipeline_block(plan)
+    if steps:
+        # Replaces ``preprocessing`` in the executor rather than joining it — the executor
+        # ignores the flags when a spec arrives, and sending both would put two descriptions of
+        # one pipeline in the config with nothing able to say which ran. The flags stay in the
+        # file because the card's defaults still live there and a spec of only unknown steps
+        # falls back to nothing rather than to them.
+        train_config["pipeline"] = steps
+    decision = decision_block(plan)
+    if decision:
+        # Only when something asked for it, so a run that does not tune writes the same
+        # ``train_config.json`` it always did — which is what lets an earlier attempt's config be
+        # replayed against a later one and differ only where the plan differed.
+        train_config["decision"] = decision
     baseline = paired_baseline(state, config)
     if baseline:
         train_config["paired_baseline"] = baseline
@@ -189,19 +204,17 @@ def build_train_config(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
 def paired_baseline(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
     """Which earlier attempt this one should be compared against, row by row.
 
-    The run's best so far, because that is the comparison every consumer already makes: the
-    ledger's "직전 최고 대비", ``evaluate``'s ``improved``, the report's headline. ``best`` is
-    owned by :mod:`automl_agent.nodes.evaluate`, which runs *after* training, so at this point
-    it holds the best of iterations 1..N-1 — exactly the baseline the subtraction uses.
+    The run's best so far — the comparison every consumer already makes (the ledger's "직전 최고
+    대비", ``evaluate``'s ``improved``, the report's headline). ``best`` is owned by
+    :mod:`automl_agent.nodes.evaluate`, which runs *after* training, so here it holds the best of
+    iterations 1..N-1: exactly the baseline the subtraction uses.
 
-    What crosses into the config is an iteration number and a path, never predictions. The
-    path is a pure function of the iteration number, so nothing about the file's contents has
-    to be remembered in state; the file is read by the training subprocess, which is already
-    on the data side of the boundary.
+    Into the config goes an iteration number and a path, never predictions. The path is a pure
+    function of the number, so no file contents need remembering in state, and the file is read by the
+    training subprocess — already on the data side of the boundary.
 
-    ``{}`` when there is no baseline yet, or when that iteration left no predictions file
-    (it errored, or the write failed). The executor turns both into a ``skipped`` block with
-    a reason rather than into silence.
+    ``{}`` when there is no baseline yet, or that iteration left no predictions file (errored, or the
+    write failed). The executor turns both into a ``skipped`` block with a reason, not silence.
     """
     iteration = (state.get("best") or {}).get("iteration")
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
@@ -275,6 +288,61 @@ def preprocessing_block(plan: dict[str, Any], card: dict[str, Any]) -> dict[str,
         if isinstance(raw.get(flag), bool):
             block[flag] = raw[flag]
     return block
+
+
+# Kept in step with ``scripts.train.DECISION_TUNED``, restated here for the same reason
+# ``_PREPROCESSING_ALIASES`` is: this node has to build the value before the executor sees it.
+_DECISION_TUNED = "tuned"
+
+
+def decision_block(plan: dict[str, Any]) -> dict[str, Any]:
+    """Turn the plan's ``tune_threshold`` into the executor's ``decision`` config.
+
+    Boolean in, string out, and the asymmetry is the point: the executor's key takes ``"tuned"`` *or*
+    an explicit cut, because a hand-written config or a test has reason to name one. A *plan* does
+    not — the planner has never seen this model's probabilities, so a number from it is a guess about
+    their distribution dressed as a decision.
+
+    Only ``True`` counts. ``False`` and absent are the same request (the default 0.5 rule) and both
+    give ``{}``, so the config file is unchanged rather than carrying a key meaning "as before".
+    """
+    if plan.get("tune_threshold") is True:
+        return {"threshold": _DECISION_TUNED}
+    return {}
+
+
+def pipeline_block(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Allowlist the ordered pipeline spec the executor will interpret.
+
+    ``plan.pipeline`` is free-form LLM output and this is its gate, same terms as
+    :func:`preprocessing_block`: an unknown step name never reaches the config file, so the executor
+    is never asked to resolve a name it does not know and no report can claim a transform with no
+    implementation. Names come from :data:`automl_agent.dataset.pipeline.STEPS`, imported rather than
+    restated — that module reaches no further than the stdlib at import time, which is why the
+    registry lives there and not in ``scripts/train.py``.
+
+    Keys *inside* a step are deliberately not filtered here. The executor validates each against the
+    thing it is about to build (a strategy against the imputer's own list, a column against the fitted
+    schema, a degree against the one that exists) and reports what it did in ``applied_pipeline``. A
+    second validation here would need a second copy of all three lists, and the copy is what drifts.
+
+    ``columns`` is sorted where present, so two spellings of one selection are one signature to
+    :func:`automl_agent.nodes.planning._signature` rather than two plans.
+    """
+    raw = plan.get("pipeline")
+    if not isinstance(raw, list):
+        return []
+    steps: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict) or str(entry.get("step") or "") not in PIPELINE_STEPS:
+            continue
+        step = {key: value for key, value in entry.items() if isinstance(key, str)}
+        for holder in (step, *(g for g in step.get("groups") or [] if isinstance(g, dict))):
+            names = holder.get("columns")
+            if isinstance(names, list):
+                holder["columns"] = sorted({str(name) for name in names if isinstance(name, str)})
+        steps.append(step)
+    return steps
 
 
 def data_block(card: dict[str, Any], reference: dict[str, Any] | None = None) -> dict[str, Any]:

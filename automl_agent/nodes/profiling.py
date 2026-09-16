@@ -98,24 +98,20 @@ def assert_protocol_matches(
 ) -> None:
     """Stop when the card's baseline was measured over different rows than this run uses.
 
-    The goal threshold is derived from that baseline, so a protocol mismatch means the bar
-    and the scores it is compared against come from two different splits — a comparison
-    that reads as a result but is not one. Refusing is the same stance
-    ``--on-missing-target`` takes, and for the same reason: a silently incomparable number
-    is worse than a stopped run.
+    The goal threshold comes from that baseline, so a protocol mismatch means the bar and the scores
+    it is compared against come from two different splits — a comparison that reads as a result and
+    is not one. Same stance as ``--on-missing-target``: a silently incomparable number is worse than
+    a stopped run. Cards with no ``protocol`` block predate the field and are accepted
+    (:func:`automl_agent.scoring.splits.protocol_mismatch`).
 
-    A card with no ``protocol`` block predates the field and is accepted — see
-    :func:`automl_agent.scoring.splits.protocol_mismatch`.
+    Group column read off ``data_ref``, not ``config``, because that is where the two sources are
+    already resolved: a card profiled with ``--group-column`` names it in its private ``data`` block,
+    so a ``--dataset-card`` run inherits it and is *not* refused for omitting the flag — while an
+    explicit flag disagreeing with the card still is.
 
-    The group column is read off ``data_ref`` rather than off ``config``, because that is
-    where the two sources are already resolved: a card profiled with ``--group-column``
-    names the column in its private ``data`` block, so a ``--dataset-card`` run inherits
-    it and is *not* refused for having omitted the flag — while an explicit flag that
-    disagrees with the card still is.
-
-    Stratification is read off the card's own ``task`` for the same reason: a continuous
-    target cannot be stratified, so ``stratified: false`` on a regression card agrees with
-    what this run will do rather than differing from it.
+    Stratification read off the card's ``task`` for the same reason: a continuous target cannot be
+    stratified, so ``stratified: false`` on a regression card agrees with this run rather than
+    differing from it.
     """
     group_column = dict(reference or {}).get("group_column") or config.group_column
     message = protocol_mismatch(
@@ -133,30 +129,26 @@ def assert_goal_is_usable(
 ) -> None:
     """Stop when the metric cannot score this target, or when the bar could not be derived.
 
-    Both are setup errors rather than experimental outcomes, and both are cheap to find
-    here and expensive to find later. Asking for ``f1`` on a continuous target does not
-    produce a bad score, it produces *no* score — so the loop would spend its whole budget
-    reporting "목표 미달" for a number that was never computed. And a bar of ``None`` cannot
-    be compared against anything: ``goal_met`` is False for every attempt by construction.
+    Both are setup errors, not experimental outcomes, and both are cheap here and expensive later.
+    ``f1`` on a continuous target does not produce a bad score, it produces *no* score — the loop
+    would spend its whole budget reporting "목표 미달" for a number never computed. And a ``None`` bar
+    compares against nothing: ``goal_met`` is False for every attempt by construction.
 
-    The metric is read off the **goal**, not off the config, and the difference is the whole
-    substitution path: ``goal["metric"]`` is what the run is actually judged by, and
-    :func:`automl_agent.scoring.goal.resolve_goal` may have already replaced the config's metric with
-    one this target has. Reading ``config.metric`` here would refuse the very run the
-    substitution just made runnable. What is left for this check is the case substitution
-    cannot reach — a goal channel that was written by something other than ``resolve_goal``
-    (a hand-edited checkpoint, or a future caller that forgets) — so it stays a backstop
-    rather than the first line of defence.
+    Metric read off the **goal**, not the config — ``goal["metric"]`` is what the run is judged by,
+    and :func:`automl_agent.scoring.goal.resolve_goal` may already have replaced the config's metric
+    with one this target has. Reading ``config.metric`` would refuse the very run substitution just
+    made runnable. What is left here is the case substitution cannot reach: a goal channel written by
+    something else (hand-edited checkpoint, future caller that forgets). A backstop, not the first
+    line.
 
-    A card that declares no ``task`` (or one whose label this build does not know) predates
-    the field and is accepted, on the same terms as a card with no ``protocol`` block: the
-    check exists to catch a mismatch, not to reject cards it cannot judge.
+    No ``task`` (or a label this build does not know) predates the field and is accepted, same terms
+    as a missing ``protocol`` block — this catches mismatches, it does not reject cards it cannot
+    judge.
 
-    An *empty* ``goal`` is accepted too, and that is a different case from a derived bar of
-    ``None``: it means this state has no goal yet rather than that deriving one failed. Only
-    ``mae`` and ``rmse`` can produce a ``None`` bar (they are the metrics with no portable
-    default), so treating "no goal" as "no bar" would report a missing-units message about a
-    metric that has a default — ``f1`` — and refuse a run that was about to work.
+    An *empty* ``goal`` is accepted too, and is not the same as a derived bar of ``None``: it means
+    no goal yet, not that deriving failed. Only ``mae``/``rmse`` produce a ``None`` bar (no portable
+    default), so treating "no goal" as "no bar" would print a missing-units message about ``f1`` —
+    which has a default — and refuse a run that was about to work.
     """
     metric = str(goal.get("metric") or config.metric)
     declared = card_task(card)

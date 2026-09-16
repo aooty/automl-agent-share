@@ -1,23 +1,18 @@
 """The metric registry: one declaration of every metric a run can target.
 
-Three places used to keep their own list — the goal thresholds in :mod:`automl_agent.scoring.goal`,
-the scores :mod:`automl_agent.scripts.profile` measures, and the ones
-:mod:`automl_agent.scripts.train` emits. When those lists disagreed the failure was
-silent rather than loud: ``--metric balanced_accuracy`` derived a threshold and the
-profiler measured a baseline for it, but the trainer never produced the key, so
-``goal_met`` read a missing score and stayed False for every iteration. This module is
-the single list; the other three read from it.
+**Three places used to keep their own list, and disagreement failed silently** — a threshold derived
+and a baseline measured for a key the trainer never produced, so ``goal_met`` read a missing score and
+stayed False every iteration. This is the single list; the others read from it.
 
-Deliberately dependency-free — names and properties only, no sklearn, no imports from
-the rest of the package. The orchestrator process must never import pandas or sklearn,
-and the fixed scripts are run as *files* by the nodes rather than imported, so anything
-both sides share has to be importable from either direction with nothing else attached.
+**Deliberately dependency-free** — names and properties only, no sklearn, no imports from the rest of
+the package. The orchestrator must never import pandas or sklearn, and the fixed scripts are run as
+*files* rather than imported, so anything both sides share has to be importable from either direction
+with nothing attached.
 
-Each metric declares the ``task`` it belongs to, because a run's task is a property of
-the *target column* rather than of the caller: a continuous target cannot be scored with
-``f1``, and asking for one is a setup error worth refusing before the loop starts rather
-than a run that reports "목표 미달" five times. ``direction`` is declared here for the same
-reason — minimizing ``f1`` or maximizing ``mae`` is not a preference, it is a mistake.
+Each metric declares its ``task``, because a run's task is a property of the *target column* and not
+of the caller — asking for ``f1`` on a continuous target is a setup error worth refusing before the
+loop, not a run that reports "목표 미달" five times. ``direction`` is here for the same reason:
+minimizing ``f1`` is not a preference, it is a mistake.
 """
 
 from __future__ import annotations
@@ -150,27 +145,22 @@ DEFAULT_METRICS: dict[str, str] = {
 def substitute_metric(task: str, metric: str) -> str | None:
     """The metric to score ``task`` with instead of ``metric``, or ``None`` to keep it.
 
-    ``None`` covers every case where there is nothing to fix and every case where this
-    module cannot tell: the metric already belongs to the task, the task label is one this
-    build does not know, or the name is not a registry metric (``RunConfig`` refuses those).
-    A substitution is only ever proposed when both facts are known and they disagree.
+    ``None`` means nothing to fix or nothing knowable: the metric already fits the task, the
+    task label is unknown to this build, or the name is not a registry metric (``RunConfig``
+    refuses those). A substitution needs both facts known and disagreeing.
 
-    The disagreement is reachable in two ways, and both used to cost a whole run.
-    ``--metric rmse`` against a classification target passes ``RunConfig`` — it validates the
-    name against the registry, and it is built before profiling, so at that point nobody
-    knows what the target column is. And a card declaring ``regression`` over a column that
-    reads as classification puts the same mismatch inside a run whose flags were all
-    consistent. Either way the trainer computes the *other* task's metrics, so the goal
-    metric is simply absent from every result: ``goal_met`` reads a missing score, every
-    iteration is recorded as "목표 미달", and the loop spends its whole budget finding out.
+    Two paths reach that disagreement and both used to cost a whole run. ``--metric rmse`` on a
+    classification target passes ``RunConfig``, which checks the name against the registry before
+    profiling knows what the target column is; and a card declaring ``regression`` over a column
+    that reads as classification puts the same mismatch inside a run whose flags all agreed.
+    Either way the trainer computes the *other* task's metrics, the goal metric is absent from
+    every result, and the loop spends its whole budget recording "목표 미달".
 
-    Substituting is not the only defensible answer — refusing at profiling time is the other
-    one, and it is what this function replaced. It loses to substitution on the case that
-    actually happens: a mistyped ``--metric`` on a long run is a typo, and a typo should cost
-    a line of output rather than the run. What makes it safe is that the substitution is
-    never quiet — the caller who acts on it is expected to say so (see
-    :mod:`automl_agent.nodes.profiling`), because a run judged by a metric nobody asked for
-    is only honest if the swap is on screen.
+    Refusing at profiling time was the alternative, and what this replaced. Substitution wins on
+    the case that happens — a mistyped ``--metric`` should cost a line of output, not the run —
+    and it is safe only because it is never quiet: the caller says so
+    (:mod:`automl_agent.nodes.profiling`), since a run judged by a metric nobody asked for is
+    honest only with the swap on screen.
     """
     wanted = task_of(metric)
     if wanted is None or task not in DEFAULT_METRICS or wanted == task:

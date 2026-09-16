@@ -32,8 +32,6 @@ obligations rather than context.
 - *"기준선의 신뢰구간 안에 있습니다"* — clearing this bar would not be distinguishable
   from where the run started.
 
-This is attempt {{iteration}} of at most {{max_iterations}}.
-
 ## Models this system can actually run
 
 Only these identifiers exist. Anything else will be rejected by the executor.
@@ -54,9 +52,15 @@ product, plus the one executor default whose value depends on it.
 
 {{row_budget}}
 
+<!-- cache -->
+
 ## Previous attempts
 
 {{history}}
+
+<!-- cache -->
+
+This is attempt {{iteration}} of at most {{max_iterations}}.
 
 ## Best result so far
 
@@ -86,8 +90,23 @@ product, plus the one executor default whose value depends on it.
 5. Be concrete and numeric. "Tune the hyperparameters" is not a plan.
 6. `strategy`, `changes_from_last` and `rationale` describe what *this executor* will
    do. Do not describe a step it cannot take — a plan whose reasoning depends on
-   threshold tuning, cross-validation or engineered features spends its attempt on a
+   cross-validation, resampling or engineered features spends its attempt on a
    configuration that will run without any of them. Write it as what you *will* do:
    there is no need to enumerate the unavailable items to show you read the list.
+7. Preprocessing has two forms and you pick one. The `preprocessing` object is the four
+   flags, applied in a fixed order to the whole matrix. The `pipeline` array is an ordered
+   list of steps, each of which may name the columns it applies to — that is the one that can
+   say "impute these three with a constant and the rest with the median", and the capability
+   list gives its shape and what it measured. **Sending both is sending two descriptions of
+   one pipeline**, and the executor then ignores `preprocessing`; say it once, in whichever
+   form you mean. Whatever ran comes back as `applied_pipeline` in the next attempt's history,
+   so a step you asked for and do not see there was dropped.
+8. The decision threshold is a lever you set, not prose: `"tune_threshold": true`. It is
+   worth it on an imbalanced target and worth close to nothing on a balanced one, so read
+   the card's `class_balance` before asking — and read `balanced_accuracy_cut_headroom` in the history, which
+   is exactly how much a better cut is still worth on the last attempt's ranking. It costs
+   20% of the training rows, and it is an alternative to the imbalance weight rather than a
+   partner: setting both leaves two owners for whatever the score does. What it optimises is
+   the goal metric and nothing else, so the *other* metrics can fall.
 
 Respond with a single JSON object matching the schema. No prose outside it.

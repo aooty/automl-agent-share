@@ -120,21 +120,19 @@ def report(state: AutoMLState, *, config: RunConfig) -> dict:
 def describe_replanning(history: list[dict[str, Any]]) -> str:
     """How much of the loop actually looped, as one sentence.
 
-    ``goal_reached`` is checked before anything else in :func:`automl_agent.graph.route`, and the
-    bar in ``auto`` mode is derived from the baseline — so a first attempt that clears it ends the
-    run at iteration 1 and the Critic never runs at all. Four of the five datasets in
-    ``docs/RESULTS.md`` ended that way. Nothing said so: the report's stop reason read
-    "목표 지표 달성", the attempt table's ``critic 진단`` column read "—", and a reader comparing
-    the LLM arm against the rule-based arm had no way to see that the whole diagnose-and-replan
-    path — the thing the comparison was about — had not executed on either side.
+    ``goal_reached`` is checked first in :func:`automl_agent.graph.route` and the ``auto`` bar comes
+    from the baseline, so a first attempt that clears it ends the run at iteration 1 and the Critic
+    never runs. Four of the five datasets in ``docs/RESULTS.md`` ended that way and nothing said so:
+    stop reason read "목표 지표 달성", the ``critic 진단`` column read "—", and a reader comparing the
+    two arms could not see that the diagnose-and-replan path — the subject of the comparison — had not
+    executed on either side.
 
-    So the count is stated rather than left to be inferred from an empty column, and it is stated
-    in both directions: zero verdicts is evidence about the *planner*, and it is evidence for
-    neither side about the loop.
+    So the count is stated rather than inferred from an empty column, and stated both ways: zero
+    verdicts is evidence about the *planner* and evidence for neither side about the loop.
 
-    ``critic`` is absent from the last attempt by construction — the loop stops after evaluating
-    it, so its verdict would only have fed a replan that never happens — which is why the
-    sentence names that attempt instead of leaving a reader to explain the missing row.
+    ``critic`` is absent from the last attempt by construction (the loop stops after evaluating it, so
+    its verdict would feed a replan that never happens) — hence the sentence names that attempt
+    instead of leaving a reader to explain the missing row.
     """
     attempts = len(history)
     diagnosed = sum(1 for item in history if item.get("critic"))
@@ -155,16 +153,15 @@ def describe_replanning(history: list[dict[str, Any]]) -> str:
 def run_met_goal(state: AutoMLState) -> bool:
     """Whether this run produced a model that clears the bar — not whether its *last* one did.
 
-    Judged on ``best`` as well as on the final result, because ``best`` is the run's answer: it
-    is the model ``holdout`` scored and the one ``predict`` resolves to. Under the default
-    routing the two questions have the same answer, since the loop stops the instant an attempt
-    clears the bar and ``best`` is then that attempt. Under
-    :attr:`automl_agent.config.RunConfig.search_past_goal` they come apart — the run keeps going,
-    and a later attempt that scores worse would otherwise turn "달성" into "미달성" while the
-    winning model sits unchanged in ``best``.
+    Judged on ``best`` as well as the final result, because ``best`` is the run's answer — the model
+    ``holdout`` scored and the one ``predict`` resolves to. Under default routing both questions agree
+    (the loop stops the instant an attempt clears the bar, and ``best`` is that attempt). Under
+    :attr:`automl_agent.config.RunConfig.search_past_goal` they come apart: the run keeps going, and a
+    later worse attempt would otherwise turn "달성" into "미달성" while the winning model sits unchanged
+    in ``best``.
 
-    Either shape satisfies it, and ``goal_met`` refuses a missing or non-numeric score, so an
-    empty ``best`` (no successful fit) answers False rather than raising.
+    Either shape satisfies it, and ``goal_met`` refuses a missing or non-numeric score — so an empty
+    ``best`` (no successful fit) answers False rather than raising.
     """
     goal = dict(state.get("goal") or {})
     return goal_met(dict(state.get("result") or {}), goal) or goal_met(

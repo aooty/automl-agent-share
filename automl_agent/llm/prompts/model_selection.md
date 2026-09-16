@@ -1,10 +1,6 @@
 You are the Model Selection judge. The plan below has already been decided; your one
 job is to commit to a concrete model identifier and its hyperparameters.
 
-## Plan
-
-{{plan}}
-
 ## Dataset card
 
 {{dataset_card}}
@@ -15,9 +11,17 @@ You must pick exactly one `id` from this list. Any other value is rejected.
 
 {{available_models}}
 
+<!-- cache -->
+
 ## Previous attempts
 
 {{history}}
+
+<!-- cache -->
+
+## Plan
+
+{{plan}}
 
 ## The Critic's verdict on the most recent attempt
 

@@ -1,63 +1,31 @@
-"""How much of a score is the model, and how much is the 2,000 rows it was measured on.
+"""How much of a score is the model, and how much is the rows it was measured on.
 
-**The defect this closes.** Every number this system reports is a point estimate over one
-validation slice, and every comparison it makes is between two such numbers: an attempt
-against the card's bar, an attempt against the previous attempt, the holdout against the
-validation score it was selected by. On the MIMIC sample the validation slice is ~2,400
-rows with ~290 positives, so an ``f1`` measured there moves by ±0.03 from resampling alone.
-A run that improves 0.7412 → 0.7503 and reports "개선됨" is reporting the resample. Four
-iterations of a real run were spent walking inside that band.
+Every number here is a point estimate over one slice, and every comparison is between two of them.
+So each scored split publishes a 95% percentile bootstrap interval on the goal metric, and the
+consumers that compare say whether their difference fits inside it.
 
-So each scored split publishes a 95% percentile bootstrap interval on the goal metric, and
-the consumers that make a *comparison* say whether the difference they found fits inside
-it — ``nodes/holdout.py`` for the selection gap, the Critic prompt for iteration-over-
-iteration movement, the report for its headline claim.
+**Two halves, for two different decisions.**
 
-**What the interval is not.** It is the sampling noise of *one* measurement on *these*
-rows. It is not the selection bias of taking the best of five validation scores — that is a
-different error, it points one way rather than both, and the held-back test split is what
-measures it (:mod:`automl_agent.nodes.holdout`). Two attempts' intervals overlapping means
-"these rows cannot tell these models apart", not "the models are the same".
+*Marginal* (:func:`bootstrap_interval`) — the width of one score. **Overlapping intervals mean
+"these rows cannot tell these models apart", not "the models are the same".** And it is sampling
+noise, **not** the selection bias of taking the best of five: that error points one way, and the
+held-back test split is what measures it (:mod:`automl_agent.nodes.holdout`).
 
-**Why groups matter here too, and separately.** A row-level bootstrap of a split holding
-five visits per patient treats those five rows as five independent observations, so it
-reports an interval about ``5 * n_patients`` samples when the data has ``n_patients`` of
-them — too narrow, by a factor that grows with the cluster size. That is the same error
-:mod:`automl_agent.scoring.splits` closes for the split itself, and closing one without the other
-would replace an inflated score with an over-confident one. When the split was grouped the
-resampler draws whole groups, so ``unit`` is ``"group"`` and the interval widens honestly.
+*Paired* (:func:`paired_delta`) — resamples the difference itself, because most of a marginal width
+is row noise common to both attempts and cancels. Strictly narrower question: "did *this change* move
+the score on these rows". **It does not fix confounding** — two attempts that each moved two levers
+have a well-resolved difference and still no attribution.
 
-**Why there is a second, paired half.** The interval above is *marginal* — it is the width
-of one score, and comparing two attempts by asking whether their intervals overlap throws
-away the fact that they were scored on the same rows. Most of a marginal width is row
-sampling noise, and that noise is common to both attempts, so it cancels in the difference.
-On the MIMIC sample the marginal half-width on ``balanced_accuracy`` is 0.013–0.014 while the
-half-width of the *difference* is 0.0061: a factor of two, and the band where the two verdicts
-disagree (|Δ| ≈ 0.006–0.013) is exactly the size the preprocessing lever lands in. A run
-whose observations all missed that band was lucky, not vindicated. So
-:func:`paired_delta` resamples the difference itself, and the ledger reports that instead of
-subtracting two point estimates. It answers a strictly narrower question than the marginal
-interval does — "did *this change* move the score on these rows" rather than "what is this
-score" — and it does not fix confounding: two attempts that moved two levers each have a
-well-resolved difference and still no attribution.
+**Grouped splits resample whole groups.** A row-level bootstrap over five visits per patient reports
+an interval for ``5 * n_patients`` samples when the data has ``n_patients``, too narrow by a factor
+that grows with cluster size. ``unit`` says which was done.
 
-**Which decision each half is for.** The paired interval is a *steering* instrument: it
-decides what to prescribe next, so sensitivity is what it is for and the cost of a false
-positive is one iteration. Accepting a claim — "the loop improved on something" — is a
-different decision with a different cost, and it is measured on the held-back test split
-(:mod:`automl_agent.nodes.holdout`), which is scored once after the loop ends and is never
-allowed to gate which iteration wins. Keeping the two apart is what lets this half be tuned
-for sensitivity at all; collapsing them would make every steering decision as expensive as
-an acceptance.
+**The paired half is a steering instrument, tuned for sensitivity; the test split is the acceptance
+test.** Collapsing the two would make every steering decision as expensive as an acceptance. The
+price of that sensitivity is multiplicity, and **nothing here corrects for it** — the ledger reports
+each comparison on its own terms.
 
-The price of that sensitivity is multiplicity, and it is worth stating in a form that does
-not depend on guessing how correlated the comparisons are. A decision line at a 0.0061
-half-width applied to four comparisons expects 0.2 false positives under the null, and an
-expectation is invariant to correlation. The chance of *at least one* runs from 0.05, when
-the comparisons are perfectly positively correlated, to 0.186 when they are independent — so
-independence is the upper bound rather than the assumption that flatters the loop. Nothing
-here corrects for it: a five-iteration run makes four of those comparisons, and the ledger
-reports each one on its own terms.
+Rationale: ``docs/rationale.md``.
 
 Train-split scores deliberately get no interval. An in-sample score's uncertainty is not
 what its width would describe, and the Critic reads the train number for the gap against
@@ -149,19 +117,16 @@ def bootstrap_interval(
 ) -> Interval | None:
     """Resample the scored split ``resamples`` times and return the percentile interval.
 
-    ``score`` is a callable over ``(y_true, pred, proba)`` slices, so this module needs to
-    know nothing about which metric is being measured or which library computes it — the
-    two fixed scripts pass their own scorer and stay the only places that import sklearn.
-    It may return ``None`` or raise ``ValueError`` for a degenerate resample; both count as
-    "undefined here" rather than failing the run.
+    ``score`` is a callable over ``(y_true, pred, proba)``, so this module knows nothing about which
+    metric or which library — the two fixed scripts pass their own scorer and stay the only importers
+    of sklearn. A degenerate resample may return ``None`` or raise ``ValueError``; both are "undefined
+    here", not a failed run.
 
-    ``None`` — never an exception — when there is no interval worth publishing: too few
-    resampling units, ``resamples`` at 0, or a metric undefined in too many resamples. Every
-    caller treats a missing interval as "not measured", so a degenerate split costs a
-    disclosure rather than an attempt.
+    **``None``, never an exception**, when there is no interval worth publishing (too few units,
+    ``resamples`` at 0, a metric undefined too often). Callers read that as "not measured", so a
+    degenerate split costs a disclosure rather than an attempt.
 
-    Deterministic in ``seed``: the same split scored twice yields the same interval, which
-    is what lets two iterations' intervals be compared at all.
+    **Deterministic in ``seed``** — which is what lets two iterations' intervals be compared at all.
     """
     import numpy as np
 
@@ -235,7 +200,7 @@ def _units(groups: Any, n_rows: int) -> tuple[list[Any] | None, str]:
 # more keys in ``metrics``, because these are properties of a *comparison* and not of the
 # model on these rows: ``p_better`` sitting beside ``roc_auc`` in the metrics dict would ride
 # into the report's metric table and read as a score. The precedent for a diagnostic living
-# in ``metrics`` — ``cut_headroom`` — is a single-model measurement, which this is not.
+# in ``metrics`` — ``balanced_accuracy_cut_headroom`` — is a single-model measurement, which this is not.
 PAIRED_KEY = "paired"
 
 # The four numbers, named once so the writer and every reader cannot disagree. Same argument
@@ -312,19 +277,16 @@ def paired_delta(
 ) -> PairedDelta | None:
     """Resample the *difference* between two predictions of the same rows.
 
-    ``candidate`` and ``baseline`` are each ``(pred, proba)`` for the same ``y_true``, and
-    each resample scores both on the identical draw — which is the whole point, and the
-    reason this cannot be assembled out of two :func:`bootstrap_interval` calls. ``score``
-    and ``groups`` mean what they mean there.
+    **Each resample scores both on the identical draw** — the whole point, and why this cannot be
+    assembled out of two :func:`bootstrap_interval` calls.
 
-    ``direction`` is required rather than defaulted: it decides which sign of ``delta``
-    counts toward ``p_better``, and a wrong default would report an ``rmse`` regression as a
-    0.99 probability of improvement.
+    **``direction`` is required, never defaulted**: it decides which sign of ``delta`` counts toward
+    ``p_better``, and a wrong default reports an ``rmse`` regression as a 0.99 probability of
+    improvement.
 
-    ``None`` — never an exception — on the same three conditions :func:`bootstrap_interval`
-    returns ``None`` for, so a caller treats a missing comparison as "not measured". A
-    *misaligned* baseline does raise: predictions of a different number of rows are not this
-    split's, and pairing them would produce a narrow interval around a meaningless number.
+    ``None`` on the same three conditions :func:`bootstrap_interval` uses. **A *misaligned* baseline
+    does raise** — predictions of a different row count are not this split's, and pairing them gives a
+    narrow interval around a meaningless number.
     """
     import numpy as np
 
@@ -463,16 +425,15 @@ def paired_of(
 ) -> dict[str, Any] | None:
     """This result's paired comparison — but only if it is the pair the caller is reporting.
 
-    ``baseline_iteration`` is not a filter, it is the invariant. The published fields are
-    named ``delta_vs_best`` and ``p_better``, so both have to be about the *same* baseline as
-    the sentence they are rendered into: a caller subtracting against iteration 1 and
-    printing a P computed against iteration 4 would produce a line where every number is
-    real and the claim is not. There is one place that can check that — here, where both the
-    block and the caller's baseline are in hand — so the check is required rather than
-    optional, and a mismatch reads as "not measured" rather than being quietly rendered.
+    ``baseline_iteration`` is not a filter, it is the invariant. The published fields are named
+    ``delta_vs_best`` and ``p_better``, so both must be about the *same* baseline as the sentence they
+    render into — subtracting against iteration 1 while printing a P computed against iteration 4 gives
+    a line where every number is real and the claim is not. Only here are both the block and the
+    caller's baseline in hand, so the check is required rather than optional, and a mismatch reads
+    "not measured" instead of being quietly rendered.
 
-    ``None`` also for a skipped comparison and for a block missing any of
-    :data:`PAIRED_FIELDS`, which is what a result written before this existed looks like.
+    ``None`` also for a skipped comparison, and for a block missing any of :data:`PAIRED_FIELDS` —
+    what a result written before this existed looks like.
     """
     block = (result or {}).get(PAIRED_KEY)
     if not isinstance(block, Mapping) or block.get("status") != PAIRED_MEASURED:
@@ -510,9 +471,8 @@ def describe_paired(block: Mapping[str, Any] | None) -> str:
     if block.get("threads_changed") is True:
         # Appended rather than folded into the verdict, because the interval is still the
         # interval: those two prediction vectors really do differ by that much. What the row
-        # can no longer say is that the plan is why. Measured on the MIMIC card, the same
-        # config across OMP_NUM_THREADS 1..20 spans 0.0077 balanced_accuracy — 0.99x the
-        # half-width of one of these intervals (:mod:`automl_agent.threads`), so the
+        # can no longer say is that the plan is why: the same config across thread counts spans
+        # about as much as one of these intervals is wide (:mod:`automl_agent.threads`), so the
         # environment is not a rounding error next to what is being claimed.
         text += " [baseline과 스레드 상태가 다릅니다 — 이 Δ에는 환경 차이가 섞여 있습니다]"
     return text
@@ -533,19 +493,17 @@ def resolution_note(
 ) -> str:
     """What this attempt's slice can and cannot resolve, as a paragraph for a prompt.
 
-    ``others`` maps a label to a number this attempt is going to be compared against — the
-    goal threshold, each previous iteration's score — and every one that lands inside the
-    interval is named. That is the Critic's actual failure mode: it was handed two point
-    estimates and asked why the second is lower, so it diagnosed a cause for a difference
-    the rows never established. Naming the collisions is what lets it answer "this slice
-    does not separate them" instead.
+    ``others`` maps a label to a number this attempt will be compared against — the bar, each prior
+    score — and every one landing inside the interval is named. That answers the Critic's actual
+    failure mode: handed two point estimates and asked why the second is lower, it diagnosed a cause
+    for a difference the rows never established.
 
-    Deliberately does *not* say what to do about it. An overlap can mean the knob did
-    nothing, or that the slice is too small to see what it did; only the rest of the
-    evidence separates those, and a prescription here would preempt the diagnosis.
+    **Deliberately does not say what to do about it.** An overlap can mean the knob did nothing or
+    that the slice is too small to see what it did; only the rest of the evidence separates those, and
+    a prescription here would preempt the diagnosis.
 
-    A missing interval gets its own sentence rather than silence: the section exists in the
-    template either way, and an empty one reads as "no uncertainty".
+    **A missing interval gets its own sentence, never silence** — the section exists either way, and an
+    empty one reads as "no uncertainty".
     """
     bounds = interval_of(metrics, metric)
     if bounds is None:

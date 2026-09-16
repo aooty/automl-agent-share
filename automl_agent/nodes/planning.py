@@ -21,7 +21,7 @@ from ..dataset.caveats import describe_caveats
 from ..llm.client import LLMClient, LLMUnavailable, archive_prompt_only, render_prompt
 from ..scoring.goal import describe as describe_goal
 from ..scoring.metrics import TASK_REGRESSION
-from ..state import AutoMLState
+from ..state import AutoMLState, drop_pinned_seed
 from .model_selection import (
     DEFAULT_MODEL,
     _history_digest,
@@ -58,6 +58,19 @@ def plan_schema(task: str | None = None) -> dict[str, Any]:
             },
             "hyperparams": {"type": "object", "additionalProperties": True},
             "preprocessing": {"type": "object", "additionalProperties": True},
+            # The ordered form of the same subject. A plan gives one or the other: the executor
+            # ignores ``preprocessing`` when a spec arrives, because two descriptions of one
+            # pipeline leave nothing able to say which of them ran. Items are unconstrained
+            # objects for the reason ``preprocessing`` is — the executor validates every key
+            # against the thing it is about to build and reports the result in
+            # ``applied_pipeline``, and a second copy of those lists here is the copy that drifts.
+            "pipeline": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            # A boolean and not a number, because the planner has never seen this model's
+            # probabilities and a hand-picked cut would be a guess about their distribution.
+            # The executor accepts an explicit float in a hand-written config; what the plan
+            # gets is the lever, not the value. Optional: absent is the default 0.5 rule, which
+            # is what every plan written before this key existed means.
+            "tune_threshold": {"type": "boolean"},
             "changes_from_last": {"type": "string"},
             "rationale": {"type": "string"},
         },
@@ -110,10 +123,10 @@ def planning(state: AutoMLState, *, config: RunConfig) -> dict:
         # automl_agent.dataset.caveats.
         "caveats": describe_caveats(dict(state.get("dataset_card") or {})),
         "goal": state.get("goal") or {},
-        # The same dict in prose, because two of its keys are obligations and neither reads
-        # as one in JSON. mv-llm-2 was handed ``"exceeds_ranking_ceiling": true`` and
-        # ``"passable_margin": 0.289`` as bare keys and spent five iterations on tuning and
-        # family swaps against a bar no threshold over that ranking could reach; the
+        # The same dict in prose, because two of its keys are obligations and neither reads as one
+        # in JSON. Handed ``"exceeds_ranking_ceiling": true`` and ``"passable_margin"`` as bare
+        # keys, a run can spend its whole budget on tuning and family swaps against a bar no
+        # threshold over that ranking could reach; the
         # sentence explaining exactly that already existed in ``goal.describe`` and went
         # only to the console and the report.
         "goal_note": describe_goal(dict(state.get("goal") or {})),
@@ -140,13 +153,23 @@ def planning(state: AutoMLState, *, config: RunConfig) -> dict:
         archive_prompt_only(config, f"planning_iter{iteration}", render_prompt("planning", variables))
     else:
         try:
-            plan = LLMClient(config).complete_json(
+            plan = LLMClient(config, proposer=True).complete_json(
                 "planning", variables, plan_schema(task), iteration=iteration
             )
         except (LLMUnavailable, KeyError, OSError) as exc:
             print(f"  [planning] LLM 계획 수립 실패({exc}) — 규칙 기반 계획으로 폴백합니다")
 
-    plan = validate_plan(plan, task) or fallback_plan(state, critic_verdict, iteration, task)
+    proposed = validate_plan(plan, task)
+    plan = proposed or fallback_plan(state, critic_verdict, iteration, task)
+    # Which of the two wrote this plan. Three states and not two, because "we asked and did not
+    # get a usable plan" and "we never asked" are different facts about the same run: the first
+    # is a call that was paid for and produced nothing, the second is the rule-based arm running
+    # as designed. Before this, both looked identical in the artifacts — the console said so and
+    # nothing else did, so an operator reading ``history.json`` afterwards could not tell which
+    # iterations the proposer actually decided. That matters most for a run whose proposer is a
+    # local model: a silent fallback rate is the difference between measuring that model and
+    # measuring the rules while believing otherwise.
+    plan["source"] = "llm" if proposed else ("fallback" if config.use_llm else "rules")
     plan = enforce_novelty(plan, state, task, config.seed)
     plan["iteration"] = iteration
     if plan.get("unsupported_claims"):
@@ -187,6 +210,20 @@ def validate_plan(plan: dict[str, Any] | None, task: str | None = None) -> dict[
         "candidate_models": list(dict.fromkeys(candidates)),
         "hyperparams": sanitise_hyperparams(plan.get("hyperparams")),
         "preprocessing": plan.get("preprocessing") if isinstance(plan.get("preprocessing"), dict) else {},
+        # The two levers that are *keys* rather than prose, carried for the same reason
+        # ``preprocessing`` is: this function rebuilds the plan from a fixed list, so a key it
+        # does not name is dropped before any node reads it.
+        #
+        # Both were missing here for one real run, and the run is what found it. The schema
+        # advertised them, the plan used them correctly — it asked for `tune_threshold` and for a
+        # spec naming the three high-missing columns, with the mechanism argued in its own
+        # rationale — and the executor received `decision: None, pipeline: null`. Silently: no
+        # ``dropped_hyperparams``, no log line, and nothing in ``history`` either, because the
+        # plan recorded there is the one this function returns. That is the shape
+        # ``docs/REGISTRY-GAP.md`` is about, one layer up: the reasoning side asked for something
+        # the executor can do, and the harness threw it away on the way.
+        "pipeline": plan.get("pipeline") if isinstance(plan.get("pipeline"), list) else [],
+        "tune_threshold": plan.get("tune_threshold") is True,
         "changes_from_last": changes,
         "rationale": rationale,
         # The prose is where an unavailable capability hides: as a hyperparameter key it
@@ -216,6 +253,10 @@ def fallback_plan(
     changes = dict(verdict.get("concrete_changes") or {})
     previous_hyperparams = dict(state.get("hyperparams") or {})
     tried_models = [str(item.get("model") or "") for item in (state.get("history") or [])]
+    # The family to stay in when the diagnosis is about *tuning* rather than about the family.
+    # Hoisted because four branches below wanted the same lookup, and a registry scan repeated
+    # per branch is one more place for the default to drift.
+    same_family = _family_of(state.get("model"), task) or "gbdt"
 
     if not state.get("history"):
         family = "gbdt"
@@ -240,7 +281,7 @@ def fallback_plan(
             f"이전 시도가 {failure_type}로 실패 — 모델 축소 + batch_size 16 + fp16 + 서브샘플 0.5"
         )
     elif failure_type == "underfitting":
-        family = _family_of(state.get("model"), task) or "gbdt"
+        family = same_family
         hyperparams = {
             **previous_hyperparams,
             "max_iter": min(1200, max(300, int(previous_hyperparams.get("max_iter", 150)) * 3)),
@@ -250,7 +291,7 @@ def fallback_plan(
         strategy = "과소적합 대응: 반복 수를 3배로 늘리고 리프 수를 확대해 용량을 키운다"
         change_note = "과소적합 진단 — max_iter 증가, max_leaf_nodes 63으로 용량 확대"
     elif failure_type == "overfitting":
-        family = _family_of(state.get("model"), task) or "gbdt"
+        family = same_family
         hyperparams = {
             **previous_hyperparams,
             "l2_regularization": 1.0,
@@ -265,7 +306,7 @@ def fallback_plan(
         strategy = f"계열 교체: 기존 계열이 정체되었으므로 {family} 계열로 전환한다"
         change_note = f"모델 계열 정체 진단 — {family} 계열로 완전 교체"
     elif failure_type == "data_issue":
-        family = _family_of(state.get("model"), task) or "gbdt"
+        family = same_family
         if task == TASK_REGRESSION:
             # There is no imbalance lever on a continuous target, so prescribing
             # ``class_weight`` here would put a key in the plan that the executor drops —
@@ -281,7 +322,7 @@ def fallback_plan(
             strategy = "데이터 문제 대응: 클래스 가중치를 균형화한다"
             change_note = "데이터 이슈 진단 — class_weight=balanced 적용"
     else:  # "hyperparam" and "unknown"
-        family = _family_of(state.get("model"), task) or "gbdt"
+        family = same_family
         step = iteration % 3
         hyperparams = {
             **previous_hyperparams,
@@ -320,19 +361,14 @@ def enforce_novelty(
 ) -> dict[str, Any]:
     """Guarantee the plan is not a byte-for-byte repeat of an earlier attempt.
 
-    A repeated attempt burns an iteration for no information, so if the top
-    candidate and hyperparameters match a previous try, rotate to an untried model.
+    A repeated attempt burns an iteration for no information, so a top candidate and hyperparameters
+    matching an earlier try rotate to an untried model.
 
-    The fingerprint has to see everything that reaches the executor, and for a long time it
-    saw only the advertised hyperparameters. mv-llm-8 iteration 4 is what that costs: the
-    Critic prescribed ``missing_count`` alone, the plan honoured it with hyperparameters
-    identical to iteration 3, and the pipeline — which decided the whole difference — was not
-    in the fingerprint at all. That plan read as a byte-for-byte repeat, and what saved it was
-    an accident: ``sanitise_hyperparams`` gives a weight map integer keys while the same map
-    read back from the executor's JSON has string ones, so the two signatures differed on
-    ``class_weight={0: 1.0}`` versus ``class_weight={'0': 1.0}``. With ``class_weight:
-    'balanced'`` — what seven of eight runs' first iteration used — the single attributable
-    preprocessing transition in nine runs would have been rewritten into a family swap.
+    **The fingerprint has to see everything that reaches the executor.** When it saw only the
+    advertised hyperparameters, a Critic prescribing a preprocessing step alone produced a plan that
+    read as a byte-for-byte repeat — the pipeline, which decided the whole difference, was not in the
+    signature at all, and this guard would have rewritten it into a family swap.
+    Rationale: ``docs/rationale.md``.
     """
     history = list(state.get("history") or [])
     if not history:
@@ -360,6 +396,8 @@ def enforce_novelty(
             preprocessing=plan.get("preprocessing"),
             extra_keys=applied_keys.get(top, frozenset()),
             seed=seed,
+            tune_threshold=plan.get("tune_threshold"),
+            spec=plan.get("pipeline"),
         ),
     )
     seen = set()
@@ -375,6 +413,12 @@ def enforce_novelty(
                     preprocessing=_requested_preprocessing(item),
                     extra_keys=applied_keys.get(tried_model, frozenset()),
                     seed=seed,
+                    # The plan's own key, like the pipeline beside it: requested against
+                    # requested. An attempt that asked for a cut and had it declined (too few
+                    # held-back rows) still reads as having asked, which is the right side to
+                    # fail on — the alternative rewrites a legitimate retry into a family swap.
+                    tune_threshold=(item.get("plan") or {}).get("tune_threshold"),
+                    spec=(item.get("plan") or {}).get("pipeline"),
                 ),
             )
         )
@@ -411,67 +455,59 @@ def _signature(
     preprocessing: Any = None,
     extra_keys: Iterable[str] = (),
     seed: int | None = None,
+    tune_threshold: Any = None,
+    spec: Any = None,
 ) -> str:
     """Fingerprint everything that reaches the executor, and nothing it would ignore.
 
-    Changing ``learning_rate`` on ``logreg`` looks like a new plan but produces a
-    byte-identical run, so an unfiltered signature would let the loop burn
-    iterations on no-op variations.
+    Changing ``learning_rate`` on ``logreg`` looks like a new plan and produces a byte-identical run,
+    so an unfiltered signature lets the loop burn iterations on no-op variations.
 
-    The params list is task-relative, and on the regression side that matters more, not
-    less: ``linreg`` consumes *nothing*, so every hyperparameter proposal on it is a no-op
-    and the empty registry entry is what makes the loop see that. ``extra_keys`` is the other
-    direction — keys the executor reported applying that the menu does not advertise — and the
-    caller reads it off ``applied_hyperparams`` so this stays a fact about what ran rather than
-    a second list to keep in sync.
+    The params list is task-relative — ``linreg`` consumes *nothing*, so the empty registry entry is
+    what makes the loop see that every proposal on it is a no-op. ``extra_keys`` is the other
+    direction, read off ``applied_hyperparams`` so it stays a fact about what ran rather than a second
+    list to keep in sync.
 
-    The pipeline is part of the fingerprint because it is part of the run: the levers are on
-    two axes and only one of them used to be here. The comparison is *requested* against
-    *requested*, which is the only symmetric option — the plan's applied pipeline does not
-    exist yet. Two requests that the executor reduces to the same pipeline therefore read as
-    different, so a plan that drops a key the previous one had refused anyway passes as novel
-    and costs an iteration. That is the direction to fail in: the other one silently rewrites a
-    legitimate single-lever plan into a family swap, which is what this fix exists to stop.
+    **The pipeline is in the fingerprint, compared requested-against-requested** — the only symmetric
+    option, since the plan's *applied* pipeline does not exist yet. So two requests the executor
+    reduces to the same pipeline read as different, and a plan that drops an already-refused key
+    passes as novel and costs an iteration. **That is the direction to fail in**: the other one
+    silently rewrites a legitimate single-lever plan into a family swap.
     """
     effective = hyperparams
-    if model:
-        params = next(
-            (set(entry["params"]) for entry in registry(task) if entry["id"] == model),
-            None,
-        )
-        if params is not None:
-            allowed = params | EXECUTOR_PARAMS | set(extra_keys)
-            effective = {key: value for key, value in hyperparams.items() if key in allowed}
-    effective = _drop_pinned_seed(effective, seed)
+    entry = _entry_of(model, task) if model else None
+    if entry is not None:
+        allowed = set(entry["params"]) | EXECUTOR_PARAMS | set(extra_keys)
+        effective = {key: value for key, value in hyperparams.items() if key in allowed}
+    effective = drop_pinned_seed(effective, seed)
     parts = [f"{key}={_canonical(effective[key])}" for key in sorted(effective)]
     pipeline = dict(preprocessing) if isinstance(preprocessing, Mapping) else {}
     parts += [f"prep.{key}={_canonical(pipeline[key])}" for key in sorted(pipeline)]
+    if isinstance(spec, (list, tuple)) and spec:
+        # The declared pipeline, canonicalised the same way the flag block is and for the same
+        # reason: it reaches the executor, so a replan that moves only a step's column list is a
+        # different attempt and must not be read as a repeat. Rendered through ``json.dumps`` with
+        # sorted keys so the fingerprint does not depend on the order the LLM happened to emit the
+        # keys of a step in — only on the order of the *steps*, which is the part that runs.
+        parts.append("spec=" + json.dumps(spec, sort_keys=True, default=str))
+    if tune_threshold is True:
+        # Appended only when asked for, so every signature computed before this lever existed is
+        # unchanged and a resumed run's history still matches itself. It has to be in here at
+        # all for the reason the pipeline does: it is a third axis that reaches the executor, and
+        # a replan that moves only the cut would otherwise read as a byte-for-byte repeat and be
+        # rewritten into a family swap — the exact defect ``docs/REGISTRY-GAP.md`` closed for
+        # ``early_stopping`` and ``scale_pos_weight``.
+        parts.append("cut=tuned")
     return ",".join(parts)
-
-
-def _drop_pinned_seed(hyperparams: Mapping[str, Any], seed: int | None) -> dict[str, Any]:
-    """Remove a ``random_state`` that only restates the run's own seed.
-
-    Every estimator in :mod:`automl_agent.scripts.train` is built with ``random_state=seed``,
-    so naming that same number changes the record and not the fit. It matters here because
-    ``extra_keys`` reads from ``applied_hyperparams``, where ``model_selection``'s echoed
-    ``random_state: 42`` appears in 10 of 24 measured selections — so without this the third
-    fix would put pure noise back into the fingerprint.
-    """
-    values = dict(hyperparams)
-    pinned = values.get("random_state")
-    if seed is not None and not isinstance(pinned, bool) and pinned == seed:
-        values.pop("random_state")
-    return values
 
 
 def _canonical(value: Any) -> str:
     """A value's spelling made independent of the JSON round trip it did or did not make.
 
     ``sanitise_hyperparams`` gives a weight map integer keys; the same map read back from the
-    executor's ``train_result.json`` has string ones. Comparing those two spellings is what let
-    mv-llm-8 iteration 4 through the novelty guard, and a guard whose verdict depends on which
-    side of a subprocess boundary a dict came from is not a guard.
+    executor's ``train_result.json`` has string ones. Comparing those two spellings has let a genuine
+    repeat through the novelty guard, and a guard whose verdict depends on which side of a subprocess
+    boundary a dict came from is not a guard.
     """
     if isinstance(value, Mapping):
         return json.dumps({str(key): value[key] for key in value}, sort_keys=True)
@@ -508,18 +544,24 @@ def _grouped_by(state: AutoMLState) -> str | None:
     return str(column) if column else None
 
 
+def _entry_of(model: Any, task: str | None = None) -> dict[str, Any] | None:
+    """This task's registry entry for ``model``, or ``None`` when its menu has no such id.
+
+    One lookup for the three callers that each wanted a different field off the same entry. Each of
+    them used to walk ``registry(task)`` itself, which is three places for "what counts as a match"
+    to drift apart.
+    """
+    return next((entry for entry in registry(task) if entry["id"] == model), None)
+
+
 def _family_of(model: Any, task: str | None = None) -> str | None:
-    for entry in registry(task):
-        if entry["id"] == model:
-            return str(entry["family"])
-    return None
+    entry = _entry_of(model, task)
+    return None if entry is None else str(entry["family"])
 
 
 def _cost_of(model: Any, task: str | None = None) -> int:
-    for entry in registry(task):
-        if entry["id"] == model:
-            return int(entry["cost"])
-    return 3
+    entry = _entry_of(model, task)
+    return 3 if entry is None else int(entry["cost"])
 
 
 def _next_family(tried_models: list[str], task: str | None = None) -> str:

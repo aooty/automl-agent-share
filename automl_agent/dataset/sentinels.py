@@ -1,39 +1,30 @@
 """Sentinel codes: values that mean "missing" but arrive looking like measurements.
 
-The trap this module exists for is real and was walked into: the MIMIC sample in
-``local/`` has *zero* NaN cells and 91,364 cells of ``-9999``. Fed to
-``scripts/profile.py`` as-is, every aggregate the card publishes — magnitude, skew,
-outlier rate, target correlation — and the reference baseline the goal threshold is
-*derived from* count that code as a real creatinine value. Nothing fails; the numbers
-are simply wrong, and the run that follows chases a bar built on them.
+**Nothing fails when this goes wrong; the numbers are simply wrong.** An extract with zero NaN and
+tens of thousands of ``-9999`` cells makes every aggregate the card publishes — magnitude, skew,
+outlier rate, target correlation — and the baseline the bar is *derived from* count that code as a
+measurement. The run then chases a bar built on it (``FINDINGS-mimic.md``).
 
-**Detect, warn, never convert.** The conversion is a caller decision
-(``pd.read_csv(na_values=[...])``) for two reasons. It is not reliably inferable — ``-1``
-in a "days since discharge" column is a code, in a "temperature delta" column it is data —
-and a silent rewrite would mean the card describes rows the file does not contain, which
-is the one property the whole card→executor contract rests on.
+**Detect, warn, never convert.** Conversion is the caller's (``pd.read_csv(na_values=[...])``): it is
+not reliably inferable — ``-1`` is a code in "days since discharge" and data in "temperature delta" —
+and **a silent rewrite would mean the card describes rows the file does not contain**, which is the
+one property the card→executor contract rests on.
 
 Emission policy
 ---------------
-A card may not carry cell values (``scripts/profile.py``), and a sentinel *is* a cell
-value. What keeps this in policy is that detection only ever recognises codes from the
-constant lists below: the value published in the card came out of this file, not out of
-the data. All the data contributes is "yes, that code is present, at this rate" — a column
-aggregate, exactly like ``missing_rate``. A repeated extreme that is *not* on the list is
-not reported at all, precisely because reporting it would mean printing a number only the
-file knows.
+A card may not carry cell values, and a sentinel *is* one. **What keeps this in policy: detection only
+ever recognises codes from the constant lists below**, so the published value came out of *this file*,
+not out of the data. The data contributes only "present, at this rate" — a column aggregate like
+``missing_rate``. A repeated extreme **not** on the list is not reported at all.
 
-Gates, and what each one is protecting against
-----------------------------------------------
-``-1`` and ``99`` are on the numeric list, which by itself would flag half the columns in
-a normal table. What makes them safe is that a code is only reported when it is the
-column's own minimum or maximum *and* isolated from the nearest other observed value —
-either by :data:`GAP_MULTIPLE` interquartile ranges, or by :data:`SIGN_GAP_MULTIPLE` when
-the code's sign is one no other row in the column has. A ``-1`` among values ``-3 … 5`` is
-neither, so it stays silent; a ``-1`` among ages ``40 … 69`` is the second, and it is a
-code. Ages ``0 … 99`` with ``99`` meaning "unknown" is the case this cannot catch — ``98``
-is right next to it — and that is the correct outcome, since nothing in the distribution
-distinguishes the two readings.
+Gates
+-----
+``-1`` and ``99`` are on the numeric list, which alone would flag half the columns in a normal table.
+**A code is reported only when it is the column's own min or max *and* isolated from the nearest other
+value** — by :data:`GAP_MULTIPLE` IQRs, or by :data:`SIGN_GAP_MULTIPLE` when its sign is one no other
+row has. So ``-1`` among ``-3 … 5`` stays silent and ``-1`` among ages ``40 … 69`` is a code. Ages
+``0 … 99`` with ``99`` meaning "unknown" is **not catchable and that is correct** — ``98`` sits right
+next to it, so nothing in the distribution distinguishes the two readings.
 """
 
 from __future__ import annotations

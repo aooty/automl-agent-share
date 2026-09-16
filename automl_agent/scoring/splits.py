@@ -1,42 +1,28 @@
 """The split protocol: which rows train, which rows tune, and which rows nobody touches.
 
-**Why a third split exists.** The loop chooses ``best`` by comparing validation scores
-across attempts, and the report then quotes that same validation score as the run's
-result. That is selection on the set the number is reported from: with five attempts the
-winner is partly the luckiest split, not only the best model, and the reported figure is
-biased upward by an amount nobody can measure from inside the run. So a *test* slice is
-carved off before anything else happens and is scored exactly once, after the loop has
-stopped, from the saved best model (:mod:`automl_agent.nodes.holdout`). It is the only
-number in the report that no decision was made against.
+**A third split exists because the loop selects on the set it reports from.** ``best`` is the
+maximum of several validation scores, so the winner is partly the luckiest split and the reported
+figure is biased upward by an amount nobody can measure from inside the run. The *test* slice is
+scored exactly once, after the loop, from the saved best model
+(:mod:`automl_agent.nodes.holdout`) — the only number in the report no decision was made against.
 
-**Why it is carved first.** ``test_fraction`` is taken from the full row set before the
-train/validation split, so the test rows are a function of the file and the seed alone —
-not of the iteration count, the model, or anything the agent proposed. Every iteration of
-a run therefore holds out the *same* rows, which is what makes "scored once at the end"
-mean something.
+**Carved first, before the train/validation split**, so the test rows are a function of the file and
+the seed alone — not the iteration count, the model, or anything the agent proposed. That is what
+makes "scored once at the end" mean anything.
 
-**Why this is one module.** :mod:`automl_agent.scripts.profile` measures the reference
-baseline that the goal threshold is derived from, and
-:mod:`automl_agent.scripts.train` measures the attempts that are compared against that
-threshold. If the two split differently, the bar and the scores are not comparable — the
-same argument :mod:`automl_agent.dataset.features` makes about encoding. Both call
-:func:`split_three_way`, and the profiler's baseline deliberately ignores ``x_test``:
-the reference score is a validation-set number, like every attempt's.
+**One module, because the profiler measures the baseline the bar comes from and the trainer measures
+what is compared against it.** Split differently and the two are not comparable. Both call
+:func:`split_three_way`, and the profiler's baseline deliberately ignores ``x_test``.
 
-**Why groups are a parameter here.** One row per ICU *stay* means one patient can hold
-several rows, and a random split then puts the same patient in train and in validation.
-The model can recognise the patient instead of the condition, every score above is
-inflated, and nothing in the run can detect it — the held-back test slice is contaminated
-the same way, so it agrees with the validation number and the selection gap looks
-healthy. That failure is invisible to every check in this repo, which is why the split
-has to be told. Pass ``groups`` and no group's rows are divided across two sets. The
-group column arrives through the card's *private* ``data`` block, because it is a
-data-loading decision and not a modelling one: :func:`automl_agent.privacy.public_card`
-strips it and the LLM can neither see it nor propose changing it.
+**``groups`` exists because a random split over repeated subjects is invisible to every check here.**
+Several rows per patient put the same patient in train and validation; the model recognises the
+patient rather than the condition, and the held-back slice is contaminated the same way — so it
+*agrees* with the validation number and the selection gap looks healthy. Pass ``groups`` and no
+group is divided. It arrives through the card's *private* ``data`` block, so the LLM can neither see
+it nor propose changing it.
 
-Nothing here imports sklearn at module level, because the nodes import this module to
-read :func:`protocol` and the process that renders prompts must stay free of the data
-stack.
+No sklearn at module level: the nodes import this for :func:`protocol`, and the process that renders
+prompts stays free of the data stack. Rationale: ``docs/rationale.md``.
 """
 
 from __future__ import annotations
@@ -104,21 +90,18 @@ class Splits:
 def protocol(seed: int, group_column: str | None = None, stratified: bool = True) -> dict[str, Any]:
     """The protocol as a card/result field: enough to reproduce the exact row sets.
 
-    Published so a reader can tell which number was selected on and which was not, and
-    so a hand-written card measured under a different protocol can be *refused* rather
-    than silently compared against — see
-    :func:`automl_agent.nodes.profiling.assert_protocol_matches`.
+    Published so a reader can tell which number was selected on and which was not, and so a card
+    measured under a different protocol is *refused* rather than silently compared against
+    (:func:`automl_agent.nodes.profiling.assert_protocol_matches`).
 
-    ``grouped_by`` names the column no group of which was divided across two sets, or is
-    ``None`` for a row-level split. It is the one protocol field whose absence changes
-    what the scores *mean* rather than only which rows they came from, so it is published
-    by name: a reader comparing two cards has to be able to see that one of them held
-    patients together and the other did not.
+    ``grouped_by`` names the column no group of which was split across two sets, ``None`` for a
+    row-level split. The one protocol field whose absence changes what the scores *mean* rather than
+    only which rows they came from — hence published by name, so a reader comparing two cards can see
+    that one held patients together and the other did not.
 
-    ``stratified`` is ``False`` for a regression target, where there are no strata to
-    balance. It is published rather than assumed because it is checked: a card measured on
-    a classification target and a run scoring a continuous one disagree here, and the
-    disagreement is the useful half of the message.
+    ``stratified`` is ``False`` on a regression target (no strata to balance). Published rather than
+    assumed because it is checked: a card measured on a classification target and a run scoring a
+    continuous one disagree here, and that disagreement is the useful half of the message.
     """
     return {
         "train_fraction": TRAIN_SHARE,
@@ -148,27 +131,24 @@ def describe_protocol(declared: dict[str, Any] | None = None, seed: int = 42) ->
 def row_counts(n_rows: int) -> dict[str, int]:
     """How many rows each set holds, computed the way the split actually rounds.
 
-    Not ``n * share``. ``train_test_split`` takes the *ceiling* of a float ``test_size``
-    and gives the whole remainder to the other side, and :func:`split_three_way` does that
-    twice, so the product is off by up to two rows in each set. Reproducing the rounding
-    matters because the number this feeds is compared against a threshold: sklearn resolves
-    ``early_stopping='auto'`` at ``n_samples > 10_000`` and a two-row error lands on the
-    wrong side of it for a file near that size.
+    Not ``n * share``. ``train_test_split`` takes the *ceiling* of a float ``test_size`` and gives
+    the whole remainder to the other side, and :func:`split_three_way` does it twice — so the product
+    is off by up to two rows per set. The rounding matters because this number meets a threshold:
+    sklearn resolves ``early_stopping='auto'`` at ``n_samples > 10_000``, and a two-row error lands
+    on the wrong side of it for a file near that size.
 
-    Exact for the row-level path — it reproduces all five recorded train sizes in
-    ``bench/`` — and approximate for the grouped one, where a group cannot be divided to
-    make a share come out even. Callers that publish these numbers to a reader have to say
-    which of the two they are in; :func:`automl_agent.capabilities.describe_row_budget`
+    Exact on the row-level path (it reproduces all five recorded train sizes in ``bench/``),
+    approximate on the grouped one, where a group cannot be divided to make a share come out even.
+    Callers publishing these numbers must say which — :func:`automl_agent.capabilities.describe_row_budget`
     does.
 
-    Derived from this module's own constants rather than from a declared protocol block,
-    because the rounding above is a property of *this* implementation. A card measured
-    under different fractions is refused rather than reinterpreted — see
-    :func:`automl_agent.nodes.profiling.assert_protocol_matches`.
+    Derived from this module's constants, not from a declared protocol block, because the rounding is
+    a property of *this* implementation. A card measured under different fractions is refused, not
+    reinterpreted (:func:`automl_agent.nodes.profiling.assert_protocol_matches`).
 
-    Refuses wherever the split itself would. Under three rows both ceilings take everything and
-    nothing is left to train on; ``train_test_split`` raises there too ("the resulting train set
-    will be empty"), and a forecast of ``train: 0`` would be read as an answer.
+    Refuses wherever the split would. Under three rows both ceilings take everything and nothing is
+    left to train on; ``train_test_split`` raises there too ("the resulting train set will be
+    empty"), and a forecast of ``train: 0`` would read as an answer.
     """
     total = int(n_rows)
     n_test = math.ceil(TEST_FRACTION * total) if total > 0 else 0
@@ -289,23 +269,19 @@ def _grouped_fold(
 def val_fingerprint(x_val: Any, y_val: Any) -> str:
     """A short digest of the exact validation rows an attempt was scored on.
 
-    Paired comparison (:func:`automl_agent.scoring.intervals.paired_delta`) needs two attempts to
-    have been scored on the *same rows*, and "same seed" is not that. The seed fixes the
-    split of whatever matrix it is handed, and what reaches it can change without it:
-    ``--on-missing-target drop`` removes a different number of rows, a re-extracted file has
-    different rows in the same shape, and a card whose target column now reads as regression
-    is split unstratified. Every one of those produces a validation slice the seed says
-    nothing about, so the rows themselves are hashed and the digest travels with the
-    predictions. That turns the premise from something the code asserts into something a
-    later attempt can check.
+    Paired comparison (:func:`automl_agent.scoring.intervals.paired_delta`) needs two attempts scored
+    on the *same rows*, and "same seed" is not that: the seed splits whatever matrix it is handed, and
+    what reaches it moves without it — ``--on-missing-target drop`` removes a different count, a
+    re-extracted file has different rows in the same shape, a target now reading as regression is
+    split unstratified. So the rows themselves are hashed and the digest travels with the predictions,
+    turning the premise from something the code asserts into something a later attempt can check.
 
-    Both arrays, not just the labels: ``y_val`` alone is 0/1 on a binary task, so two
-    different slices with the same labels in the same order would collide.
+    Both arrays, not just labels: ``y_val`` alone is 0/1 on a binary task, so two different slices
+    with the same labels in the same order would collide.
 
-    ``blake2b`` at 16 bytes rather than a cryptographic width — this detects an accident,
-    not an attack, and the digest is written into a file next to the predictions it
-    describes. Not portable across machines by design either: it is compared only against
-    another iteration of the same run.
+    ``blake2b`` at 16 bytes, not a cryptographic width — this catches an accident, not an attack, and
+    the digest sits in a file beside the predictions it describes. Not portable across machines by
+    design: it is only ever compared against another iteration of the same run.
     """
     import hashlib
 
@@ -331,25 +307,23 @@ def protocol_mismatch(
 ) -> str | None:
     """Why ``declared`` cannot be compared against a run at this ``seed``, or ``None``.
 
-    A card carries the protocol its baseline was measured under. If that disagrees with
-    this run's, the derived threshold was computed against different rows than the
-    attempts are scored on, and the run would report a comparison that is not one. The
-    precedent is the stance ``--on-missing-target`` takes: refuse rather than quietly
+    A card carries the protocol its baseline was measured under. Disagreement means the derived
+    threshold was computed against different rows than the attempts are scored on — a reported
+    comparison that is not one. Same stance as ``--on-missing-target``: refuse rather than quietly
     measure two different things.
 
-    A card with no protocol block predates this field, and is accepted — its baseline
-    used the old two-way split, which is a difference in the *bar*, not a leak, and
-    stopping a resumed run over it would be worse than the incomparability.
+    No protocol block = a card predating this field, accepted. Its baseline used the old two-way
+    split, a difference in the *bar* rather than a leak, and stopping a resumed run over it would be
+    worse than the incomparability.
 
-    ``grouped_by`` is checked like the rest, and it is the disagreement most worth
-    catching: a bar measured with patients held together compared against scores measured
-    with them split is not a stricter or looser comparison but a meaningless one, and the
-    inflated side would be the one the run reports. A card written before this field is
-    still accepted, by the same ``key in declared`` rule as the others.
+    ``grouped_by`` is the disagreement most worth catching: a bar measured with patients held
+    together, compared against scores measured with them split, is not stricter or looser but
+    meaningless — and the inflated side is the one the run reports. Cards predating the field are
+    still accepted, by the same ``key in declared`` rule.
 
-    ``stratified`` is what *this run* will do, which follows from the target's task — the
-    caller reads it off the card rather than choosing it, so a regression card is not
-    reported as a mismatch against a stratification that a continuous target cannot have.
+    ``stratified`` is what *this run* will do, following from the target's task. The caller reads it
+    off the card rather than choosing it, so a regression card is not flagged against a
+    stratification a continuous target cannot have.
     """
     if not isinstance(declared, dict) or not declared:
         return None

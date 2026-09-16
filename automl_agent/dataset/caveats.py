@@ -1,15 +1,10 @@
 """The card's channel for "things about this data the aggregates do not show".
 
-Why a channel was needed. The card's ``missing`` block is three numbers — overall rate,
-how many columns, worst rate — and the per-column profiles are buckets. Everything else a
-human learns while looking at the file has nowhere to go, and :data:`CARD_KEYS` is a strict
-allowlist, so there was no slot to put it in even by hand. The concrete cost of that:
-profiling the MIMIC sample in ``local/`` produced a report whose first recommendation was
-"add ``is_missing(gcs)`` as a feature", because missingness there is the strongest signal
-in the table. It is also entangled with *row order* — the missing rate of ``gcs`` and
-``cr_diff`` climbs with row position (rank correlation 0.69 and 0.52) while the label does
-not (-0.03) — so the feature would partly teach the model where in the file a row sat.
-Nothing in the card could say so.
+The card's ``missing`` block is three numbers and the per-column profiles are buckets, so everything
+else a human learns from the file has nowhere to go — and :data:`CARD_KEYS` is a strict allowlist,
+leaving no slot even by hand. What that costs: missingness can be the strongest signal in a table
+*and* entangled with row order, so a plan that leans on it partly learns where in the file a row sat,
+and nothing in the card could say so (``FINDINGS-mimic.md``).
 
 Two sources, both landing in the same list:
 
@@ -21,12 +16,10 @@ Two sources, both landing in the same list:
 - **The operator.** ``--caveat "..."``, repeatable. This is the only channel in the system
   that carries a *human's* knowledge of the raw data into the prompts.
 
-On trust. The operator's text is passed through to a prompt as written, which makes it the
-one place a cell value could reach the LLM by hand. That is a deliberate choice with the
-same shape as ``--name``: the boundary this repo enforces mechanically is that no *code
-path* carries rows into a prompt, and a human typing a sentence about their own data is on
-the other side of it. The bound below is on length and count, not content — it protects the
-prompt budget, not privacy.
+**The operator's text reaches a prompt as written, so it is the one place a cell value can get there
+by hand.** Deliberate, and the same shape as ``--name``: what this repo enforces mechanically is that
+no *code path* carries rows into a prompt. **The bound below is on length and count, not content** —
+it protects the prompt budget, not privacy.
 """
 
 from __future__ import annotations

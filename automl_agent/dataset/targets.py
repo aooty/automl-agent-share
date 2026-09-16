@@ -1,33 +1,23 @@
 """Target-column encoding, what task it implies, and what to do about missing labels.
 
-Shared by the two fixed scripts because they must agree: a row the profiler counted and
-the trainer dropped (or the reverse) makes the card describe a dataset that was never
-trained on, and the baseline the goal is derived from stops being comparable to the
-scores it is compared against.
+**Shared by the two fixed scripts because they must agree** — a row the profiler counted and the
+trainer dropped makes the card describe a dataset that was never trained on, and the baseline stops
+being comparable to what it is compared against.
 
-Both used to call ``series.astype("category").cat.codes`` directly, which maps NaN to
-``-1``. Pandas is right to do that — ``-1`` means "not a category" — but nothing
-downstream knew, so a single missing label turned a binary target into ``n_classes = 3``:
-a third "class" with no rows to learn, a stratified split on a phantom stratum, and every
-per-class metric quietly averaged over it.
+**A bare ``astype("category").cat.codes`` maps NaN to ``-1``**, which pandas is right to do and nothing
+downstream knew: one missing label turned a binary target into ``n_classes = 3``, with a phantom
+stratum in the split and every per-class metric averaged over it. So the two cases are named:
 
-So the two cases are named instead:
+``reject``  the default — stop and say how many are missing. A missing label is usually a
+            data-preparation bug, and training on a guess about it is the expensive kind of wrong.
+``drop``    drop them and record how many, applied identically by both scripts.
 
-``reject``  the default. Stop and say how many labels are missing. A missing label is
-            usually a data-preparation bug, and silently training on a guess about it is
-            the expensive kind of wrong.
-``drop``    drop those rows and record how many. Explicit, recorded in the card, and
-            applied identically by both scripts.
+**The task comes from this column too, and is not the caller's to choose**: a continuous target
+category-coded into class labels trains a classifier on thousands of one-row "classes", and every
+score it reports is about an encoding accident. :func:`detect_task` decides, both scripts call it, and
+the answer is on the card so the goal, the metric and the registry check against one claim.
 
-**The task comes from this column too.** Whether a run is classification or regression is
-not something the caller gets to choose either: a continuous target category-coded into
-class labels trains a classifier on 3000 "classes" that each hold one row, and every score
-it reports is about an encoding accident. :func:`detect_task` reads the column and decides,
-both scripts call it, and the answer is published on the card so the goal, the metric and
-the estimator registry can all be checked against the same one claim.
-
-Import-safe from the orchestrator process: pandas is imported inside the functions, so the
-process that renders prompts never loads it.
+pandas is imported inside the functions, so the process that renders prompts never loads it.
 """
 
 from __future__ import annotations
@@ -136,16 +126,15 @@ def encode_target(
 def target_classes(series: Any, task: str | None = None) -> list[Any] | None:
     """What each class code from :func:`encode_target` means. ``None`` for a regression target.
 
-    Index-aligned with those codes by construction — both go through
-    ``astype("category")``, whose categories are the sorted distinct labels — and bound to
-    them by ``test_the_class_labels_line_up_with_the_codes``. It exists because a prediction
-    of ``1`` is not an answer: the caller asked about a column whose values were ``died`` and
-    ``survived``, and only this list turns the code back into the word they used.
+    Index-aligned with those codes by construction (both go through ``astype("category")``, whose
+    categories are the sorted distinct labels) and bound to them by
+    ``test_the_class_labels_line_up_with_the_codes``. It exists because a prediction of ``1`` is not
+    an answer: the caller asked about a column of ``died``/``survived``, and only this list turns the
+    code back into their word.
 
-    Values are normalised to JSON scalars, since this is written to disk and read by another
-    process. That normalisation is one-way for an exotic label type (a Timestamp becomes its
-    string form), which is why the list is for *labelling output* and never for re-encoding
-    input.
+    Values normalised to JSON scalars, since this is written to disk and read by another process.
+    One-way for an exotic label type (a Timestamp becomes its string form) — hence for *labelling
+    output*, never for re-encoding input.
     """
     import pandas as pd
 

@@ -34,6 +34,7 @@ from ..state import (
     FAILURE_TYPES,
     AutoMLState,
     build_attempt,
+    drop_pinned_seed,
     effective_hyperparams,
     goal_met,
     is_better,
@@ -58,62 +59,39 @@ CRITIC_SCHEMA: dict[str, Any] = {
 GOAL_METRIC_DROP = 0.05
 RANKING_TOLERANCE = 0.005
 
-# The train/validation gap that reads as overfitting, in two forms because the gap is
-# measured in the metric's own units. A bounded metric has a scale fixed by its definition,
-# so 0.15 means the same thing on every dataset. ``mae`` and ``rmse`` do not: 0.15 is
-# nothing on a target measured in dollars and enormous on one measured in probabilities, so
-# there the gap is judged as a fraction of the training score instead — "validation is a
-# quarter worse than training" transfers across units, and 0.15 does not.
+# Overfitting gap, in two forms: absolute for a bounded metric, a fraction of the training score for
+# one in the target's own units. An absolute gap there is an arbitrary number of dollars or days.
 OVERFIT_GAP = 0.15
 OVERFIT_GAP_RATIO = 0.25
 
-# How far short of the bar the *training* score has to sit before the diagnosis is missing
-# capacity rather than noise. Same split for the same reason: an absolute 0.05 on a metric
-# in the target's units is not a slack, it is an arbitrary number of days or dollars.
+# How far short of the bar the *training* score sits before the diagnosis is capacity rather than
+# noise. Split for the same reason as the pair above.
 UNDERFIT_MARGIN = 0.05
 UNDERFIT_MARGIN_RATIO = 0.05
 
-# The one diagnosis the canned directions could not express. m-llm4 iteration 2 dropped
-# ``class_weight`` and balanced_accuracy fell 0.7863 -> 0.6519 while roc_auc *rose*
-# 0.8704 -> 0.8734: the model ranked exactly as well and only the decision rule moved.
-# The heuristic read that as underfitting and prescribed more capacity, which cannot move
-# a threshold-dependent metric back. Refitted afterwards on the same split: with the
-# operating point put back where the imbalance lever puts it, that attempt scores 0.79.
+# The one diagnosis the canned directions could not express: a `balanced_accuracy` drop with
+# `roc_auc` *unchanged or higher*. The ranking held and only the decision rule moved, so more
+# capacity — what the heuristic used to prescribe — cannot move a threshold-dependent metric back.
+# Measured instances are in ``FINDINGS-mimic.md``.
 OPERATING_POINT_DIRECTION = (
     "랭킹 품질(roc_auc)은 유지됐으므로 용량이 아니라 운영점 문제다: 불균형 레버를 되살린다 — "
     'class_weight=\'balanced\' 또는 클래스별 가중치 맵({"0": 1, "1": 10}), xgboost면 '
     "scale_pos_weight. 용량을 더 키우는 것은 이 격차를 되돌리지 못한다."
 )
 
-# ``balanced_accuracy`` is ``(recall + specificity) / 2`` on a binary target, so its
-# optimum sits where the two are equal and the imbalance lever is what moves them. Only
-# metrics with that symmetry belong here: f1 and accuracy trade the two sides unevenly, so
-# "close the gap" would be the wrong advice for them.
-#
-# Deliberately not imported from :data:`automl_agent.scoring.ranking.SYMMETRIC_METRICS`, which
-# currently holds the same one name for a different reason: there it marks the metrics
-# whose best-cut ceiling *is* ``(1 + KS) / 2``, an identity. Here it marks the metrics
-# whose optimum sits where the two halves meet, which is only an approximation to that
-# identity — see :data:`CUT_HEADROOM_FLOOR`. Merging the two would couple an exact claim
-# to an inexact one.
+# Metrics whose optimum sits where recall and specificity meet, so "close the gap" is right advice.
+# **Deliberately not imported from ``ranking.SYMMETRIC_METRICS``**: same name, and there it marks an
+# identity while here it marks an approximation to it (see :data:`CUT_HEADROOM_FLOOR`).
 SYMMETRIC_METRICS = frozenset({"balanced_accuracy"})
 
-# Below this the two sides are close enough that the remaining shortfall is not about
-# where the operating point sits. m-llm7's three attempts sat at 0.185, 0.141 and 0.143.
+# Below this the two sides are close enough that the remaining shortfall is not about where the
+# operating point sits. Set above the skews observed on runs the branch *should* fire for, so it
+# separates them rather than sitting inside their range (``FINDINGS-mimic.md``).
 OPERATING_POINT_SKEW = 0.08
 
-# ``cut_headroom`` is the exact form of the premise the skew branch argues from, so it
-# outranks it. The branch says ``balanced_accuracy`` peaks where recall and specificity
-# meet — the ROC curve's anti-diagonal — but the true peak is its slope-1 tangent, and the
-# two coincide only when the curve is symmetric. Constructed counterexample
-# (``local/skew_ceiling_probe.py``): skew -0.4000 with the default cut already within
-# 0.0009 of the ceiling, where moving to the point the premise names costs 0.0879. So when
-# the measured headroom is this small the approximation does not get to prescribe a move.
-# ``prompts/critic.md`` instruction 7 already requires that order of the LLM; without this
-# the rule-based fallback was the only path that could still get it wrong.
-#
-# The value is chosen not to disturb what has been observed: m-llm9's four attempts had
-# headroom 0.0038, 0.0198, 0.0013 and 0.0314, and none of its four diagnoses changes.
+# **``balanced_accuracy_cut_headroom`` outranks the skew branch**, because it is the exact form of
+# the premise that branch argues from and the two diverge on an asymmetric ROC curve. Below this
+# floor the approximation does not get to prescribe a move. Rationale: ``docs/rationale.md``.
 CUT_HEADROOM_FLOOR = 0.005
 
 # What is left to say once the cut is optimal and even the best cut misses the bar. Not a
@@ -121,18 +99,14 @@ CUT_HEADROOM_FLOOR = 0.005
 # rule over *this* ranking reaches the goal, which is the same argument ``goal.describe``
 # makes before the loop starts, applied to one attempt instead of the baseline.
 RANKING_LIMIT_DIRECTION = (
-    "운영점은 이미 최적이므로(cut_headroom) 남은 격차는 컷이 아니라 랭킹에 있다: 이 랭킹의 "
+    "운영점은 이미 최적이므로(balanced_accuracy_cut_headroom) 남은 격차는 컷이 아니라 랭킹에 있다: 이 랭킹의 "
     "어떤 임계값도 목표에 닿지 않으므로 모델 family를 바꾸거나 특성을 늘린다. 가중치나 "
     "임계값을 더 만지는 것은 이 격차를 줄이지 못한다."
 )
 
-# A search step, not an estimate: there is no closed form from a recall/specificity gap to
-# the weight that closes it, so with one observation the branch names a direction and one
-# step, and the loop re-measures. Once two observations straddle the crossing, the step is
-# replaced by interpolation between them — see ``_interpolated_weight``.
-#
-# The step applies from the second rung on. The first one comes from the card instead — see
-# ``_first_rung`` for the measurement that moved it.
+# A search step, not an estimate — there is no closed form from a recall/specificity gap to the weight
+# that closes it. Replaced by ``_interpolated_weight`` once two observations straddle the crossing,
+# and **applies from the second rung on**: the first comes from the card (``_first_rung``).
 WEIGHT_STEP = 1.5
 
 # Bounded by what the sanitiser will actually pass through: a weight outside
@@ -184,8 +158,8 @@ def critic(state: AutoMLState, *, config: RunConfig) -> dict:
         "history": _history_digest(state),
         "best": state.get("best") or "(no successful attempt yet)",
         # The join between each verdict and the attempt it produced. Computed, because it is
-        # arithmetic over ``history`` and instruction 4 asking for it was not enough —
-        # mv-llm-2 prescribed ``wrong_model_family`` twice and ended where it started.
+        # arithmetic over ``history`` and instruction 4 asking the model to do it was not enough —
+        # a run repeated one diagnosis and ended where it started (``FINDINGS-mimic.md``).
         "ledger": _ledger(state, config),
         "failure_types": ", ".join(FAILURE_TYPES),
         # A caveat can be the reason the score is where it is, and it rules out a
@@ -226,14 +200,13 @@ def critic(state: AutoMLState, *, config: RunConfig) -> dict:
 def cleared_the_bar(state: AutoMLState, config: RunConfig) -> bool:
     """Whether the attempt being judged is already at or past the goal.
 
-    Only reachable under :attr:`automl_agent.config.RunConfig.search_past_goal`: without it
-    ``route`` sends a passing attempt straight to the report and this node never sees it. Which
-    is why every sentence in here used to be free to assert the miss, and why they are not now —
-    a run that clears the bar at iteration 1 and then keeps searching would otherwise be told,
-    four times over, that it missed a bar it passed.
+    Only reachable under :attr:`automl_agent.config.RunConfig.search_past_goal` — without it
+    ``route`` sends a passing attempt straight to the report and this node never sees one. That is
+    why the prose here no longer asserts a miss: a run clearing the bar at iteration 1 and then
+    searching on would otherwise be told four times that it missed a bar it passed.
 
-    Read off the same ``goal_met`` the router uses, on the same ``result`` channel, so the two
-    cannot disagree about which side of the bar an attempt is on.
+    Read off the same ``goal_met`` the router uses, on the same ``result`` channel, so the two cannot
+    disagree about which side of the bar an attempt is on.
     """
     if not config.search_past_goal:
         return False
@@ -243,16 +216,9 @@ def cleared_the_bar(state: AutoMLState, config: RunConfig) -> bool:
 def describe_verdict_frame(state: AutoMLState, config: RunConfig) -> str:
     """The prompt's opening: what the Critic is being asked about *this* attempt.
 
-    The template asserted "did not reach the goal" as its first sentence, which is the one
-    statement a prompt cannot afford to get wrong — everything after it is read in that light,
-    and an LLM told a passing attempt failed will find a failure to report.
-
-    The past-goal wording says three things beyond the correction. That there is no shortfall,
-    so none should be invented. That fragility is still worth naming, because a wide train/
-    validation gap on a passing attempt is real and is the one thing a single passing score
-    hides. And that ``best`` is val-best, so a worse next attempt cannot cost the run its
-    result — which is what makes the remaining budget cheap to spend and is exactly the
-    property the flag exists to use.
+    **The first sentence cannot assert a miss unconditionally.** Everything after it is read in that
+    light, and an LLM told a passing attempt failed will find a failure to report.
+    Rationale: ``docs/rationale.md``.
     """
     if not cleared_the_bar(state, config):
         return (
@@ -328,11 +294,9 @@ def heuristic_verdict(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
     # 2. Otherwise read the train/validation numbers.
     measured = as_number(metric_value(result, metric))
     if measured is None:
-        # A missing score is not a perfect score. On a maximizing metric ``0.0`` says "as
-        # bad as it gets", which is the safe reading; on an error metric the same 0.0 would
-        # say "no error at all" and send the attempt straight down the overfitting branch on
-        # a gap that is really just the training error. The bar is the neutral stand-in
-        # there: it asserts no movement in either direction.
+        # **A missing score is not a perfect score.** ``0.0`` is the safe reading on a maximizing
+        # metric and the *worst* one on an error metric, where it would say "no error at all" and send
+        # the attempt down the overfitting branch. The bar is the neutral stand-in there.
         measured = threshold if direction_of(metric) == MINIMIZE else 0.0
     score = float(measured)
     train_score = metrics.get(f"train_{metric}")
@@ -368,10 +332,9 @@ def heuristic_verdict(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
         evidence = collapse
         direction_override = OPERATING_POINT_DIRECTION
     elif (skew := _operating_point_skew(metric, metrics, state)) is not None:
-        # Also before underfitting, and for a sharper reason: a skewed operating point
-        # depresses the *train* score too, so "both low and close together" reads as
-        # missing capacity when the fix is one weight. That misreading is what the
-        # baseline's recall 0.229 always looked like.
+        # Also before underfitting, and for a sharper reason: a skewed operating point depresses the
+        # *train* score too, so "both low and close together" reads as missing capacity when the fix
+        # is one weight.
         failure_type = "hyperparam"
         evidence, direction_override, changes_override = skew
     elif (
@@ -432,13 +395,10 @@ def heuristic_verdict(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
 def _overfits(metric: str, gap: float, train_score: Any) -> bool:
     """Whether the train/validation gap is wide enough to call overfitting.
 
-    ``gap`` arrives already normalised to "how much worse validation is than training", so
-    the sign question is settled and only scale is left. A bounded metric carries its own
-    scale, so a constant distance means the same thing everywhere. ``mae`` and ``rmse`` do
-    not, so they are judged against the training score itself — and when that score is
-    missing or zero there is nothing to take a fraction of, so the branch declines to fire
-    rather than guess at the units. Declining is the safe side: some later branch still
-    diagnoses the attempt, and none of them prescribes *less* capacity by mistake.
+    ``gap`` arrives normalised to "how much worse validation is than training", so only scale is left.
+    A bounded metric carries its own; ``mae``/``rmse`` are judged as a fraction of the training score,
+    and a missing or zero score **declines rather than guessing at units**.
+    Rationale: ``docs/rationale.md``.
     """
     found = spec(metric)
     if found is None or found.bounded:
@@ -464,10 +424,9 @@ def _underfits(metric: str, train_score: float, threshold: float) -> bool:
 def _resolution(state: AutoMLState, config: RunConfig) -> str:
     """The ``resolution`` section of the prompt: this attempt's interval and what it swallows.
 
-    The comparison set is everything the Critic is asked to reason across — the bar it
-    missed, and every prior attempt's score on the same metric. A prior attempt with no
-    score (it errored) contributes nothing rather than a zero, which would collide with
-    every interval and read as "indistinguishable from a crash".
+    The comparison set is everything the Critic reasons across: the bar it missed, and every prior
+    attempt's score on the same metric. **A prior attempt with no score contributes nothing, not a
+    zero** — a zero collides with every interval and reads as "indistinguishable from a crash".
     """
     goal = dict(state.get("goal") or {})
     metric = str(goal.get("metric", config.metric))
@@ -485,36 +444,16 @@ def _resolution(state: AutoMLState, config: RunConfig) -> str:
 def _ledger(state: AutoMLState, config: RunConfig) -> str:
     """The ``ledger`` section: what each prescription so far was actually worth.
 
-    Instruction 4 of the prompt already tells the Critic to check the history before
-    repeating a suggestion, and mv-llm-2 shows that instruction is not enough on its own:
-    across five iterations it issued ``wrong_model_family`` twice, three families were
-    tried, and none of them beat iteration 1 — the run ended +0.0044 above where it
-    started, which a paired bootstrap could not separate from zero (P=0.902). The history
-    it was handed contained every fact needed to see that, spread across four JSON blobs
-    of plans, hyperparameters and metrics. Joining a verdict to the attempt it caused and
-    subtracting two numbers is arithmetic, so it belongs here rather than in a prompt that
-    asks the model to do it.
+    One row per *prescription*, not per attempt — iteration N's verdict produced iteration N+1, so
+    the last row's verdict is the one being written now and has no score yet. The attempt under
+    judgement is not in ``history`` (``critic`` appends it), so it is added here.
 
-    The rows are deliberately about *prescriptions*, not attempts: iteration N's verdict is
-    what produced iteration N+1, so the last row's verdict is the one being written now and
-    has no score yet. The attempt currently being judged is not in ``history`` — ``critic``
-    appends it — so it is added here, otherwise the most informative row (the previous
-    verdict's result) would be the one always missing.
+    ``paired_of`` is passed this ledger's own running baseline, never trusted to hold the right one:
+    a row whose Δ was computed against a different iteration than the sentence claims is a line where
+    every number is real and the claim is not.
 
-    "최고 갱신" is a subtraction of two point estimates and says nothing about whether these
-    rows separate them, which in mv-llm-2 was the whole problem: the row reading "+0.0019 —
-    최고 갱신" is one a paired bootstrap put at P=0.902 against the same baseline. So every
-    row that has a paired verdict renders it inline, next to the subtraction it qualifies.
-    ``paired_of`` is passed this ledger's own running baseline rather than being trusted to
-    have the right one — the published numbers are named ``delta_vs_best`` and ``p_better``,
-    and a row whose Δ was computed against a different iteration than the sentence claims is
-    a line where every number is real and the claim is not.
-
-    What that verdict is for is *steering*: it decides what the next prescription should be,
-    and a false positive here costs one iteration. It is not the run's acceptance test — that
-    is the held-back test split, scored once after the loop ends
-    (:mod:`automl_agent.nodes.holdout`), which no row of this ledger has access to and which
-    must not become a gate on which iteration wins.
+    Steering only. No row here sees the test split, and none may become a gate on which iteration
+    wins (:mod:`automl_agent.nodes.holdout`). Rationale: ``docs/rationale.md``.
     """
     goal = dict(state.get("goal") or {})
     metric = str(goal.get("metric", config.metric))
@@ -543,26 +482,22 @@ def _ledger(state: AutoMLState, config: RunConfig) -> str:
     # been issued twice and paid nothing either time is the exact shape of a stuck loop.
     paid: dict[str, bool] = {}
     best: float | None = None
-    # Which iteration ``best`` came from. Tracked next to the score, not derived afterwards,
-    # because it is the key the paired block has to agree with for its Δ to be about the same
-    # comparison this row's subtraction is about.
+    # Tracked, not derived afterwards: it is the key the paired block has to agree with for its Δ to
+    # be about the same comparison as this row's subtraction.
     best_iteration: int | None = None
-    # The last pipeline that was actually built, carried across attempts that errored: those
-    # have no ``applied_preprocessing``, and treating that absence as a change would report
-    # the whole pipeline being torn out and put back. The attempt it came from is kept beside
-    # it for the same reason ``best_iteration`` is kept beside ``best``: when an attempt in
-    # between errored, ``attempts[index - 1]`` is not the row this pipeline is being compared
-    # against, so asking it what the family was would answer about the wrong transition.
+    # The last pipeline actually *built*, carried across attempts that errored — those have no
+    # ``applied_preprocessing`` and treating the absence as a change reports the whole pipeline torn
+    # out and put back. ``previous_built`` rides along because ``attempts[index - 1]`` is not the row
+    # being compared against when something in between errored.
     previous_pipeline: dict[str, Any] = {}
     previous_built: Mapping[str, Any] | None = None
     # Rows whose transition moved the family *and* the pipeline. Collected rather than
     # decided per row, because what has to be said about them is one rule, not five copies
     # of it — see the footer line and :func:`_pipeline_change`.
     two_levers: list[str] = []
-    # The same accounting from the other side: how many transitions moved the pipeline at all,
-    # and which of those moved *nothing else*. Only the second kind is evidence about the
-    # preprocessing lever: mv-llm-4·5·6 produced none between them, and mv-llm-8 produced the
-    # first one — ``missing_count`` alone, paired Δ -0.0028 with the interval spanning 0.
+    # The same accounting from the other side: how many transitions moved the pipeline at all, and
+    # which of those moved *nothing else*. Only the second kind is evidence about the preprocessing
+    # lever, and single-lever transitions are rare in practice — most runs move the family alongside.
     pipeline_moves = 0
     pipeline_alone: list[str] = []
     for index, attempt in enumerate(attempts):
@@ -599,18 +534,16 @@ def _ledger(state: AutoMLState, config: RunConfig) -> str:
             previous_pipeline, previous_built = pipeline, attempt
         if prescription:
             parts.append(f"({prescription} 처방의 결과)")
-            # The Planner is allowed to overrule the verdict, and in mv-llm-2 it did:
-            # iteration 3's ``overfitting`` prescribed a regularised ``extra_trees`` and
-            # iteration 4 ran ``hist_gbdt`` instead — and beat everything. Crediting that
-            # score to the prescription would be a lie in the direction that matters most,
-            # since it is the row a reader would take as proof the diagnosis worked.
+            # The Planner is allowed to overrule the verdict, and has: a prescribed family swap can
+            # come back as a different family that then beats everything. Crediting that score to
+            # the prescription would be a lie in the direction that matters most, since it is the
+            # row a reader takes as proof the diagnosis worked.
             asked = dict(prior.get("concrete_changes") or {}).get("model")
             if isinstance(asked, str) and asked and asked != family:
                 parts.append(f"— 다만 처방은 {asked}였고 계획이 {family}로 바꿨다")
-            # The same override, on the axis the family note does not cover. mv-llm-6
-            # iteration 2 prescribed ``missing_count`` on top of ``impute: none``, iteration
-            # 3's plan came back with it off, and nothing anywhere said so — so the next
-            # verdict could read that row as evidence about a column that never existed.
+            # The same override on the axis the family note does not cover: a prescribed
+            # preprocessing step can come back switched off, with nothing anywhere saying so — and
+            # the next verdict would read that row as evidence about a column that never existed.
             dropped = _dropped_preprocessing(prior.get("concrete_changes"), pipeline)
             if dropped:
                 parts.append(f"— 다만 처방의 전처리가 이 시도에 없다: {dropped}")
@@ -638,12 +571,9 @@ def _ledger(state: AutoMLState, config: RunConfig) -> str:
             + " — 같은 진단을 다시 내리려면 지난번과 무엇이 다른지 evidence에 적으십시오."
         )
     if two_levers:
-        # A marker, not a ban. Moving both at once is sometimes the only way to move at all —
-        # ``logreg`` cannot take ``impute: none``, so trying it *requires* changing the
-        # pipeline in the same transition. What must not happen is the subtraction on that
-        # row being read as one lever's work: mv-llm-2's two double-lever rows are its worst
-        # loss and its best score, and the imputation carried 0.0098 of the loss on its own
-        # against 0.0022 for everything else about the swap.
+        # **A marker, not a ban** — ``logreg`` cannot take ``impute: none``, so trying it *requires*
+        # moving the pipeline in the same transition. What must not happen is that row's subtraction
+        # being read as one lever's work. Rationale: ``docs/rationale.md``.
         lines.append(
             "  한 행에 레버가 둘인 전이: "
             + ", ".join(two_levers)
@@ -652,12 +582,9 @@ def _ledger(state: AutoMLState, config: RunConfig) -> str:
             "강제합니다) 금지가 아니라 표시이고, 필요한 것은 그 뺄셈을 원인으로 읽지 않는 "
             "것입니다."
         )
-    # Silent when the pipeline never moved. "You have not tried preprocessing yet" would be
-    # true and would also be an invitation: the lever reads 0.0097 of roc_auc under a random
-    # split and +0.0011 with the interval spanning 0 under a contiguous one, against a
-    # shortfall the goal note now sizes in the hundredths of KS. A prompt that lists an untried
-    # lever gets it tried, which is the wrong use of an iteration. What is worth saying is only
-    # about pipeline moves that already happened — whether any of them can be read.
+    # **Silent when the pipeline never moved.** "You have not tried preprocessing yet" would be true
+    # and would also be an invitation, and a prompt that lists an untried lever gets it tried. Only
+    # moves that already happened are worth a line. Rationale: ``docs/rationale.md``.
     if pipeline_moves:
         if pipeline_alone:
             lines.append(
@@ -765,8 +692,8 @@ def _dropped_preprocessing(changes: Any, pipeline: Mapping[str, Any]) -> str:
     missing — the Planner overruling the verdict, and the executor downgrading a request the
     family cannot take. Which of the two happened is not claimed here; what the next verdict
     needs is that the setting was not in the attempt it is about to read as the prescription's
-    result. Reasoning about a column that was never added is reasoning about a run that did
-    not happen, and the family side of the same override has been reported since mv-llm-2.
+    result. Reasoning about a column that was never added is reasoning about a run that did not
+    happen. The family side of the same override is reported alongside it.
     """
     asked = _prescribed_preprocessing(changes)
     if not asked or not pipeline:
@@ -784,57 +711,25 @@ def _other_levers_held(
 ) -> bool:
     """Whether the hyperparameters are the same across two attempts, so only the pipeline moved.
 
-    The family is compared by the caller, which already has it. This is the other half, and it
-    is not a formality: retuning inside one family spanned 0.0032 of roc_auc in the same
-    measurements that put the imputation lever between +0.0011 and 0.0097, so a transition that
-    retuned *and* changed the pipeline has two owners on the same axis just as much as a family
-    swap does. Reporting such a row as single-lever evidence would be the exact error the whole
-    ledger exists to prevent.
+    The caller compares the family; this is the other half, and not a formality — retuning *and*
+    changing the pipeline gives a row two owners on one axis, exactly as a family swap does.
 
-    A missing ``hyperparams`` key reads as "cannot confirm held", not as "held". Both real
-    shapes carry it — :func:`automl_agent.state.build_attempt` always sets it and ``_ledger``
-    sets it on the synthetic current row — so the only rows this refuses are ones whose record
-    does not say, and refusing to call those attributable errs toward silence.
+    **A missing ``hyperparams`` key reads "cannot confirm held", not "held"**, so the only rows
+    refused are ones whose record does not say. Rationale: ``docs/rationale.md``.
     """
     if "hyperparams" not in previous or "hyperparams" not in current:
         return False
-    return _levers(previous.get("hyperparams"), seed) == _levers(current.get("hyperparams"), seed)
-
-
-def _levers(hyperparams: Any, seed: int | None) -> dict[str, Any]:
-    """The hyperparameters minus a ``random_state`` that cannot have changed the fit.
-
-    Every estimator in :mod:`automl_agent.scripts.train` is constructed with
-    ``random_state=seed``, so a plan naming that same number adds a key to the record and
-    nothing to the run. mv-llm-8 is why this exists: iteration 3's verdict prescribed
-    ``missing_count: false → true`` and *nothing else*, the plan came back with hyperparameters
-    byte-identical to iteration 3, and ``model_selection`` appended ``random_state: 42`` on its
-    way to the executor — which already had 42 from ``--seed``. The dicts differed, so this
-    function's caller reported the one clean single-lever transition in nine runs as confounded,
-    on the very row that was the evidence.
-
-    Only when the value equals the seed. ``random_state: 7`` under ``--seed 42`` is a real
-    lever — it moves ``early_stopping``'s internal split — and stays counted.
-    """
-    values = dict(hyperparams or {})
-    pinned = values.get("random_state")
-    if seed is not None and not isinstance(pinned, bool) and pinned == seed:
-        values.pop("random_state")
-    return values
+    return drop_pinned_seed(previous.get("hyperparams"), seed) == drop_pinned_seed(
+        current.get("hyperparams"), seed
+    )
 
 
 def _pipeline_change(previous: Mapping[str, Any], current: Mapping[str, Any]) -> str:
     """``impute: none → median`` for every key whose applied value moved.
 
-    A row that changed family *and* pipeline spent two levers, and the ledger's subtraction
-    cannot tell them apart. mv-llm-2 iteration 3 is that row, and not by accident: the plan
-    asked for ``extra_trees`` *and* for ``impute: median`` instead of the ``impute: none``
-    the four other attempts ran, and said so in its own ``changes_from_last``. The attempt
-    lost 0.0500 and the next verdict read the whole of it as ``wrong_model_family``.
-    Decomposed afterwards on the same split, the imputation carried 0.0098 of the roc_auc
-    loss on its own and everything else about the swap 0.0022 — the diagnosis named the
-    smaller half, and then prescribed another family swap. Naming the change here is not the
-    decomposition; it is what stops the row from reading as one clean lever.
+    A row that moved family *and* pipeline spent two levers and the ledger's subtraction cannot
+    separate them. Naming the change here is not the decomposition — it stops the row reading as one
+    clean lever. Rationale: ``docs/rationale.md``.
     """
     moved = sorted(key for key in {*previous, *current} if previous.get(key) != current.get(key))
     return ", ".join(
@@ -854,22 +749,29 @@ def _setting(value: Any) -> str:
 def _cut_lever_note(
     state: AutoMLState, goal: Mapping[str, Any], metric: str, config: RunConfig
 ) -> str | None:
-    """``cut_headroom`` put next to the distance still to go, as a share of it.
+    """``balanced_accuracy_cut_headroom`` put next to the distance still to go, as a share of it.
 
-    Both numbers were already in the prompt and neither was next to the other: the Critic
-    read ``cut_headroom`` in one section and the shortfall in another, and mv-llm-2's
-    winning attempt had 0.0029 of headroom against 0.036 still to cover — the operating
-    point could buy 8% of the remaining distance. The ratio is the part that is not
-    obvious from either number alone, and it is a division.
+    Both numbers were already in the prompt, just not next to each other; the *ratio* is what decides
+    whether the cut is worth an iteration, and it is a division, so it is computed rather than asked
+    for.
 
-    Only for a maximizing metric that reports the diagnostic at all. On a minimizing metric
-    the shortfall runs the other way and ``cut_headroom`` does not exist there anyway, so
-    the branch is skipped rather than sign-corrected into something untested.
+    ``balanced_accuracy`` only, on the same set as :func:`_ranking_limited` and the skew branch.
+    ``balanced_accuracy_cut_headroom`` is a ``balanced_accuracy`` measurement whatever the goal
+    metric is (``scripts/train.py`` computes it against that one ceiling), while ``shortfall`` below
+    is in the goal metric's own units — so on any other goal this ratio divides one metric's headroom
+    by another metric's distance and reports the quotient as a share. This guard is the one the other
+    two consumers of the number already had; its absence here was the omission, not a rule of its
+    own. Found by an ``f1`` run in which two plans reached for the cut citing the headroom: the line
+    itself never rendered, but only because that run's bar was already met.
+
+    The set is maximizing, so it subsumes the minimizing check this replaces — on a minimizing
+    metric the shortfall runs the other way and ``balanced_accuracy_cut_headroom`` does not exist at all.
+    Rationale: ``docs/rationale.md``.
     """
-    if direction_of(metric) == MINIMIZE:
+    if metric not in SYMMETRIC_METRICS:
         return None
     metrics = dict(dict(state.get("result") or {}).get("metrics") or {})
-    headroom = as_number(metrics.get("cut_headroom"))
+    headroom = as_number(metrics.get("balanced_accuracy_cut_headroom"))
     score = as_number(metric_value(dict(state.get("result") or {}), metric))
     if headroom is None or score is None:
         return None
@@ -878,7 +780,7 @@ def _cut_lever_note(
         return None
     share = headroom / shortfall
     head = (
-        f"  운영점 레버의 크기: cut_headroom {headroom:.4f} 대 목표까지 남은 거리 "
+        f"  운영점 레버의 크기: balanced_accuracy_cut_headroom {headroom:.4f} 대 목표까지 남은 거리 "
         f"{shortfall:.4f} — 임계값과 클래스 가중치로 살 수 있는 최대치는 남은 거리의 "
         f"{share:.0%}"
     )
@@ -898,26 +800,13 @@ def _ranking_ceiling_note(
 ) -> str | None:
     """How far the bar is, in units of how much swapping families has actually moved.
 
-    The companion to :func:`_cut_lever_note`, for the other half of the same decision. That
-    one sizes the operating-point lever against the distance left; this one sizes the
-    *ranking* lever the same way, and the ranking lever is the one every
-    ``wrong_model_family`` verdict spends an iteration on. ``balanced_accuracy_at_best_cut``
-    is the ceiling of a family's ranking rather than of its cut, so the span of that number
-    across the families already tried is what family-swapping has been observed to buy on
-    this data — mv-llm-2 ran three families and the span was 0.0066, against 0.0331 still to
-    cover after the cut is chosen perfectly. The shortfall is five times the whole span, and
-    that ratio is the fact neither number carries alone.
+    **The span is a range over N maxima, not a paired comparison, and the line says so.** Under a null
+    where the families rank identically a handful of maxima spread on their own by about as much, so
+    the span is never evidence that the families differ.
 
-    The span is a *range over N maxima*, not a paired comparison, and it must not be read as
-    one: under a null where the families rank identically, five values of this shape spread
-    0.0051 on their own, and 0.0066 sits z=0.78 from that — consistent with the null. So the
-    line reports the span and refuses it as evidence that the families differ, which is the
-    opposite of the reading "0.0066 > the 0.0061 paired half-width, so the swap registered".
-
-    Restricted to :data:`SYMMETRIC_METRICS` because the ceiling identity is only defined
-    there (:func:`automl_agent.scoring.ranking.best_cut_ceiling`), and to a ceiling that still misses
-    the bar — above it the prescription is about the cut and :func:`_cut_lever_note` owns
-    that case.
+    Restricted to :data:`SYMMETRIC_METRICS` (the ceiling identity exists only there) and to a ceiling
+    that still misses the bar — above it :func:`_cut_lever_note` owns the case.
+    Rationale: ``docs/rationale.md``.
     """
     if metric not in SYMMETRIC_METRICS:
         return None
@@ -999,22 +888,17 @@ def _operating_point_skew(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """``(evidence, direction, concrete_changes)`` when the two halves are lopsided.
 
-    Restricted to :data:`SYMMETRIC_METRICS`, and ``specificity`` is emitted for binary
-    targets only, so its presence is also the binary guard — which is what lets the
-    prescription name codes 0 and 1.
-
-    m-llm7 is why this exists. Its three attempts all had recall below specificity
-    (0.680/0.864, 0.713/0.854, 0.713/0.856), so the positive weight needed to go *up*
-    every time; the Critic read the train/validation gap instead and prescribed lowering it
-    from 8 to 5. Nothing in the numbers it was handed named a direction, so it guessed, and
-    only the Planner arguing back kept the run moving.
+    Restricted to :data:`SYMMETRIC_METRICS`; ``specificity`` is binary-only, so its presence doubles
+    as the binary guard that lets the prescription name codes 0 and 1.
+    Rationale: ``docs/rationale.md``.
     """
     if metric not in SYMMETRIC_METRICS:
         return None
-    # The measurement outranks the approximation. Advisory both ways: a multiclass attempt
-    # and every result written before this number existed carry no ``cut_headroom``, and
-    # those keep the old behaviour rather than losing the branch.
-    headroom = as_number(metrics.get("cut_headroom"))
+    # The measurement outranks the approximation. Advisory both ways: a multiclass attempt, and
+    # every result written before this number carried this name, hold no
+    # ``balanced_accuracy_cut_headroom`` — those keep the old behaviour rather than losing the
+    # branch.
+    headroom = as_number(metrics.get("balanced_accuracy_cut_headroom"))
     if headroom is not None and headroom < CUT_HEADROOM_FLOOR:
         return None
     skew = _skew(metrics)
@@ -1074,26 +958,21 @@ def _ranking_limited(
 ) -> str | None:
     """Evidence that the ranking, not the decision rule, is what falls short.
 
-    Two measured facts have to hold together, and then the conclusion is not a heuristic:
-    the cut is already within :data:`CUT_HEADROOM_FLOOR` of the best one this ranking
-    allows, *and* that best cut is still under the bar. No decision rule over this ranking
-    reaches the goal — the same argument :func:`automl_agent.scoring.goal.describe` makes about the
-    baseline before the loop starts, applied here to one attempt.
-
-    Requiring both is what keeps it honest. A small headroom on its own says nothing about
-    the goal, and a ceiling under the bar on its own leaves the operating point worth
-    fixing first — which is the case the skew branch owns.
+    **Both facts are required, and that is what keeps it a proof rather than a heuristic:** the cut is
+    already within :data:`CUT_HEADROOM_FLOOR` of this ranking's best, *and* that best is still under
+    the bar. Either alone leaves the operating point worth fixing first — the skew branch's case.
+    Rationale: ``docs/rationale.md``.
     """
     if metric not in SYMMETRIC_METRICS:
         return None
-    headroom = as_number(metrics.get("cut_headroom"))
+    headroom = as_number(metrics.get("balanced_accuracy_cut_headroom"))
     ceiling = as_number(metrics.get("balanced_accuracy_at_best_cut"))
     if headroom is None or ceiling is None:
         return None
     if headroom >= CUT_HEADROOM_FLOOR or ceiling >= threshold:
         return None
     return (
-        f"cut_headroom={headroom:.4f}로 운영점은 이미 최적인데 "
+        f"balanced_accuracy_cut_headroom={headroom:.4f}로 운영점은 이미 최적인데 "
         f"balanced_accuracy_at_best_cut={ceiling:.4f}가 목표 {threshold}보다 낮다 — "
         f"이 랭킹은 어떤 임계값으로도 목표에 닿지 못한다."
     )
@@ -1111,10 +990,9 @@ def _skew(metrics: Mapping[str, Any]) -> float | None:
 def _weight_history(state: AutoMLState) -> list[tuple[float, float]]:
     """``(positive weight, skew)`` for every prior attempt of the *same* model.
 
-    Same model only. m-llm8 iteration 4 kept the weight at 10.5 and moved to xgboost, and
-    the skew went from -0.003 to -0.281 — a point from another family says nothing about
-    where this family's operating point sits, and interpolating across the two would place
-    the crossing somewhere neither model has been.
+    **Same model only.** A point from another family says nothing about where this family's operating
+    point sits, and interpolating across the two places the crossing somewhere neither model has
+    been. Rationale: ``docs/rationale.md``.
     """
     model = str(state.get("model") or "")
     points: list[tuple[float, float]] = []
@@ -1135,15 +1013,12 @@ def _interpolated_weight(
 ) -> tuple[float, tuple[float, float], tuple[float, float]] | None:
     """Where the skew crosses zero, when two observed weights straddle it.
 
-    The skew rises with the positive weight — more weight buys recall and spends
-    specificity — so a sign change brackets the optimum and a secant through the two
-    tightest points beats another blind step. It also stops the branch oscillating: at
-    m-llm8's second attempt (weight 8, skew -0.118) a plain ×1.5 step lands back on 12,
-    the weight the first attempt already showed was too high.
+    Skew rises with the positive weight, so a sign change brackets the optimum and a secant through
+    the two tightest points beats another blind step.
 
-    ``None`` when there is no bracket, or when the two points are not ordered as the
-    monotonicity requires — capacity changes between attempts can invert them, and a
-    secant through inverted points would point the wrong way.
+    ``None`` without a bracket, **or when the two points are not ordered as monotonicity requires** —
+    capacity changes between attempts can invert them, and a secant through inverted points points
+    the wrong way. Rationale: ``docs/rationale.md``.
     """
     below = max((point for point in points if point[1] < 0), key=lambda p: p[1], default=None)
     above = min((point for point in points if point[1] > 0), key=lambda p: p[1], default=None)
@@ -1188,24 +1063,11 @@ def _weight_value(params: Mapping[str, Any], state: AutoMLState) -> float:
 
 
 def _first_rung(state: AutoMLState) -> float:
-    """Where the weight goes when the last attempt carried none: the card's ratio.
+    """The positive-class weight to start from: the card's imbalance ratio, floored at one step.
 
-    ``docs/WEIGHT-LEVER.md`` measured what climbing from 1 by :data:`WEIGHT_STEP` costs when
-    the Critic picks this branch once. On speeddating it froze at 1.5 against a card asking
-    for 5.07, and putting 5.07 into the recorded winner's *own* config — one key, nothing else
-    — recovered 67%, 84% and 114% of the delta ``docs/HARD-BAR.md`` had recorded as the LLM
-    arm's contribution across three seeds. Validation moved with it (+0.0623 / +0.0499 /
-    +0.0506), so the ladder's own selection rule would have taken it.
-
-    ``max`` rather than the ratio outright, because this branch is reached when the positive
-    class needs *more* weight: on a nearly balanced card the ratio sits below one step, and
-    handing it back as the prescription would lower the weight while the evidence says raise
-    it. spambase (ratio 1.54 against a step of 1.5) is the card that makes that case real and
-    almost invisible, which is the point — the same experiment measured |Δ| ≤ 0.0040 there.
-
-    Only the first rung. Once a weight is on, the step and then the interpolation own the
-    search: the ratio is a starting point the card knows, not the optimum, and treating it as
-    the optimum would give this arm a grid sweep neither arm ran.
+    ``max``, not the ratio itself — a near-balanced card's ratio sits *below* one step, so using it
+    directly would lower the weight this branch exists to raise. First rung only; the step and then
+    the interpolation own the search after it. Rationale: ``docs/rationale.md``.
     """
     return max(WEIGHT_STEP, _frequency_ratio(state))
 

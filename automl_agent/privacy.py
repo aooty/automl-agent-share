@@ -335,10 +335,23 @@ APPLIED_HYPERPARAMS_KEY = "applied_hyperparams"
 # state the preprocessing that ran instead of the preprocessing the card suggested.
 APPLIED_PREPROCESSING_KEY = "applied_preprocessing"
 # {"held_out_rows": 414, "fit_rows": 2346, ...} — the rows the estimator's own early stopping
-# kept back. Row *counts*, like the split sizes already in every prompt, not row contents; the
-# filter is here for the same reason it is on the other two, to keep a future key from
-# arriving as an object. Absent when nothing was held back, which is the common case.
+# kept back. Row *counts*, like the split sizes already in every prompt, not row contents — plus
+# ``cut_requested``/``cut_declined``, which are the decision cut's request and the executor's
+# reason for refusing it, both out of a closed set in ``scripts/train.py``. The filter is here for
+# the same reason it is on the other two, to keep a future key from arriving as an object. Absent
+# when nothing was held back and no cut was asked for, which is the common case.
 INTERNAL_VALIDATION_KEY = "internal_validation"
+# ``["missing_indicator(gcs, paco2)", "impute(median (constant: gcs, paco2))", "scale(auto)"]`` —
+# the steps a ``pipeline`` spec really produced, in order, one rendered line each. A list rather
+# than a mapping, so it gets its own filter below instead of ``_public_params``.
+#
+# Every part of every line comes from a closed set: the step name is one of
+# :data:`automl_agent.dataset.pipeline.STEPS` and the columns are the fitted schema's, which the
+# dataset card already publishes by name. So this is not a new class of thing crossing — but the
+# filter is here for the reason the hyperparameter one is, to keep a future step from arriving as
+# an object or as a line long enough to be a data dump.
+APPLIED_PIPELINE_KEY = "applied_pipeline"
+MAX_PIPELINE_LINE = 500
 
 
 def _public_params(params: Any) -> dict[str, Any]:
@@ -430,6 +443,13 @@ def public_result(result: dict[str, Any]) -> dict[str, Any]:
     for key in (APPLIED_HYPERPARAMS_KEY, APPLIED_PREPROCESSING_KEY, INTERNAL_VALIDATION_KEY):
         if key in raw:
             clean[key] = _public_params(raw[key])
+    if APPLIED_PIPELINE_KEY in raw:
+        lines = raw[APPLIED_PIPELINE_KEY]
+        clean[APPLIED_PIPELINE_KEY] = [
+            line[:MAX_PIPELINE_LINE]
+            for line in (lines if isinstance(lines, list) else [])
+            if isinstance(line, str)
+        ]
     if PAIRED_KEY in raw:
         clean[PAIRED_KEY] = _public_paired(raw[PAIRED_KEY])
     for field in PUBLIC_RESULT_FIELDS:

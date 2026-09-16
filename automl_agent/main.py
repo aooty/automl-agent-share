@@ -22,6 +22,7 @@ import dataclasses
 import json
 import sqlite3
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ from .config import (
     RunConfig,
     bedrock_signing_available,
     has_llm_credentials,
+    read_json_object,
     use_bedrock,
 )
 from .dataset.caveats import CAVEATS_KEY, card_caveats, merge_caveats
@@ -294,6 +296,13 @@ def check_credentials(config: RunConfig) -> None:
     """Fail before spending time when a live run cannot possibly call the LLM."""
     if not config.use_llm:
         return
+    # A run whose every LLM-calling node is served locally needs no Anthropic credentials, and
+    # the split matters: ``--proposer-model ollama:...`` alone still leaves the Critic and the
+    # report on the API, so only the fully local case is exempt.
+    from .llm.client import needs_anthropic
+
+    if not needs_anthropic(config):
+        return
     if use_bedrock() and not bedrock_signing_available():
         # The SDK imports botocore lazily, when it signs the first request — without
         # this check the failure surfaces as a traceback from inside the planning node.
@@ -506,6 +515,7 @@ def command_run(args: argparse.Namespace) -> int:
         no_llm=args.no_llm,
         seed=args.seed,
         llm_model=args.model,
+        proposer_model=args.proposer_model,
         dataset_card_path=Path(args.dataset_card) if args.dataset_card else None,
         data_path=Path(args.data) if args.data else None,
         target_column=args.target,
@@ -686,6 +696,105 @@ def command_show(args: argparse.Namespace) -> int:
             report_text = path.read_text(encoding="utf-8") if path.exists() else ""
         print("")
         print(report_text or "(보고서가 아직 없습니다)")
+    return 0
+
+
+def display_width(text: str) -> int:
+    """How many terminal columns ``text`` occupies. Korean glyphs take two, not one.
+
+    Without this every column after a Korean one is offset by the number of Korean characters
+    before it, which is exactly the case this listing is for: a screen of runs read by scanning
+    down one column.
+    """
+    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
+
+
+def pad(text: str, width: int, *, right: bool = False) -> str:
+    fill = " " * max(width - display_width(text), 0)
+    return fill + text if right else text + fill
+
+
+# thread_id, 방식, 지표, 최고(val), test, 반복 — the ``종료`` column is last and unpadded, so a
+# long Korean reason cannot push anything out of line.
+LIST_COLUMNS = (24, 8, 6, 10, 9, 8)
+
+
+def run_row(directory: Path) -> tuple[str, ...]:
+    """One run's line in ``list``, read from its files alone.
+
+    Files and not the checkpoint: ``show`` opens the checkpoint because it answers "where is
+    this run now", while this answers "which runs exist". One sqlite connection per thread
+    would make listing slower than some of the runs it lists, and would contend for the write
+    lock with a run that is still going.
+    """
+    from .nodes.report import STOP_REASON_LABELS
+
+    config = read_json_object(directory / RUN_CONFIG_FILE) or {}
+    digest = read_json_object(directory / "history.json") or {}
+    goal = digest.get("goal") or {}
+    metric = str(goal.get("metric") or config.get("metric") or "")
+    mode = "dry-run" if config.get("dry_run") else "no-llm" if config.get("no_llm") else "llm"
+
+    def score_of(block: Any) -> str:
+        value = (block or {}).get("metrics", {}).get(metric) if isinstance(block, dict) else None
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return "—"
+        return f"{float(value):.4f}"
+
+    best = digest.get("best") or {}
+    best_score = best.get("score")
+    holdout = digest.get("holdout") or {}
+    return (
+        directory.name,
+        mode,
+        metric or "—",
+        f"{float(best_score):.4f}" if isinstance(best_score, (int, float)) else "—",
+        score_of(holdout) if holdout.get("status") == "ok" else "—",
+        # A run with no history.json has not reported yet: it is going, or it died before the
+        # report node. Either way the count is unknown rather than zero.
+        f"{digest.get('iterations', '?')}/{config.get('max_iterations', '?')}",
+        STOP_REASON_LABELS.get(str(digest.get("stop_reason")), "미완료" if not digest else "?"),
+    )
+
+
+def command_list(args: argparse.Namespace) -> int:
+    """Every run under the artifacts root, newest first.
+
+    The one thing ``show`` cannot answer, because it takes a ``--thread-id``: an operator who
+    ran ten experiments last week has no way to recall what they were called.
+    """
+    base = Path(args.artifacts_root) if args.artifacts_root else ARTIFACTS_ROOT
+    directories = (
+        sorted(
+            (item for item in base.iterdir() if item.is_dir()),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        if base.is_dir()
+        else []
+    )
+    if not directories:
+        print(f"실행이 없습니다 — {base} 아래에 실행 디렉터리가 없습니다.")
+        return 0
+
+    headers = ("thread_id", "방식", "지표", "최고(val)", "test", "반복", "종료")
+    rows = [run_row(directory) for directory in directories]
+    print(f"{base} — 실행 {len(rows)}개 (최근 순)")
+    print("")
+
+    def line(cells: tuple[str, ...]) -> str:
+        padded = [
+            pad(cell, width, right=index >= 3)
+            for index, (cell, width) in enumerate(zip(cells, LIST_COLUMNS, strict=False))
+        ]
+        return " ".join([*padded, cells[-1]])
+
+    print(line(headers))
+    print("-" * display_width(line(headers)))
+    for row in rows:
+        print(line(row))
+    print("")
+    print("한 실행을 자세히 보려면: `show --thread-id <아이디>` (보고서 전문까지 보려면 --report)")
     return 0
 
 
@@ -1021,6 +1130,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--seed", type=int, default=42, help="난수 시드")
     run_parser.add_argument("--model", default="claude-opus-5", help="사용할 Claude 모델 ID")
+    run_parser.add_argument(
+        "--proposer-model",
+        default="",
+        help="planning·model_selection에만 쓸 모델. 생략하면 --model과 같습니다. "
+        "`ollama:<모델>`을 주면 로컬 Ollama로 나갑니다 (예: ollama:gemma3:27b)",
+    )
     run_parser.add_argument("--artifacts-root", default=None, help="아티팩트 루트 디렉터리 재지정")
     run_parser.add_argument(
         "--keep-models",
@@ -1037,6 +1152,10 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--thread-id", required=True)
     resume_parser.add_argument("--artifacts-root", default=None)
     resume_parser.set_defaults(func=command_resume)
+
+    list_parser = subparsers.add_parser("list", help="아티팩트에 남아 있는 실행을 한 줄씩 나열합니다")
+    list_parser.add_argument("--artifacts-root", default=None)
+    list_parser.set_defaults(func=command_list)
 
     show_parser = subparsers.add_parser("show", help="저장된 실행 상태를 출력합니다")
     show_parser.add_argument("--thread-id", required=True)

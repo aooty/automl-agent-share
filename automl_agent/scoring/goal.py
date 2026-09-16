@@ -1,36 +1,27 @@
 """The goal threshold, in two modes: ``auto`` (dataset-relative) and ``fixed``.
 
-**Why two.** A fixed ``f1 >= 0.85`` says nothing portable. On an 11%-positive clinical
-cohort it is unreachable no matter how good the model is; on a well-separated synthetic
-card it is free. Either way the loop's stopping condition stops meaning "this model is
-good" and starts meaning "this dataset is easy". But a fixed bar is exactly right when
-the number comes from outside the data — a deployment requirement, a paper to beat, a
-regulatory floor. Those are different jobs, so they are different modes rather than one
-heuristic trying to serve both.
+**Why two.** A fixed ``f1 >= 0.85`` is unreachable on one card and free on another, so the loop's
+stopping condition stops meaning "this model is good" and starts meaning "this dataset is easy". But
+a fixed bar is exactly right when the number comes from *outside* the data — a deployment
+requirement, a regulatory floor. Different jobs, so different modes.
 
-``auto`` — the default. The bar is set *relative to a reference baseline* that
-:mod:`automl_agent.scripts.profile` measures on the same data, with the same holdout
-split, using one deliberately unglamorous model:
+``auto`` (default) sets the bar relative to a reference baseline ``scripts/profile`` measures on the
+same data and the same holdout split:
 
     target = baseline + (1 - baseline) * margin        (bounded, maximize)
     target = baseline * (1 - margin)                   (minimize)
 
-Which makes the goal mean the same thing across datasets: *beat a competent default by a
-meaningful margin*. The margin is on the remaining headroom, not on the score, because
-the last 0.05 of roc_auc is far harder to win than the first.
+**The margin is on the remaining headroom, not on the score** — the last 0.05 of roc_auc is far
+harder to win than the first. For an error metric the headroom *is* the error, so the margin comes
+off proportionally; that is the only scale-free reading available when the units are the target's.
 
-For an error metric the headroom is the error itself — zero is the perfect score — so the
-margin comes off the baseline proportionally. That is the only scale-free reading available:
-``mae`` is in the target's units, and "close a quarter of the remaining distance" would
-otherwise need a number nobody can supply. Both formulas are then held to the same floor:
-whatever the margin produces, the bar has to beat the trivial predictor
-(:data:`MIN_LIFT`), because a goal a constant predictor already meets is not a goal.
+Both formulas are then held to :data:`MIN_LIFT`: **a goal a constant predictor already meets is not a
+goal.**
 
-``fixed`` — the bar is the number the caller gave, or the per-metric default if they
-gave none. Nothing about the data can move it.
+``fixed`` is the caller's number, or the per-metric default. Nothing about the data can move it.
 
-Both modes are deterministic, and in neither is the LLM asked what the target should be:
-letting the model set its own bar would let it declare success by lowering it.
+**Neither mode asks the LLM what the target should be** — a model that sets its own bar can declare
+success by lowering it.
 
 **Reachability is disclosed, never enforced.** A derived bar can sit above anything the
 baseline's *ranking* permits at any decision threshold, and two real runs spent their
@@ -38,32 +29,22 @@ whole iteration budget finding that out. ``auto`` now compares the bar against t
 ceiling and records the comparison in ``reference`` for :func:`describe` to print, along
 with the margin that would have fitted. It does not lower the bar — a bar that moves to
 meet the result is not a goal — and it does not refuse to run, because the ceiling
-belongs to the *baseline's* ranking and a better family beats it: ``m-llm7``'s bar of
-0.7842 is over the 0.7584 its card allowed and that run cleared it at 0.7847. So the
-warning errs low by construction, and what it says — "the ranking itself has to improve" —
-is what that run did. See :mod:`automl_agent.scoring.ranking`.
+belongs to the *baseline's* ranking and a better family beats it — a run has cleared a bar that sat
+above its own card's ceiling. So the warning errs low by construction, and what it says — "the
+ranking itself has to improve" — is what such a run does. See
+:mod:`automl_agent.scoring.ranking`.
 
-**One reachability check does move the bar, upward.** The ceiling comparison above was
-one-directional — it caught a bar above what the baseline's ranking permits at any cut, and
-said nothing about a bar that ranking already clears at *some* cut. The second case is a
-real defect in the same number: ``baseline`` is measured at the 0.5 cut, so a metric the
-0.5 cut treats badly hands the derivation a deflated starting point and the bar inherits the
-deficit. Measured on the bench cards, ``bank-marketing``'s ``balanced_accuracy`` bar of
-0.7465 sat under the 0.8400 that re-cutting the *same logreg* reaches — and both the
-rule-based fallback arm (val 0.7833) and the LLM arm (val 0.8780) cleared it, so the bar
-separated nothing. Validation scores because that is the channel ``route()`` compares the
-bar against; ``bench/runs/artifacts/{nollm,llm}-bank-marketing-seed42/history.json``.
-``auto`` now floors the bar at that number, which is the exception
-:data:`MIN_LIFT` already makes read one step further: a goal the baseline's own ranking
-already meets at some cut is not a goal either. Only ``balanced_accuracy`` has the identity
-this needs, and measurement says it is also the only metric whose cut deficit outruns the
-margin — see :func:`_raise_to_ranking_floor` for the table.
+**One reachability check does move the bar, upward.** ``baseline`` is measured at the 0.5 cut, so a
+metric that cut treats badly hands the derivation a deflated starting point and the bar inherits the
+deficit — a bar the baseline's own ranking already clears at *some* cut separates nothing. ``auto``
+floors it there, which is :data:`MIN_LIFT`'s exception read one step further. Only
+``balanced_accuracy`` has the identity this needs; see :func:`_raise_to_ranking_floor`.
 
-**Resolution is disclosed too, on the same terms.** A bar can also be bad by being too
-*close*: derived from a baseline whose own 95% interval is wider than the margin, so the
-validation slice cannot resolve the difference the goal asks for. ``auto`` records that
-comparison as ``inside_baseline_ci`` and :func:`describe` prints it, without moving the bar.
-See :mod:`automl_agent.scoring.intervals` for what that width does and does not license.
+**Resolution is disclosed too, and does not move the bar.** A bar derived from a baseline whose own
+95% interval is wider than the margin asks for a difference the slice cannot resolve; that is recorded
+as ``inside_baseline_ci``. See :mod:`automl_agent.scoring.intervals`.
+
+Rationale: ``docs/rationale.md``.
 """
 
 from __future__ import annotations
@@ -253,16 +234,14 @@ def _raise_to_ranking_floor(
 ) -> float:
     """Raise the bar to the baseline ranking's own best cut, when the bar sits under it.
 
-    The mirror of :func:`_note_ranking_ceiling`, which was one-directional: it disclosed a
-    bar the baseline's ranking cannot reach at *any* cut and said nothing about a bar that
-    ranking already reaches at *some* cut. Both are the same defect in the same number,
-    because ``baseline`` is measured at the 0.5 cut — ``profile.py`` calls ``predict()``, like
-    every attempt does — so whatever the cut costs the baseline is subtracted from the bar
-    derived from it.
+    Mirror of :func:`_note_ranking_ceiling`, which was one-directional — it disclosed a bar the
+    baseline's ranking cannot reach at *any* cut, and said nothing about one that ranking already
+    reaches at *some* cut. Same defect in the same number: ``baseline`` is measured at the 0.5 cut
+    (``profile.py`` calls ``predict()``, like every attempt), so whatever the cut costs the baseline
+    is subtracted from the bar derived from it.
 
-    Measured on the four bench cards, that cost is ``balanced_accuracy``'s alone. The
-    threshold-dependent metrics all lose something at 0.5, but only here does the loss
-    outrun what the margin adds:
+    On the four bench cards that cost is ``balanced_accuracy``'s alone. Every threshold-dependent
+    metric loses something at 0.5; only here does the loss outrun what the margin adds:
 
     ======================  ==============  ============  ===========================
     bank-marketing          0.5 cut         best cut       margin 0.25 adds
@@ -272,36 +251,31 @@ def _raise_to_ranking_floor(
     ``balanced_accuracy``   0.6620          0.8400         0.0845 — under the 0.1780
     ======================  ==============  ============  ===========================
 
-    The 0.5-cut column and the last one are recomputable from
-    ``bench/cards/bank-marketing-seed42.json`` — ``baseline.scores`` and
-    ``(1 - score) * 0.25``. The ``balanced_accuracy`` best cut is in the same card
-    (``baseline.balanced_accuracy_at_best_cut``, the ``(1 + ks) / 2`` this module reads). The
-    other two best cuts are **not**, and this module cannot derive them: ``card_ceiling``
-    returns ``None`` off ``SYMMETRIC_METRICS`` precisely because no identity exists there.
-    They were measured once off the baseline's own validation probabilities, and a reader who
-    wants to check them has to redo that rather than read a card.
+    Recomputable from ``bench/cards/bank-marketing-seed42.json``: the 0.5-cut column
+    (``baseline.scores``), the last column (``(1 - score) * 0.25``), and ``balanced_accuracy``'s
+    best cut (``baseline.balanced_accuracy_at_best_cut``, the ``(1 + ks) / 2`` this module reads).
+    The other two best cuts are **not** — ``card_ceiling`` returns ``None`` off
+    ``SYMMETRIC_METRICS`` because no identity exists there. They were measured once off the
+    baseline's own validation probabilities; checking them means redoing that, not reading a card.
 
-    Not a coincidence of this dataset. ``balanced_accuracy`` weights the two error rates
-    equally, which is both why the KS identity holds for it (see
-    :mod:`automl_agent.scoring.ranking`) and why the 0.5 cut costs most under imbalance — the
-    recall collapses to 0.3478 and half of that lands in the score. ``accuracy`` is carried
-    by the majority class, ``f1`` never counts the negatives. So the metric this fires for is
-    the metric that needs it, and ``card_ceiling`` returning ``None`` for the rest is the
-    right answer rather than a gap. ``precision`` and ``recall`` are excluded for a further
-    reason: their best cut is 1.0000 by predicting nothing or everything, so a floor there
-    would be degenerate rather than demanding.
+    Not a quirk of this dataset. ``balanced_accuracy`` weights the two error rates equally, which is
+    both why the KS identity holds (:mod:`automl_agent.scoring.ranking`) and why the 0.5 cut costs
+    most under imbalance — recall collapses to 0.3478 and half of that lands in the score.
+    ``accuracy`` rides the majority class; ``f1`` never counts negatives. So this fires for the one
+    metric that needs it, and ``card_ceiling``'s ``None`` elsewhere is the right answer, not a gap.
+    ``precision``/``recall`` are excluded further: their best cut is 1.0000 by predicting nothing or
+    everything, so a floor there is degenerate rather than demanding.
 
-    **This moves the bar, which the rest of this module does not do.** The exception is the
-    one :data:`MIN_LIFT` already makes, in the same direction and for the same reason: a goal
-    a constant predictor already meets is not a goal, and neither is one that re-cutting the
-    baseline's own ranking already meets. Both only ever make the bar harder. What it costs
-    is that ``--margin`` stops moving the bar below the floor — 0.25 through 0.526 all
-    produce 0.8400 on bank-marketing — so the floored margin is disclosed and
-    :func:`describe` prints it, because a bar that ignores the flag it was given has to say so.
+    **This moves the bar, which nothing else in this module does.** Same exception
+    :data:`MIN_LIFT` already makes, same direction: a goal a constant predictor already meets is not
+    a goal, and neither is one that re-cutting the baseline's own ranking already meets. Both only
+    ever make the bar harder. The cost is that ``--margin`` stops moving it below the floor — 0.25
+    through 0.526 all give 0.8400 on bank-marketing — so the floored margin is disclosed and
+    :func:`describe` prints it: a bar that ignores its flag has to say so.
 
-    Clamped at :data:`CEILING` rather than allowed past it: a ranking with KS above 0.98
-    would otherwise push the bar over the clamp and collect the ``exceeds_ceiling``
-    disclosure, whose wording blames ``chance`` and would be false here.
+    Clamped at :data:`CEILING`, not allowed past it — a ranking with KS above 0.98 would otherwise
+    push the bar over the clamp and collect the ``exceeds_ceiling`` disclosure, whose wording blames
+    ``chance`` and would be false here.
     """
     _ks, ceiling = card_ceiling(card, metric)
     if ceiling is None or threshold >= ceiling:
@@ -457,27 +431,25 @@ def resolve_goal(
 ) -> tuple[dict[str, Any], str | None]:
     """:func:`derive_goal`, with the metric swapped when it cannot score this card's target.
 
-    Returns ``(goal, note)``. ``note`` is the Korean line explaining the swap, and it is
-    ``None`` on the ordinary path — so a caller prints it when there is one and says nothing
-    when there is not. Every construction of the ``goal`` channel goes through here, because
-    the swap has to happen in exactly one place: ``goal["metric"]`` is what every node from
-    ``training`` to ``holdout`` reads, and a substitution applied anywhere downstream would
-    leave two different metrics in one run.
+    Returns ``(goal, note)``; ``note`` is the Korean line explaining the swap, ``None`` on the
+    ordinary path. Every construction of the ``goal`` channel goes through here because the swap has
+    to happen in exactly one place — ``goal["metric"]`` is read by every node from ``training`` to
+    ``holdout``, and substituting downstream would leave two metrics in one run.
 
-    Three things move together, and the two that are easy to forget are the reason this is a
-    function rather than two lines at each call site:
+    Three things move together; the two easy to forget are why this is a function and not two lines
+    per call site:
 
-    * ``direction`` is re-read from the new metric. Carrying the old one over is not a smaller
-      bug than the mismatch it fixes — ``rmse``'s ``minimize`` applied to ``f1`` inverts the
-      whole run, keeping the *worst* attempt as ``best`` and firing ``goal_met`` on any score
-      below the bar (see ``RunConfig.__post_init__`` for the same trap by hand).
-    * an explicit ``threshold`` is dropped. It was a number in the old metric's units, and
-      ``--threshold 3.2`` for ``rmse`` reused as an ``f1`` bar is not a translation of the
-      caller's intent, it is an unreachable goal wearing their number. The mode is kept, so a
-      ``fixed`` run gets the new metric's default bar and ``source`` says ``fixed_default``.
+    * ``direction`` is re-read from the new metric. Carrying the old one is no smaller a bug than the
+      mismatch it fixes — ``rmse``'s ``minimize`` on ``f1`` inverts the run, keeping the *worst*
+      attempt as ``best`` and firing ``goal_met`` below the bar (``RunConfig.__post_init__`` guards
+      the same trap by hand).
+    * an explicit ``threshold`` is dropped: it was in the old metric's units, and ``--threshold 3.2``
+      for ``rmse`` reused as an ``f1`` bar is an unreachable goal wearing the caller's number. The
+      *mode* is kept, so a ``fixed`` run gets the new metric's default and ``source`` reads
+      ``fixed_default``.
 
-    ``substituted_from`` is recorded on the goal so the swap survives into the checkpoint and
-    the report; :func:`describe` prints it wherever the goal is printed.
+    ``substituted_from`` is recorded on the goal, so the swap survives into the checkpoint and the
+    report; :func:`describe` prints it wherever the goal is printed.
     """
     task = card_task(card or {})
     swap = substitute_metric(task, metric) if task else None
@@ -611,8 +583,8 @@ def describe(goal: dict[str, Any]) -> str:
             # limit but this ranking's. Worth naming as such — the fix is a better
             # ranking, and the previous wording would have sent the caller to change the
             # metric, which is the one thing that does not help here.
-            # "이 랭킹으로는" is load-bearing: the ceiling is the baseline's, and a better
-            # family beats it — m-llm7 cleared a bar that was over its card's ceiling. An
+            # "이 랭킹으로는" is load-bearing: the ceiling is the baseline's and a better family
+            # beats it — runs have cleared bars sitting above their own card's ceiling. An
             # unqualified "도달할 수 없다" would read as a verdict on the run.
             passable = reference.get("passable_margin")
             line += (
@@ -620,9 +592,9 @@ def describe(goal: dict[str, Any]) -> str:
                 f" (KS {reference.get('ks')}). 이 랭킹으로는 어떤 임계값을 골라도 닿지 않으니"
                 " 랭킹 자체를 올려야 합니다 — 모델 family나 특성"
             )
-            # The size, on the axis the lever is on. Without it "랭킹을 올려야 한다" is a
-            # direction with no scale, and a family swap reads as a plausible answer to it —
-            # which is exactly what mv-llm-4·5·6 each spent an iteration finding out.
+            # The size, on the axis the lever is on. Without it "랭킹을 올려야 한다" is a direction
+            # with no scale, and a family swap reads as a plausible answer to it — which is what
+            # runs have spent an iteration finding out it is not.
             demanded = reference.get("required_ks")
             if demanded is not None:
                 line += (

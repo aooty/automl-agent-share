@@ -1,58 +1,36 @@
 """Feature columns: which the executor can use, and how the rest become numbers.
 
-**Why this is one module and not two implementations.** The baseline in
-:mod:`automl_agent.scripts.profile` and every attempt in :mod:`automl_agent.scripts.train`
-have to see the *same* feature matrix, or the bar derived from one is not comparable to the
-scores measured against the other — the same argument
-:func:`automl_agent.scoring.splits.protocol_mismatch` makes about the rows. Both scripts call
-:func:`encode_features` and neither owns a column policy of its own.
+**One module, not two implementations.** The profiler's baseline and every training attempt have to
+see the *same* feature matrix, or the bar derived from one is not comparable to the scores measured
+against the other. Both call :func:`encode_features`; neither owns a column policy.
 
-**What changed and why.** Until now both scripts did
-``select_dtypes(include=["number", "bool"])``, so every string column was dropped. On the
-MIMIC sample that cost nothing (all 14 features are numeric) and on ordinary business
-tables it costs most of the signal. Now a low-cardinality categorical column is one-hot
-encoded and a high-cardinality one is dropped and *named*, because:
+The three column rules, each a guard:
 
-- **One-hot, not ordinal.** Ordinal codes invent an order the data does not have. Trees can
-  partially work around it; the linear baseline cannot, and the baseline is what the goal
-  threshold is derived from — so an ordinal code would move the bar for a reason that is an
-  artefact of the encoding.
-- **Dropped above** :data:`MAX_ONEHOT_CARDINALITY`. A free-text or identifier column
-  one-hots into thousands of columns, which is a memory-guard failure at best and pure
-  overfitting surface at worst. Dropping is recoverable — the caller can bucket the column
-  and re-run — and it is disclosed rather than silent.
-- **Missing becomes its own level.** For a categorical, "absent" is usually a fact about
-  the record rather than noise, and the alternative (an all-zero row) is indistinguishable
-  from a category the encoder never saw. This is the opposite of the rule
-  :func:`automl_agent.dataset.targets.encode_target` applies to the *target*, where an invented
-  class would be a label nobody assigned.
+- **One-hot, never ordinal.** An ordinal code invents an order the data does not have, and the linear
+  baseline — which the bar is derived from — cannot work around it, so the bar would move for an
+  encoding artefact.
+- **Dropped above** :data:`MAX_ONEHOT_CARDINALITY`, and *named* when dropped. A free-text column
+  one-hots into thousands of columns; dropping is recoverable and disclosed, silence is not.
+- **Missing is its own level.** The alternative (an all-zero row) is indistinguishable from a category
+  the encoder never saw. The opposite of the *target* rule, where an invented class would be a label
+  nobody assigned.
 
-**On fitting the vocabulary over all rows.** The level set is learned from the whole column
-rather than from the training split alone. That is deliberate and bounded: it uses feature
-values only and never the target, so unlike choosing a decision threshold on the holdout it
-cannot inflate a score. What it buys is that the encoded matrix is a pure function of the
-file, so the profiler's baseline and the trainer's attempts index the same columns. The
-statistics that *would* leak — the impute median and the scaler's mean and variance — stay
-inside the estimator pipeline and are still fitted on training rows only.
+**The level set is fitted over all rows, deliberately** — feature values only, never the target, so it
+cannot inflate a score, and the matrix stays a pure function of the file. The statistics that *would*
+leak (impute median, scaler mean/variance) stay inside the pipeline and see training rows only.
 
-**Why fitting and transforming are two functions.** "A pure function of the file" is exactly
-what makes a fitted model unusable on a *second* file. The level set, the column order and
-whether a column got its own missing indicator were all decided by the rows in front of the
-encoder, so re-encoding new rows produces a different matrix — a different width if a level
-is absent, or, worse, the same width with the columns meaning different things. A model
-scored through that is not wrong in a way anything reports. So :func:`build_schema` fits the
-layout, :func:`encode_with_schema` applies a layout that already exists, and
-:func:`encode_features` is the two of them in a row for the callers that legitimately want
-both (the profiler and each training attempt, which own their file). The schema is written
-next to ``model.joblib`` and is what :mod:`automl_agent.scripts.predict` replays.
+**Fitting and transforming are separate because "a pure function of the file" is what makes a fitted
+model unusable on a second file.** Re-encoding new rows gives a different width when a level is
+absent, or — worse — the same width with columns meaning different things, and nothing reports it. So
+:func:`build_schema` fits the layout, :func:`encode_with_schema` applies an existing one, and
+:func:`encode_features` is both for callers that own their file.
 
-**What the schema records beyond the layout.** A correct layout is not the same as a
-comparable batch, and the two ways that gap opens are both invisible to a width check: the
-library versions that will unpickle the model (:func:`environment_drift`) and what the
-columns actually contained — how much was missing, and which conventional missing codes were
-present (:func:`column_stats`). Both are recorded at fit time, compared at replay time, and
-*reported*, never acted on. The refusals stay where a wrong answer would otherwise be
-computed in silence; these are facts a human has to weigh.
+**The schema also records what a width check cannot see**: the library versions that will unpickle the
+model (:func:`environment_drift`) and what the columns contained (:func:`column_stats`). Both are
+**reported, never acted on** — refusals stay where a wrong answer would otherwise be computed in
+silence, and these are facts a human has to weigh.
+
+Rationale: ``docs/rationale.md``.
 """
 
 from __future__ import annotations
@@ -270,8 +248,8 @@ def is_encodable_column(series: pd.Series, distinct: int) -> bool:
 # the training extract wrote ``-9999`` where a measurement was absent, the next month's
 # extract writes an empty cell. Both are numeric columns of the same name, both encode into
 # the same slot, and nothing so far reports anything — the model was fitted with -9999 as a
-# real value and is now handed a median, or the reverse. On the MIMIC sample this is not
-# hypothetical: 91,364 cells of ``-9999`` and zero NaN.
+# real value and is now handed a median, or the reverse. Not hypothetical — real extracts have
+# arrived with tens of thousands of sentinel cells and zero NaN (``FINDINGS-mimic.md``).
 #
 # So the fit records, per column, how often it was missing and which conventional missing
 # codes it carried, and the replay compares. Detected, reported, never converted — the same
@@ -524,15 +502,13 @@ def encode_with_schema(
                           have, or the reverse. The batch that switched ``-9999`` for an empty
                           cell encodes perfectly and predicts from different rows.
 
-    Two further keys are not about the rows at all. ``environment_changed`` is the library
-    versions the layout was fitted under against the ones running now, and ``missing_checks``
-    is what an older schema carries nothing to compare. They ride in this dict because this is
-    the one function that reads a foreign schema, and a caller who has to remember a second
-    call is a caller who will one day not make it — the same argument the module docstring
-    makes about there being one encoder rather than two.
+    ``environment_changed`` and ``missing_checks`` are not about the rows — library versions, and what
+    an older schema carries nothing to compare. **They ride in this dict because this is the one
+    function that reads a foreign schema**, and a caller who has to remember a second call is one who
+    will eventually not make it.
 
-    A source column the schema needs and this frame does not have raises
-    :class:`FeatureSchemaMismatch` — every one of them at once, so one run says what to fix.
+    A source column the schema needs and this frame lacks raises :class:`FeatureSchemaMismatch` —
+    **all of them at once**, so one run says everything to fix.
     """
     import pandas as pd
 
@@ -643,16 +619,15 @@ def encode_with_schema(
 def encode_features(features: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Fit a layout on this frame and apply it. ``(numeric frame, report)``.
 
-    For the two callers that own their file — the profiler measuring a baseline and each
-    training attempt — where fitting the layout and using it are the same act. Anything
-    scoring rows a model was *not* fitted on wants :func:`encode_with_schema` and the schema
-    that model was saved with.
+    For the two callers that own their file — the profiler measuring a baseline, and each training
+    attempt — where fitting the layout and using it are one act. Anything scoring rows a model was
+    *not* fitted on wants :func:`encode_with_schema` and that model's saved schema.
 
-    ``report`` is aggregate plus column *names*, which are not raw data: the card already
-    publishes every column's name, dtype and missing rate. It is what tells a caller that
-    the run scored 0.71 on nine of their twelve columns. Deliberately not the schema — this
-    dict rides into the dataset card (``privacy.CARD_KEYS`` has ``encoding``) and from there
-    into every prompt, and the schema holds cell values.
+    ``report`` is aggregates plus column *names*, which are not raw data (the card already publishes
+    every name, dtype and missing rate). It is what tells a caller the run scored 0.71 on nine of
+    their twelve columns. Deliberately not the schema: this dict rides into the card
+    (``privacy.CARD_KEYS`` has ``encoding``) and from there into every prompt, and the schema holds
+    cell values.
     """
     schema = build_schema(features)
     encoded, _drift = encode_with_schema(features, schema)
@@ -805,31 +780,46 @@ def _missing_mask(x: Any) -> Any:
     return np.isnan(np.asarray(x, dtype=float))
 
 
-def append_missing_indicator(x: Any) -> Any:
-    """One 0/1 column per input column, appended. Stateless, hence picklable by name.
+def append_missing_indicator(x: Any, positions: Any = None) -> Any:
+    """One 0/1 column per selected input column, appended. Stateless, hence picklable by name.
 
-    Worth knowing before reaching for it: against a family that splits on NaN natively
-    (``impute: none`` on ``hist_gbdt`` or ``xgboost``) this is *exactly* redundant. The
-    indicator's only split is the NaN branch the tree already has, so it never wins on gain.
-    Measured on the MIMIC sample: 14 extra columns reached the model and the predictions were
-    bit-identical to not passing them at all. That part reproduced under a second, harder
-    split, because it is structural rather than an effect size. Whatever it is worth on the
-    imputed path did *not* reproduce — see ``capabilities._MISSINGNESS`` before treating a
-    number there as what this buys.
+    ``positions`` names which columns get an indicator, by index into the encoded matrix; ``None``
+    is every column — the behaviour before :mod:`automl_agent.dataset.pipeline` existed, and what
+    an already-pickled ``FunctionTransformer`` replays. A keyword with a default rather than a
+    second function, so an existing ``model.joblib`` (which recorded this name and
+    ``kw_args=None``) loads and calls it unchanged.
+
+    Subsetting is the point: ``capabilities._MISSINGNESS`` stated the limit outright — "there is no
+    naming a subset of the high-missing ones" — so a plan holding the card's per-column missing
+    rates had to choose between all fourteen columns and none.
+
+    Stateless, which is what keeps it safe either side of a split: output width is a pure function
+    of input width and this argument, never of which columns happened to hold a NaN in the rows it
+    saw. Hence not ``MissingIndicator(features="missing-only")``.
+
+    Before reaching for it: against a family that splits on NaN natively (``impute: none`` on
+    ``hist_gbdt`` or ``xgboost``) it is *exactly* redundant — the indicator's only split is the NaN
+    branch the tree already has. Measured, the extra columns reach the model and the predictions come
+    back bit-identical — and *that* part reproduces under a harder split, because it is structural
+    rather than an effect size. What it is worth on the *imputed* path does not reproduce; read
+    ``capabilities._MISSINGNESS`` before treating a number there as what this buys.
     """
     import numpy as np
 
-    return np.hstack([x, _missing_mask(x).astype(float)])
+    mask = _missing_mask(x).astype(float)
+    if positions is not None:
+        mask = mask[:, list(positions)]
+    return np.hstack([x, mask])
 
 
 def append_missing_count(x: Any) -> Any:
     """One column: how many of this row's fields were not measured.
 
-    Not expressible by the NaN splits a native-NaN family already makes — those are per
-    column, and this aggregates across them. On clinical rows it stands in for how much
-    workup a patient received, which is why it is *available* as a column of its own. Not
-    why it is worth one: on the MIMIC sample it changed the predictions (Δp 0.281) and moved
-    ``roc_auc`` by 0.0003, and by 0.0000 on top of the indicator.
+    Not expressible by the NaN splits a native-NaN family already makes — those are per column and
+    this aggregates across them. On clinical rows it stands in for how much workup a patient
+    received, which is why it is *available* as a column of its own. That is not the same as being
+    worth one: measured, it moves the predictions while barely moving the ranking, and adds nothing
+    on top of the per-column indicator (``FINDINGS-mimic.md``).
     """
     import numpy as np
 

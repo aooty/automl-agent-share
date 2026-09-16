@@ -25,32 +25,26 @@ Two modes, one file. Without ``--score-model`` it fits on the training split and
 test split that :mod:`automl_agent.scoring.splits` held back from the whole run, which is the only
 number in the report that no decision was selected against.
 
-``applied_hyperparams`` is what the estimator was really configured with, after the
-proposed dict was narrowed to the parameters this model accepts. It, not the proposal,
-is what the report and the history digest quote.
+Fields whose *why* lives at the code that writes them, named here only so the shape of
+``result.json`` is readable in one place:
 
-``internal_validation`` is present only when some of the training rows were kept back to stop
-on — ``hist_gbdt`` and ``mlp`` carve that slice themselves, and for ``xgboost`` the harness
-carves it (:func:`fit_estimator`); neither the log line nor the split sizes said so before. Its
-``fit_rows``, not the split's train count, is how many rows that attempt was fitted on; see
-:func:`describe_internal_validation`.
-
-``metrics`` carries every registry metric of the target's *task* that the prediction
-supports, each one's ``train_`` counterpart that the Critic needs, ``train_val_gap`` on the
-goal metric, and on a binary target ``specificity`` plus ``balanced_accuracy_at_best_cut``
-and ``cut_headroom``. All four are diagnostics rather than goals — nothing may target them.
-The last two say what choosing a decision threshold would have been worth, which is the
-question every real LLM run has asked and none could be answered with.
-
-``train_val_gap`` is always *how much worse validation is than training*, not a bare
-subtraction: on ``mae`` or ``rmse`` the better score is the smaller one, so a plain
-``train - val`` would go negative exactly when the model overfits. Every consumer reads a
-positive gap as overfitting, so the sign is normalised here.
-
-The goal metric also gets ``<metric>_ci_low`` / ``<metric>_ci_high``: a 95% bootstrap
-interval over the split just scored, resampled by group when the split was grouped. Two
-floats rather than a pair because ``privacy.public_result`` keeps only numeric metric
-values — see :mod:`automl_agent.scoring.intervals` for what the width does and does not mean.
+``applied_hyperparams``  what the estimator was really configured with, after the proposal was
+                         narrowed to what this model accepts. The report quotes this, not the
+                         proposal.
+``internal_validation``  training rows kept out of the fit, by the estimator itself or by the
+                         harness (:func:`describe_internal_validation`, :func:`fit_estimator`)
+                         or by the decision cut. Its ``fit_rows`` is what the attempt was
+                         fitted on; absent when nothing was held back.
+``metrics``              every registry metric of the target's task the prediction supports,
+                         each one's ``train_`` counterpart, ``train_val_gap`` on the goal
+                         metric, and on a binary target ``specificity``,
+                         ``balanced_accuracy_at_best_cut`` and
+                         ``balanced_accuracy_cut_headroom``. Those four are diagnostics — nothing
+                         may target them (:mod:`automl_agent.capabilities`).
+``*_ci_low`` / ``_high`` 95% bootstrap interval on the goal metric over the split just scored,
+                         resampled by group when the split was grouped. Two floats because
+                         ``privacy.public_result`` keeps only numeric metric values; see
+                         :mod:`automl_agent.scoring.intervals` for what the width means.
 
 Exit code is 0 even for training failures (OOM included) so the orchestrator can
 treat them as normal flow and hand them to the Critic. The only non-zero exit is
@@ -81,10 +75,12 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import time
 import traceback
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +92,7 @@ if __package__ in (None, ""):  # pragma: no cover - only when run as a file
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from automl_agent.config import (  # noqa: E402 - needs the path fix above
+    DECISION_FILENAME,
     MODEL_FILENAME,
     PREDICTIONS_FILENAME,
     SCHEMA_FILENAME,
@@ -110,6 +107,16 @@ from automl_agent.dataset.features import (  # noqa: E402 - needs the path fix a
     encode_features,
     encode_with_schema,
 )
+from automl_agent.dataset.pipeline import (  # noqa: E402 - needs the path fix above
+    APPENDING_STEPS as PIPELINE_APPENDING_STEPS,
+)
+from automl_agent.dataset.pipeline import (  # noqa: E402 - needs the path fix above
+    STEP_IMPUTE as PIPELINE_STEP_IMPUTE,
+)
+from automl_agent.dataset.pipeline import (  # noqa: E402 - needs the path fix above
+    STEP_SCALE as PIPELINE_STEP_SCALE,
+)
+from automl_agent.dataset.pipeline import build_steps  # noqa: E402 - needs the path fix above
 from automl_agent.dataset.targets import (  # noqa: E402 - needs the path fix above
     DEFAULT_TARGET_MISSING_POLICY,
     detect_task,
@@ -178,7 +185,7 @@ TRAIN_METRICS: dict[str, tuple[str, ...]] = {
 # both names to the planner as the way to tell a ranking shortfall from an operating-point
 # one — see ``capabilities._LEVER_AXES``, which is bound to this tuple by a test. Neither is
 # ever targetable: they are measured at a cut the executor will not apply.
-CUT_DIAGNOSTICS: tuple[str, str] = ("balanced_accuracy_at_best_cut", "cut_headroom")
+CUT_DIAGNOSTICS: tuple[str, str] = ("balanced_accuracy_at_best_cut", "balanced_accuracy_cut_headroom")
 
 
 class LogBuffer:
@@ -211,21 +218,19 @@ class LogBuffer:
 def goal_metric(cfg: dict[str, Any], task: str, log: LogBuffer | None = None) -> str:
     """The metric this attempt is steered by: the configured one, or this task's default.
 
-    The config's metric can fail to belong to the task in two reachable ways, and neither is
-    caught upstream by construction: ``RunConfig`` validates the name against the registry
-    before profiling, when nobody knows what the target column is, and the orchestrator's
-    substitution (:func:`automl_agent.scoring.goal.resolve_goal`) goes by the *card*, while this
-    script goes by the column — a card declaring ``regression`` over a column that reads as
-    classification puts the mismatch back inside a consistent-looking run.
+    Two reachable mismatches, neither caught upstream: ``RunConfig`` checks the name against the
+    registry before profiling knows the target column, and the orchestrator's substitution
+    (:func:`automl_agent.scoring.goal.resolve_goal`) goes by the *card* while this script goes by
+    the column — so a card declaring ``regression`` over a classification column looks consistent.
 
-    Left alone, the consequences are spread out and each one looks like something else: the
-    bootstrap interval is skipped ("split too small, or metric degenerate"), the paired
-    comparison against the run's best is skipped as ``degenerate``, the overfitting gap is
-    measured on a metric nobody chose, and the schema records a goal metric that a labelled
-    batch can never be scored against. Substituting once, here, keeps all four on one number.
+    Left alone the damage scatters and each piece looks like something else: bootstrap interval
+    skipped ("split too small, or metric degenerate"), paired comparison skipped as
+    ``degenerate``, overfitting gap measured on a metric nobody chose, schema recording a goal
+    metric no labelled batch can be scored against. One substitution here keeps all four on one
+    number.
 
-    Falls back to this task's default rather than to ``f1``: the old literal was a
-    classification metric, so on a regression target it was the same mismatch again.
+    Falls back to this task's default, not ``f1`` — the old literal was itself a classification
+    metric, i.e. the same mismatch on a regression target.
     """
     configured = canonical(str(cfg.get("metric") or "")) or DEFAULT_METRICS[task]
     swap = substitute_metric(task, configured)
@@ -245,34 +250,22 @@ def load_data(
 ) -> tuple[Any, Any, int, Any, str, dict[str, Any] | None]:
     """Return ``(X, y, n_classes, groups, task, schema)`` from a CSV path, or synthesise.
 
-    The agent is given a *dataset card*, not the raw data. When no ``path`` is
-    supplied we generate a dataset matching the card's declared shape so the whole
-    pipeline is runnable end to end.
+    No ``path`` means synthesise from the card's declared shape, so the pipeline is runnable end to
+    end without raw data.
 
-    ``groups`` is ``None`` unless ``data.group_column`` names a column, in which case it
-    is that column's values aligned to the returned rows — dropped from the features
-    first, because an identifier the estimator can read is a shortcut to the label, and a
-    numeric one (``subject_id``) would otherwise survive :func:`encode_features` as a
-    perfectly ordinary feature.
+    ``groups``  ``data.group_column``'s values aligned to the returned rows, **dropped from the
+                features first** — an identifier the estimator can read is a shortcut to the label,
+                and a numeric one would otherwise survive :func:`encode_features` as a feature.
+    ``task``    read off the column by :func:`automl_agent.dataset.targets.detect_task`, the same
+                function the profiler used, so both processes agree without being told twice.
+                ``n_classes`` is ``0`` for regression.
+    ``schema``  the encoding that produced ``X``, for saving beside the model. ``None`` on the
+                synthetic path.
 
-    ``task`` is read off the target column by :func:`automl_agent.dataset.targets.detect_task` — the
-    same function the profiler used when it wrote the card, so the two processes agree about
-    what is being predicted without having to be told twice. ``n_classes`` is ``0`` for a
-    regression target: there are none, and every consumer here already branches on the task.
-    On the synthetic path there is no column to read, so the config's declared ``task``
-    decides which generator runs.
-
-    The returned ``schema`` is the encoding that produced ``X`` — the ordered encoded columns,
-    each categorical column's levels, and what each class code means — so the caller can save
-    it beside the fitted model. ``None`` on the synthetic path, where the matrix is generated
-    rather than encoded and there is nothing to replay it on.
-
-    Passing a ``schema`` in reverses the direction: the file is encoded to *that* layout
-    instead of to whatever layout it implies on its own. That is what makes a saved model
-    scoreable — see :func:`automl_agent.dataset.features.encode_with_schema`. It is used on the
-    ``--score-model`` path, where the alternative is re-deriving the layout from a file that
-    may no longer be the one the fit saw, and getting a matrix that is silently misaligned
-    rather than an error.
+    **Passing a ``schema`` in reverses the direction**: the file is encoded to *that* layout rather
+    than to whatever it implies alone. That is what makes a saved model scoreable on the
+    ``--score-model`` path — the alternative silently misaligns instead of erroring.
+    Rationale: ``docs/rationale.md``.
     """
     import numpy as np
 
@@ -697,25 +690,25 @@ def build_estimator(
     preprocessing: dict[str, Any] | None = None,
     labels: Sequence[Any] | None = None,
     task: str = TASK_CLASSIFICATION,
+    declared: list[tuple[str, Any]] | None = None,
 ) -> tuple[Any, dict[str, Any], list[str]]:
     """Instantiate the named model, then apply only the params it actually accepts.
 
-    Unknown keys are dropped and logged rather than raising: the LLM proposes,
-    this code validates. That is the reasoning/execution split in practice.
+    Unknown keys are dropped and logged rather than raising: the LLM proposes, this code validates.
 
-    Returns ``(pipeline, applied, dropped)``. The narrowing used to be visible only in
-    ``train.log``, so the report printed the *proposal* and called it the configuration
-    that produced the score. Handing both dicts back is what lets the record state what
-    actually ran, under the sklearn parameter names it ran under.
+    Returns ``(pipeline, applied, dropped)`` — both dicts, so the record can state what actually ran
+    under the sklearn names it ran under rather than quoting the proposal.
 
-    ``task`` selects which of the two estimator families the name is resolved in. A name
-    that exists only in the other one raises ``unsupported model``, which
-    :func:`classify_exception` turns into an ``unsupported_model`` result — a diagnosable
-    outcome, unlike a classifier quietly fitted to a continuous target.
+    ``task`` picks which estimator family the name resolves in; a name from the other one raises,
+    which :func:`classify_exception` turns into ``unsupported_model`` — diagnosable, unlike a
+    classifier quietly fitted to a continuous target.
+
+    **``declared`` makes this ignore ``preprocessing`` entirely** — two surfaces describing one
+    pipeline would leave nothing able to say which ran. The two safety nets still apply, because a
+    spec is written by something that can forget (:func:`_wrap_declared`).
+    Rationale: ``docs/rationale.md``.
     """
-    key = name.strip().lower().replace("-", "_")
-    key = MODEL_ALIASES.get(task, {}).get(key, key)
-
+    key = resolve_model_key(name, task)
     model = _regressor(key, seed) if task == TASK_REGRESSION else _classifier(key, seed)
     if model is None:
         raise ValueError(f"unsupported model {name!r} for a {task} target")
@@ -765,7 +758,24 @@ def build_estimator(
     if dropped:
         log.write(f"dropped hyperparams not applicable to {key}: {sorted(dropped)}")
     log.write(f"estimator={key} applied_hyperparams={mapped}")
-    return _wrap_preprocessing(key, model, preprocessing or {}, log), mapped, sorted(dropped)
+    built = (
+        _wrap_preprocessing(key, model, preprocessing or {}, log)
+        if declared is None
+        else _wrap_declared(key, model, declared, log)
+    )
+    return built, mapped, sorted(dropped)
+
+
+def resolve_model_key(name: str, task: str) -> str:
+    """The registry key a model name resolves to, aliases applied.
+
+    Its own function because two callers need the answer and only one of them builds an
+    estimator: :func:`run_training` has to know whether the family splits on NaN natively
+    before it can interpret a ``pipeline`` spec, and that is the same lookup. Re-spelling it
+    there is how the two would drift.
+    """
+    key = name.strip().lower().replace("-", "_")
+    return MODEL_ALIASES.get(task, {}).get(key, key)
 
 
 # What the config may ask SimpleImputer for. The planning side validates this too
@@ -777,6 +787,9 @@ DEFAULT_IMPUTE = "median"
 # :data:`NATIVE_NAN`, so a card can hand a tree the NaNs it knows how to split on instead
 # of a median that erases which rows were measured.
 IMPUTE_NONE = "none"
+# What ``applied_preprocessing.impute`` says when the imputer is a ``ColumnTransformer``
+# built from a ``pipeline`` spec — there is no single strategy to name.
+PER_COLUMN_IMPUTE = "per_column"
 
 # The two columns missingness can become. Both run *before* the imputer, which is the whole
 # point: after it there is nothing left to mark. The transformers themselves are
@@ -862,6 +875,127 @@ def _wrap_preprocessing(
     return Pipeline(steps)
 
 
+def declared_steps(
+    cfg: dict[str, Any],
+    schema: dict[str, Any] | None,
+    width: int,
+    task: str,
+    log: LogBuffer,
+) -> tuple[list[tuple[str, Any]] | None, list[str]]:
+    """``(steps, applied)`` for this config's ``pipeline`` spec, or ``(None, [])`` when it has none.
+
+    ``None`` is not the same answer as ``[]``. Absent means *use the flag path*, which is what
+    every config written before this block means and what keeps them scoring identically; an
+    empty list means a spec was given and nothing in it survived, and then the declared path runs
+    with only its safety nets. Collapsing the two would make a spec of unknown steps silently
+    inherit the flags it was written to replace.
+
+    The column names come off the fitted schema, because those are the names a step refers to.
+    The synthetic path has no schema — nothing was encoded, so there is nothing to name — and
+    gets positional names instead: a spec of whole-matrix steps still runs there, and one that
+    names real columns is told, per column, that this run has none.
+    """
+    spec = cfg.get("pipeline")
+    if not spec:
+        return None, []
+    columns = [str(name) for name in (schema or {}).get("columns") or []]
+    if not columns:
+        columns = [f"x{position}" for position in range(int(width))]
+        log.write(
+            f"pipeline: this run encoded no columns (synthetic data), so steps can only "
+            f"address all {len(columns)} of them or none by name"
+        )
+    key = resolve_model_key(str(cfg.get("model") or "hist_gbdt"), task)
+    steps, _names, applied = build_steps(spec, columns, log, native_nan=key in NATIVE_NAN)
+    return steps, applied
+
+
+def base_step_name(name: str) -> str:
+    """``missing_count_2`` -> ``missing_count``. The step's kind, without its repeat number.
+
+    Regex on a trailing ``_<digits>``, not ``split("_")``: three of the five step names contain an
+    underscore, so splitting made ``missing_count`` into ``missing``, and the imputer
+    :func:`_wrap_declared` inserts then landed *before* the appender — imputing away the NaNs the
+    appender exists to count.
+    """
+    return re.sub(r"_\d+$", "", name)
+
+
+def describe_pipeline(estimator: Any, declared: list[str]) -> list[str]:
+    """The declared echo reconciled against the pipeline that was really built.
+
+    ``declared`` = what :func:`automl_agent.dataset.pipeline.build_steps` produced: every step the
+    *spec* asked for and got. Not the whole pipeline — :func:`_wrap_declared` adds an imputer or
+    scaler the family needs and the spec never mentioned, and omitting those is the lie
+    ``applied_hyperparams`` exists to prevent (a report crediting a scaled fit to a plan that never
+    asked for scaling).
+
+    So: read off the object in order, mark anything unasked-for ``(auto)``. Read off rather than
+    recomputed, same as :func:`describe_preprocessing` — a second derivation from the config is a
+    second thing free to disagree with what ran.
+    """
+    steps = [name for name, _step in getattr(estimator, "steps", ()) if name != "model"]
+    remaining = list(declared)
+    echo: list[str] = []
+    for name in steps:
+        base = base_step_name(name)
+        if remaining and remaining[0].split("(", 1)[0] == base:
+            echo.append(remaining.pop(0))
+        else:
+            echo.append(f"{base}(auto)")
+    return echo
+
+
+def _wrap_declared(
+    key: str, model: Any, declared: list[tuple[str, Any]], log: LogBuffer
+) -> Any:
+    """The pipeline a ``pipeline`` spec described, plus the two things it is not allowed to break.
+
+    A spec is more expressive than the flags and therefore able to omit what the flags could not.
+    Both nets are about the *family*, which is knowledge the planner does not reliably have and
+    the executor always does:
+
+    * **an imputer, when the family cannot take a NaN.** Without one the fit raises, which costs
+      the iteration the spec was meant to spend on its own idea. Inserted after the appending
+      steps rather than at the front, which is the same position the flag path used and the only
+      correct one: ``missing_indicator`` has nothing to mark once the NaNs are gone.
+    * **scaling, for the families that need it.** The flag path adds it whenever the estimator is
+      scale-sensitive and nothing says otherwise, so a spec that simply does not mention scaling
+      would silently drop it from ``logreg``, ``svc``, ``mlp`` and ``knn`` — a regression
+      dressed as a plan.
+
+    Both are logged. A pipeline that contains a step the spec did not ask for has to say so, or
+    ``applied_pipeline`` becomes the same kind of lie ``applied_hyperparams`` exists to prevent.
+    """
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    steps = list(declared)
+    names = {base_step_name(name) for name, _step in steps}
+    if PIPELINE_STEP_IMPUTE not in names and key not in NATIVE_NAN:
+        # After the last appender, so the marks are made before the marks become impossible.
+        at = 1 + max(
+            (
+                position
+                for position, (name, _step) in enumerate(steps)
+                if base_step_name(name) in PIPELINE_APPENDING_STEPS
+            ),
+            default=-1,
+        )
+        steps.insert(at, (PIPELINE_STEP_IMPUTE, SimpleImputer(strategy=DEFAULT_IMPUTE)))
+        log.write(
+            f"pipeline: no impute step declared and {key} cannot be fitted on a NaN; "
+            f"inserted {DEFAULT_IMPUTE} imputation at position {at}"
+        )
+    if PIPELINE_STEP_SCALE not in names and key in SCALE_SENSITIVE:
+        steps.append((PIPELINE_STEP_SCALE, StandardScaler()))
+        log.write(f"pipeline: no scale step declared and {key} is scale-sensitive; appended one")
+    steps.append(("model", model))
+    log.write("pipeline steps: " + " -> ".join(name for name, _step in steps))
+    return Pipeline(steps)
+
+
 # The share of *train* held back to decide when to stop. Deliberately the same as
 # HistGradientBoosting's own ``validation_fraction`` default, so the two boosted families
 # stop on comparably sized evidence and a family comparison is not also a protocol
@@ -872,36 +1006,46 @@ EARLY_STOPPING_FRACTION = 0.1
 MIN_EARLY_STOPPING_ROWS = 50
 
 
-def _early_stopping_split(
-    x: Any, y: Any, seed: int, stratify: bool, groups: Any
-) -> tuple[Any, Any, Any, Any]:
-    """Cut a stopping-evidence slice out of *train*, never out of val.
+def held_back_indices(
+    x: Any, y: Any, seed: int, stratify: bool, groups: Any, fraction: float
+) -> tuple[Any, Any]:
+    """``(fit_idx, held_idx)`` for a slice cut out of *train*, never out of val.
 
-    val decides which attempt wins, so an estimator that stopped on val would be choosing
-    its own round count against the rows it is later scored on — the same objection this
-    project makes to reporting ``best`` as the outcome, one layer down.
+    val decides which attempt wins, so anything the attempt chooses *for itself* — a round
+    count, a decision cut — has to be chosen against other rows, or the attempt is selecting
+    on the set it is later scored on. That is the same objection this project makes to
+    reporting ``best`` as the outcome, one layer down.
 
-    Groups are honoured when the run has them: a stopping slice sharing a patient with the
-    rows being fitted would report a later round as still improving.
+    Groups are honoured when the run has them, and the reason is the same both times it is
+    called: a held-back slice sharing a patient with the rows being fitted answers with the
+    fit rather than about it — a later boosting round reads as still improving, a cut reads as
+    transferring when it has not left the training distribution at all.
     """
     import numpy as np
 
     if groups is not None:
         from sklearn.model_selection import GroupShuffleSplit
 
-        splitter = GroupShuffleSplit(
-            n_splits=1, test_size=EARLY_STOPPING_FRACTION, random_state=seed
-        )
-        fit_idx, stop_idx = next(iter(splitter.split(x, y, groups=groups)))
-    else:
-        from sklearn.model_selection import train_test_split
+        splitter = GroupShuffleSplit(n_splits=1, test_size=fraction, random_state=seed)
+        return next(iter(splitter.split(x, y, groups=groups)))
 
-        fit_idx, stop_idx = train_test_split(
-            np.arange(len(y)),
-            test_size=EARLY_STOPPING_FRACTION,
-            random_state=seed,
-            stratify=y if stratify else None,
-        )
+    from sklearn.model_selection import train_test_split
+
+    return train_test_split(
+        np.arange(len(y)),
+        test_size=fraction,
+        random_state=seed,
+        stratify=y if stratify else None,
+    )
+
+
+def _early_stopping_split(
+    x: Any, y: Any, seed: int, stratify: bool, groups: Any
+) -> tuple[Any, Any, Any, Any]:
+    """The stopping-evidence slice, as the four arrays ``fit_estimator`` hands the estimator."""
+    fit_idx, stop_idx = held_back_indices(
+        x, y, seed, stratify, groups, EARLY_STOPPING_FRACTION
+    )
     return x[fit_idx], x[stop_idx], y[fit_idx], y[stop_idx]
 
 
@@ -917,24 +1061,18 @@ def fit_estimator(
 ) -> dict[str, Any]:
     """Fit the pipeline, building the eval set itself when the estimator asked to stop early.
 
-    ``Pipeline.fit`` cannot forward an ``eval_set``: the estimator needs the *transformed*
-    matrix, and the transformers are not fitted until the pipeline's own fit has run. So
-    when the final step carries ``early_stopping_rounds`` this fits the preprocessing steps
-    on the fitting slice, transforms both slices with them, and hands the estimator the pair.
+    ``Pipeline.fit`` cannot forward an ``eval_set`` — the estimator needs the *transformed* matrix
+    and the transformers are not fitted until the pipeline's fit has run. So when the final step
+    carries ``early_stopping_rounds``, this fits the preprocessing steps on the fitting slice,
+    transforms both slices, and hands the estimator the pair. Those are the pipeline's own step
+    objects, so it is fitted when this returns and ``predict``/``joblib.dump`` see an ordinary
+    Pipeline.
 
-    The steps it fits are the same objects the pipeline holds, so the pipeline is fitted when
-    this returns — ``predict`` and ``joblib.dump`` see an ordinary fitted Pipeline, and
-    ``scripts/predict.py`` needs to know none of this.
+    **Preprocessing is fitted on the fitting slice alone, not on all of train** — a stopping slice
+    that contributed to the impute median is not held back from the decision it exists to make.
 
-    Preprocessing is fitted on the fitting slice alone, not on all of train: a stopping slice
-    that contributed to the impute median is not held back from the decision it is there to
-    make. That costs the estimator 10% of its rows, which is the price of the parameter.
-
-    Returns those rows in the shape :func:`describe_internal_validation` uses, and ``{}`` when
-    it held none back. Same field for both paths because they are the same fact to whoever reads
-    the attempt: some of the rows the log announced did not train the model. The count is the
-    length of the slice this function cut, not ``n * fraction`` recomputed — see that function's
-    docstring for why the arithmetic is never repeated.
+    Returns those rows in :func:`describe_internal_validation`'s shape, ``{}`` when none were held.
+    The count is the length of the slice this function cut, **never ``n * fraction`` recomputed**.
     """
     final = pipeline.steps[-1][1]
     rounds = getattr(final, "early_stopping_rounds", None)
@@ -1022,7 +1160,13 @@ def describe_preprocessing(estimator: Any) -> dict[str, Any]:
         return {}
     imputer = steps.get("impute")
     return {
-        "impute": IMPUTE_NONE if imputer is None else str(getattr(imputer, "strategy", "")),
+        # ``per_column`` when the imputer is a ``ColumnTransformer``: it has no one strategy, and
+        # this used to report ``getattr(..., "strategy", "")`` — an empty string, which a report
+        # prints as "impute: " and a reader takes for a bug in the report. The detail is in
+        # ``applied_pipeline``; what this field owes is a word that is true.
+        "impute": IMPUTE_NONE
+        if imputer is None
+        else str(getattr(imputer, "strategy", "") or PER_COLUMN_IMPUTE),
         "scale": "scale" in steps,
         # Reported whether on or off, like ``scale``: a write-up that has to distinguish
         # "no indicators" from "this run predates the field" needs the false, not a gap.
@@ -1034,35 +1178,21 @@ def describe_preprocessing(estimator: Any) -> dict[str, Any]:
 def describe_internal_validation(estimator: Any, n_train: int) -> dict[str, Any]:
     """The training rows an estimator's own early stopping kept back, read off the fitted object.
 
-    ``fitting on N rows`` says how many rows went *into* ``fit``, which under
-    ``early_stopping=True`` is not how many the model was fitted on: ``hist_gbdt``, ``mlp`` and
-    ``gradient_boosting`` all carve their own validation slice out of that N to decide when to
-    stop. spambase is why this exists — a plan set ``validation_fraction: 0.15`` on 2760 training
-    rows, the log announced 2760, the fit saw 2346, and nothing anywhere said so. The next
-    planning prompt then had no way to see that the attempt it was reading about had trained on
-    15% fewer rows than the attempt beside it, and the two were being compared on score.
+    ``fitting on N rows`` is rows *into* ``fit``, not rows fitted on — three estimators carve their
+    own slice out of N and nothing used to say so.
 
-    Read off the object rather than derived from the config, for the same reason
-    :func:`describe_preprocessing` is. Here the config cannot answer in *either* direction:
-    ``early_stopping='auto'`` — the default — resolves to True only above 10k samples, so a
-    config that names nothing may still hold rows back; and ``early_stopping=True`` with
-    ``validation_fraction=None`` stops on the training loss and holds back nothing at all. Which
-    attribute settles it differs by estimator, so that reading is :func:`_held_rows_back`.
+    **Read off the object, never the config**, because the config cannot answer either way:
+    ``early_stopping='auto'`` resolves True only above 10k samples, and ``early_stopping=True`` with
+    ``validation_fraction=None`` holds back nothing. Which attribute settles it is
+    :func:`_held_rows_back`.
 
-    The row count comes from ``train_test_split`` rather than from ``n_train * fraction``
-    because that is the call all three make (``test_size=self.validation_fraction``), and it
-    takes an absolute row count as well as a fraction. Repeating its arithmetic here would be a
-    second code path free to disagree by a row — which is exactly what
-    :func:`automl_agent.capabilities.describe_row_budget` has to be, since it forecasts this
-    number before any fit exists; the tests pin the two together for that reason.
+    **Count from ``train_test_split``, never ``n_train * fraction``** — a second arithmetic path is
+    free to disagree by a row. :func:`automl_agent.capabilities.describe_row_budget` *is* that second
+    path (it forecasts before any fit exists); tests pin the two together.
 
-    ``xgboost`` does not come through here, because it does not do this: it early-stops on an
-    ``eval_set``, and the split behind that set is made by :func:`fit_estimator`, which therefore
-    knows the two counts without reading anything back and returns them in this same shape. Both
-    paths fill one field, so a reader of ``internal_validation`` never has to know which
-    estimator held the rows back.
-
-    ``{}`` when nothing was held back, so the presence of the field is itself the answer.
+    ``xgboost`` skips this — its ``eval_set`` split is :func:`fit_estimator`'s, which returns the same
+    shape. One field either way. ``{}`` when nothing was held back.
+    Rationale: ``docs/rationale.md``.
     """
     from sklearn.model_selection import train_test_split
 
@@ -1095,23 +1225,21 @@ def describe_internal_validation(estimator: Any, n_train: int) -> dict[str, Any]
 def _held_rows_back(estimator: Any) -> bool:
     """Whether this fitted estimator really carved a validation slice out of its training rows.
 
-    Three estimators in the menu take a ``validation_fraction``, and no single attribute answers
-    for all three — which is why this is a function and not one ``getattr``:
+    Three estimators take a ``validation_fraction`` and no single attribute answers for all three:
 
     * ``hist_gbdt`` and ``mlp`` fill ``validation_score_`` / ``validation_scores_`` only when a
-      held-out slice was really scored, so a non-empty one is the answer. Presence is not: the
-      attribute is set either way — to an empty array on ``hist_gbdt`` and to ``None`` on
-      ``mlp`` — and ``_use_validation_data`` is True under ``early_stopping=False`` too.
-    * ``gradient_boosting`` exposes *neither* attribute and splits anyway, whenever
-      ``n_iter_no_change`` is not None — sklearn's own condition, read back off the object. It
-      was missed on the first pass at this function, and it is reachable: ``build_estimator``
-      forwards any key ``get_params`` accepts, so the registry not advertising
-      ``n_iter_no_change`` does not stop a plan from setting it.
+      slice was really scored, so a *non-empty* one is the answer — presence is not, since the
+      attribute is set either way (empty array / ``None``) and ``_use_validation_data`` is True
+      under ``early_stopping=False`` too.
+    * ``gradient_boosting`` exposes neither and splits anyway whenever ``n_iter_no_change`` is not
+      None — sklearn's own condition, read off the object. Reachable because ``build_estimator``
+      forwards any key ``get_params`` accepts, so the registry not advertising it does not stop a
+      plan from setting it.
 
-    Hence ``hasattr`` for the branch and the value for the verdict. Falling through on a
-    ``None`` score list would put ``gradient_boosting``'s rule on ``mlp``, whose
-    ``n_iter_no_change`` is 10 by default and means nothing without ``early_stopping=True`` —
-    every MLP attempt would then report rows it never held back.
+    Hence ``hasattr`` for the branch and the value for the verdict: falling through on a ``None``
+    score list would apply ``gradient_boosting``'s rule to ``mlp``, whose ``n_iter_no_change`` is
+    10 by default and means nothing without ``early_stopping=True``, and every MLP attempt would
+    report rows it never held back.
     """
     for attribute in ("validation_score_", "validation_scores_"):
         if hasattr(estimator, attribute):
@@ -1130,18 +1258,16 @@ def scorers(
 ) -> dict[str, Any]:
     """Thunk per registry metric, so nothing is computed unless it is asked for.
 
-    Also called by ``scripts/profile.py`` — a duplicate of these two branches used to live
-    there, and the bar and the scores it is compared against have to be the *same*
-    measurement: ``rmse`` differing by a square root between the two files would be a
-    comparison nobody could see was wrong. One definition is what makes that drift impossible.
+    **Also called by ``scripts/profile.py``, and that is the point** — the bar and the scores compared
+    against it have to be the same measurement. A duplicate lived there once, and an ``rmse`` differing
+    by a square root between the two files is a comparison nobody can see is wrong.
 
-    The regression side is deliberately the *unscaled* metrics: ``mae`` and ``rmse`` come
-    back in the target column's own units, which is what makes them readable to someone who
-    knows the data — and what makes a portable default bar impossible
+    The regression side is deliberately *unscaled*: ``mae``/``rmse`` in the target column's own units,
+    which is what makes them readable and a portable default bar impossible
     (:func:`automl_agent.scoring.goal.default_bar`).
 
-    sklearn is imported inside the branches so importing this module stays free of it, which
-    is what lets the profiler call it without either script paying for the other's estimators.
+    sklearn is imported inside the branches, so the profiler can call this without paying for the
+    other script's estimators.
     """
     if task == TASK_REGRESSION:
         from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -1226,11 +1352,10 @@ def score_split(
 def specificity(y_true: Any, pred: Any) -> float:
     """True-negative rate — recall with the negative class as the positive one.
 
-    Binary only, and deliberately *not* a registry metric: nobody may target it, because a
-    model that predicts the majority class for everything scores 1.0. It is emitted for the
-    same reason ``train_val_gap`` is — as a diagnostic. ``balanced_accuracy`` is
-    ``(recall + specificity) / 2``, so these two numbers are the only thing that names
-    which way the imbalance lever has to move, and without them the Critic guesses.
+    Binary only, and deliberately *not* a registry metric — a majority-class predictor scores 1.0,
+    so nobody may target it. Emitted as a diagnostic, like ``train_val_gap``: since
+    ``balanced_accuracy = (recall + specificity) / 2``, this pair is the only thing that names
+    which way the imbalance lever must move. Without them the Critic guesses.
     """
     from sklearn.metrics import recall_score
 
@@ -1263,6 +1388,223 @@ def _proba(model: Any, x_arr: Any, n_classes: int, log: LogBuffer) -> Any:
 
 
 # --------------------------------------------------------------------------- #
+# The decision rule — where the probabilities are cut
+# --------------------------------------------------------------------------- #
+#
+# Two invariants, and both are load-bearing:
+#
+# * **The cut is chosen on rows the estimator was not fitted on and the attempt does not report
+#   from** — a slice held out of train, same terms as early stopping's (:func:`held_back_indices`).
+#   On a family that memorises its training split there is nothing to choose on fitted rows: the
+#   best attainable score arrives over a wide plateau of candidate cuts, so the cut is
+#   unidentified and validation swings across it.
+# * **It is written to disk beside its model**, so the holdout and ``predict`` label rows at the
+#   rule the validation score was earned at. A cut living only in this process would make every
+#   later pass silently score a different rule.
+#
+# Rationale: ``docs/rationale.md``.
+
+# What ``decision.threshold`` accepts besides a number: choose the cut from held-back rows.
+DECISION_TUNED = "tuned"
+
+# The share of *train* kept out of the fit to choose the cut on. Twice ``EARLY_STOPPING_FRACTION``
+# because the two buy different things — a round count off a still-moving curve, against an argmax
+# over a metric whose few-row noise is what puts the plateau there.
+CUT_FRACTION = 0.2
+# Below this many rows the argmax is noise choosing the operating point, and the default rule is
+# at least a rule. Higher than ``MIN_EARLY_STOPPING_ROWS`` for the reason above, and because the
+# targets this lever is for are imbalanced — 200 rows at a 9:1 ratio is 20 positives, which is
+# already few for a recall estimate at a candidate cut.
+MIN_CUT_ROWS = 200
+
+# Candidate cuts, from two sources deliberately. Quantiles of the held-back probabilities put
+# points where the rows actually are — a calibrated model on a 9% positive rate leaves almost
+# every row under 0.2, and a uniform grid would spend itself on empty space. An even grid over
+# (0, 1) covers what the quantiles cannot: a confident model's probabilities pile up at both
+# ends, and the quantile set then holds no candidate anywhere near the middle. 0.5 is in the
+# set explicitly, so the tuner can always return the default rule, and "tuning bought nothing"
+# is a reachable answer rather than an unreachable one.
+CUT_QUANTILES = 99
+CUT_GRID = 49
+
+
+def label_at_cut(proba: Any, cut: float) -> Any:
+    """0/1 labels from positive-class probabilities at ``cut``.
+
+    ``>=``, so a cut *at* an observed probability is positive. Not identical to sklearn at 0.5:
+    ``predict`` argmaxes the two probability columns and ``numpy.argmax`` breaks exact ties toward
+    the first, so a row at exactly 0.500 is negative there, positive here. Reachable on a tree
+    (many rows share one leaf value) — hence an attempt asking for 0.5 explicitly is recorded as
+    having applied a cut, not as untuned.
+    """
+    import numpy as np
+
+    return (np.asarray(proba) >= float(cut)).astype(int)
+
+
+def requested_cut(cfg: dict[str, Any], log: LogBuffer) -> float | str | None:
+    """What ``config["decision"]["threshold"]`` asked for: a cut, ``"tuned"``, or nothing.
+
+    ``None`` — the absent key — is the default rule, which is what every config written
+    before this block existed says. Junk is logged and ignored rather than fatal, on the same
+    terms as a hyperparameter the estimator will not take: the attempt is still a valid
+    attempt, and ``applied_threshold``'s absence from the result is what says the request did
+    not take effect.
+    """
+    raw = (cfg.get("decision") or {}).get("threshold")
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        if raw.strip().lower() == DECISION_TUNED:
+            return DECISION_TUNED
+        log.write(
+            f"decision.threshold={raw!r} ignored: expected a number in (0, 1) "
+            f'or "{DECISION_TUNED}"'
+        )
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0.0 < float(raw) < 1.0:
+        log.write(
+            f"decision.threshold={raw!r} ignored: outside (0, 1), which labels every row "
+            "the same way"
+        )
+        return None
+    return round(float(raw), 6)
+
+
+def tune_threshold(
+    y_held: Any, proba: Any, metric: str, average: str, task: str, log: LogBuffer
+) -> float | None:
+    """The cut on ``proba`` that scores best on ``metric``, over the held-back rows.
+
+    **The goal metric, not always ``balanced_accuracy``** — the cut maximising one does not maximise
+    another, so sweeping the number the run is judged on is what keeps the lever from lowering it.
+
+    **Ties go to the middle of the plateau, never an edge.** Equal scores mean an identical confusion
+    matrix, so a plateau is a range the rows cannot distinguish and its midpoint is furthest from the
+    two cuts known to be worse.
+
+    ``None`` whenever there is nothing to choose, and the log says which: no probabilities, no
+    admissible candidates, or **a metric the cut cannot move** — ``roc_auc`` and ``pr_auc`` come from
+    ``proba`` alone, so every candidate ties and returning one would record a cut chosen for a number
+    it cannot change. Rationale: ``docs/rationale.md``.
+    """
+    if proba is None:
+        log.write("threshold tuning skipped: this model gives no positive-class probabilities")
+        return None
+    import numpy as np
+
+    values = np.asarray(proba)
+    grid = np.concatenate(
+        [
+            np.quantile(values, np.linspace(0.01, 0.99, CUT_QUANTILES)),
+            np.linspace(0.02, 0.98, CUT_GRID),
+            [0.5],
+        ]
+    )
+    candidates = sorted({round(float(c), 6) for c in grid if 0.0 < float(c) < 1.0})
+    if not candidates:
+        log.write("threshold tuning skipped: the held-back probabilities leave no cut inside (0, 1)")
+        return None
+    thunk_key = canonical(metric)
+    scored: list[tuple[float, float]] = []
+    for cut in candidates:
+        try:
+            score = float(
+                scorers(y_held, label_at_cut(proba, cut), proba, average, task)[thunk_key]()
+            )
+        except (ValueError, AttributeError, KeyError) as exc:
+            log.write(f"threshold tuning skipped: {metric} not scorable on the held-back rows ({exc})")
+            return None
+        if math.isfinite(score):
+            scored.append((score, cut))
+    if not scored:
+        log.write(f"threshold tuning skipped: {metric} is not defined on the held-back rows")
+        return None
+    # The sign is doing nothing today — every classification metric in the registry maximises —
+    # and it is here because the one thing worse than not tuning is tuning toward the *worst*
+    # cut, which is what a hard-coded ``max`` would quietly do the day a minimise metric is
+    # added on this side.
+    sign = -1.0 if direction_of(thunk_key) == MINIMIZE else 1.0
+    best_value = max(sign * score for score, _cut in scored)
+    plateau = [cut for score, cut in scored if sign * score == best_value]
+    if len(plateau) == len(scored):
+        log.write(
+            f"threshold tuning skipped: {metric} is the same at every one of {len(scored)} "
+            "candidate cuts — it is computed from the probabilities, not from the labels, so no "
+            "cut changes it"
+        )
+        return None
+    cut = plateau[len(plateau) // 2]
+    spread = (
+        f", indistinguishable over {len(plateau)} cuts from {plateau[0]} to {plateau[-1]}"
+        if len(plateau) > 1
+        else ""
+    )
+    log.write(
+        f"decision threshold tuned on the held-back rows: {cut} "
+        f"({metric} {sign * best_value:.6f} over {len(scored)} candidate cuts{spread}) — "
+        "these rows were in neither the fit nor the reported split"
+    )
+    return cut
+
+
+def save_decision(rule: dict[str, Any], path: Path, log: LogBuffer) -> str | None:
+    """Persist the cut this attempt applied; return its path, or ``None`` if unwritable.
+
+    Never fatal, like :func:`save_model` — the validation score is already earned by the time this
+    runs. What is lost is *agreement*: the holdout would score the same estimator at 0.5 and the
+    drop would read as a cut that transferred badly rather than a file that never got written.
+    Hence the log line.
+
+    Unlike its two neighbours here it is an aggregate — one scalar in [0, 1], a metric's grade — so
+    it is the only artifact in this directory whose value is also published, as
+    ``applied_threshold``.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rule, indent=2, ensure_ascii=False), encoding="utf-8")
+    except (OSError, TypeError, ValueError) as exc:
+        log.write(f"decision rule not saved: {type(exc).__name__}: {exc}")
+        return None
+    log.write(f"decision rule saved to {path.name}: {json.dumps(rule, ensure_ascii=False)}")
+    return str(path)
+
+
+def load_decision(path: Path, log: LogBuffer) -> float | None:
+    """The cut saved beside a model, or ``None`` — which means sklearn's fixed 0.5 rule.
+
+    Absent is the ordinary case and gets no line: every model fitted before this file existed,
+    and every attempt whose plan did not ask for a cut, is scored exactly as it was.
+
+    A file that exists but holds no usable cut *is* worth a line, and still falls back rather
+    than raising — the opposite of :func:`load_schema`, deliberately. A wrong schema lines the
+    columns up by width alone and scores a different dataset in silence; a missing cut can only
+    put the labels back at a rule that is defined, published as ``applied_threshold``'s absence,
+    and visible in the score.
+    """
+    if not path.exists():
+        return None
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.write(f"{path.name} unusable ({exc}); scoring at the default rule")
+        return None
+    # Checked rather than coerced. ``float(...)`` on the raw value worked because every failure
+    # it could hit was in the ``except`` above, but it read as "trust the file and catch the
+    # fallout" — and it typed as ``Any``, so nothing could prove the return is a float.
+    raw = loaded.get("threshold") if isinstance(loaded, dict) else None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        log.write(f"{path.name} holds no numeric threshold; scoring at the default rule")
+        return None
+    cut = float(raw)
+    if not 0.0 < cut < 1.0:
+        log.write(f"{path.name} holds threshold={cut}, outside (0, 1); scoring at the default rule")
+        return None
+    log.write(f"applying the decision rule saved with this model: threshold={cut}")
+    return cut
+
+
+# --------------------------------------------------------------------------- #
 # Training
 # --------------------------------------------------------------------------- #
 
@@ -1282,27 +1624,36 @@ def evaluate_split(
     resamples: int = DEFAULT_RESAMPLES,
     pred: Any = None,
     proba: Any = None,
+    threshold: float | None = None,
 ) -> dict[str, float]:
     """Every registry metric this prediction supports, plus the binary diagnostics.
 
-    Shared by the validation scoring inside :func:`run_training` and the one-shot test
-    scoring in :func:`score_saved_model`, so the two numbers a report puts side by side
-    are computed by the same code over different rows.
+    Shared by ``run_training``'s validation scoring and ``score_saved_model``'s one-shot test
+    scoring, so the two numbers a report puts side by side come from the same code.
 
-    ``interval_metric`` names the one metric that also gets a bootstrap confidence interval
-    — the goal metric, because it is the number every comparison in the run is made
-    against and the cost is linear in metrics times resamples. ``groups`` is the eval
-    split's group labels, so a clustered split is resampled by group rather than by row
-    (:mod:`automl_agent.scoring.intervals`).
-
-    ``pred``/``proba`` let a caller hand in the predictions instead of having them computed
-    here. The one caller that does is :func:`run_training`, which has to *save* the arrays
-    for a later attempt to pair against: predicting twice would put two sources under one
-    filename, and the file would then describe a pass that nothing was scored on.
+    ``interval_metric``  the one metric that also gets a bootstrap interval — the goal metric, since
+                         cost is linear in metrics × resamples. ``groups`` resamples a clustered
+                         split by group (:mod:`automl_agent.scoring.intervals`).
+    ``pred``/``proba``   handed in rather than computed here by the one caller that must *save* the
+                         arrays: **predicting twice would put two sources under one filename**.
+    ``threshold``        replaces sklearn's fixed 0.5, and **every metric below is measured at that
+                         cut** — interval and ``specificity`` included. A score reported at one rule
+                         and diagnosed at another sends the Critic after the wrong lever.
     """
     if pred is None:
         pred = model.predict(x_eval)
         proba = _proba(model, x_eval, n_classes, log)
+    if threshold is not None:
+        if proba is None:
+            # A cut was asked for and cannot be applied, so it must not be reported either:
+            # ``applied_threshold``'s absence below is the whole record of that.
+            log.write("the saved decision rule needs probabilities this model cannot give; default rule")
+            threshold = None
+        else:
+            # Recomputed from ``proba`` rather than trusting ``pred``, which makes this
+            # idempotent: :func:`run_training` has already relabelled its own copy — it has to
+            # save the same array it scored — and lands on exactly these labels again.
+            pred = label_at_cut(proba, threshold)
     metrics = score_split(list(METRICS), y_eval, pred, proba, average, log, task)
     for alias, canonical_name in METRIC_ALIASES.items():
         if canonical_name in metrics:
@@ -1318,9 +1669,9 @@ def evaluate_split(
     # units. Every real LLM run has planned a threshold sweep, and the executor cannot do
     # one — but the reason to refuse is quantitative, and nothing was ever measuring it.
     # ``(1 + KS) / 2`` is the best balanced_accuracy any cut of this ranking allows
-    # (automl_agent.scoring.ranking), so the difference is exactly the size of the prize. On the
-    # MIMIC sample it is +0.0024, which is what turns "the executor will not do that" into
-    # "that would buy 0.002; the ranking is where the rest of the gap is".
+    # (automl_agent.scoring.ranking), so the difference is exactly the size of the prize — which is
+    # what turns "the executor will not do that" into "that would buy this much; the ranking is where
+    # the rest of the gap is".
     #
     # A diagnostic, like specificity and train_val_gap. Never targetable: it is measured
     # at a cut the executor will not apply, so a goal set against it could not be met by
@@ -1331,6 +1682,15 @@ def evaluate_split(
         metrics[best_cut] = ceiling
         if "balanced_accuracy" in metrics:
             metrics[headroom] = round(ceiling - metrics["balanced_accuracy"], 6)
+
+    # Where the cut actually landed, published next to what the best cut would have been worth.
+    # Written only when one was applied, so its *absence* is what says the attempt used the
+    # default rule — which is how every result from before this key existed still reads
+    # correctly. The two above stay oracle diagnostics: they are measured on *these* rows,
+    # while an applied cut was chosen on the training ones, so ``balanced_accuracy_cut_headroom`` is still the
+    # honest residual and not zero.
+    if threshold is not None:
+        metrics["applied_threshold"] = threshold
 
     # Whether the probabilities in the output CSV mean what they say. Every metric above is
     # about the ranking or about the 0/1 call at sklearn's fixed 0.5 cut, and a model can be
@@ -1407,18 +1767,16 @@ def save_model(model: Any, path: Path, log: LogBuffer) -> str | None:
 def save_schema(schema: dict[str, Any] | None, path: Path, log: LogBuffer) -> str | None:
     """Persist the encoding the model was fitted with; return its path, or ``None``.
 
-    Never fatal, on the same terms as :func:`save_model`. What is lost without it is narrower
-    and worth naming: the model file alone cannot say which column of its input was which, so
-    a model saved without its schema can only be applied to rows that happen to encode into
-    the same layout — and nothing would check that they had. ``predict`` refuses to run rather
-    than guess, which is the point of writing this at all.
+    Never fatal, like :func:`save_model`. What is lost is specific: the model file alone cannot say
+    which input column was which, so without the schema it can only be applied to rows that happen
+    to encode into the same layout — and nothing would check that they did. ``predict`` refuses
+    rather than guess, which is why this is written at all.
 
-    ``None`` schema is not an error: the synthetic path generates its matrix instead of
-    encoding a file, so there is no encoding to replay and nothing to write.
+    ``None`` schema is not an error — the synthetic path generates its matrix instead of encoding a
+    file, so there is no encoding to replay.
 
-    Data-equivalent — category levels and class labels are cell values — so it lands inside
-    ``artifacts/`` beside the model and its path stays out of
-    ``privacy.PUBLIC_RESULT_FIELDS``.
+    Data-equivalent (category levels and class labels are cell values), so it lands in
+    ``artifacts/`` beside the model and its path stays out of ``privacy.PUBLIC_RESULT_FIELDS``.
     """
     if schema is None:
         return None
@@ -1435,13 +1793,12 @@ def save_schema(schema: dict[str, Any] | None, path: Path, log: LogBuffer) -> st
 def load_schema(path: Path, log: LogBuffer) -> dict[str, Any] | None:
     """Read a schema saved beside a model, or ``None`` when there is not one to read.
 
-    ``None`` covers two cases that both have to keep working: a synthetic run, where no
-    encoding was ever fitted, and a run from before this file was written. Both fall back to
-    re-deriving the layout, which is what they did all along.
+    ``None`` covers two cases that must keep working: a synthetic run (no encoding was ever fitted)
+    and a run from before this file existed. Both fall back to re-deriving the layout.
 
-    An unreadable or malformed file is *not* silently treated as absent — that would turn a
-    corrupted schema into a scoring run whose columns line up by width alone, which is exactly
-    the failure this artifact exists to prevent.
+    An unreadable or malformed file is *not* treated as absent — that would turn a corrupted schema
+    into a scoring run whose columns line up by width alone, the exact failure this artifact
+    prevents.
     """
     if not path.exists():
         log.write(f"no feature schema beside the model ({path.name}); deriving the encoding from the file")
@@ -1458,20 +1815,16 @@ def save_predictions(
 ) -> str | None:
     """Persist this attempt's validation-row predictions, so a later one can pair against it.
 
-    Never fatal, for the same reason :func:`save_model` is not: the score has been earned by
-    the time this runs, and the only thing lost is a later attempt's paired verdict, which
-    degrades to ``skipped`` with a reason.
+    Never fatal, like :func:`save_model` — the score is earned by the time this runs, and what is
+    lost is a later attempt's paired verdict, which degrades to ``skipped`` with a reason.
 
-    One value per validation row, so this file is data-equivalent in exactly the way
-    ``model.joblib`` is, and it stays on the same side of the boundary: written inside
-    ``artifacts/``, its *contents* never enter a state channel, and even its path is derived
-    from the iteration number rather than carried in one
+    **One value per validation row, so it is data-equivalent exactly as ``model.joblib`` is** and
+    stays on the same side of the boundary: inside ``artifacts/``, contents never in a state channel,
+    path derived from the iteration number rather than carried in one
     (:meth:`automl_agent.config.RunConfig.predictions_path`).
 
-    ``y_val`` is deliberately not in the file. The process that pairs against it has the
-    labels already — it just split the same rows — and the fingerprint is what establishes
-    that they are the same rows. Storing them would be one more copy of the target column on
-    disk buying nothing.
+    ``y_val`` is deliberately absent — the pairing process split the same rows and has the labels
+    already, and the fingerprint is what establishes they *are* the same rows.
     """
     try:
         import numpy as np
@@ -1513,17 +1866,13 @@ def paired_against_baseline(
 ) -> dict[str, Any]:
     """This attempt's goal metric against the run's best so far, as a resampled difference.
 
-    Computed in this process rather than in the node that reads the result, and for the same
-    reason ``scripts/train.py`` is a subprocess at all: the orchestrator never imports numpy
-    or sklearn, so no node can resample anything. The other option — a second subprocess per
-    iteration, the way :mod:`automl_agent.nodes.holdout` scores the test split — would have
-    to rebuild this split from the config, and a second derivation is a second thing that can
-    disagree with the first. Here ``y_val``, ``pred`` and ``proba`` are the arrays that were
-    just scored, so there is nothing to re-derive.
+    Computed here rather than in the node that reads the result, for the reason this file is a
+    subprocess at all: the orchestrator never imports numpy. **And the arrays just scored are right
+    here** — a second subprocess would have to rebuild the split from the config, and a second
+    derivation is a second thing that can disagree.
 
-    Always returns a block, and a skipped comparison publishes *why*: "no paired verdict" and
-    "the paired verdict found nothing" are different facts, and a reader given silence for
-    the first would take it for the second.
+    **Always returns a block, and a skipped comparison publishes why** — "no paired verdict" and "the
+    paired verdict found nothing" are different facts, and silence for the first reads as the second.
     """
     declared = dict(cfg.get("paired_baseline") or {})
     iteration = declared.get("iteration")
@@ -1610,36 +1959,46 @@ def paired_against_baseline(
     return measured
 
 
+@dataclass
+class TrainingRun:
+    """What one fit produced. Returned by :func:`run_training`.
+
+    Four of these nine say what the run was *configured* with rather than what it scored, and
+    they are carried out rather than re-derived because only ``run_training`` saw the estimator:
+    the config is a request the executor is allowed to narrow. ``paired`` is the comparison
+    against the run's best so far, empty unless the caller asked for one
+    (:func:`paired_against_baseline`). ``schema_path`` is the other half of ``model_path`` — the
+    encoding that model was fitted with, without which it can be loaded but not applied.
+    ``internal_validation`` is the training rows kept back from the fit, by early stopping
+    (:func:`describe_internal_validation`, :func:`fit_estimator`) or by the decision cut, and is
+    empty when none were.
+
+    A dataclass rather than the 9-tuple this used to be. Positional unpacking made every caller
+    name all nine to read one — ``tests/test_threshold.py`` spent seven throwaway names to reach
+    ``metrics`` and ``internal_validation`` — and a tuple that long is also a silent reordering
+    hazard, since two adjacent ``dict[str, Any]`` fields swap without a type error.
+    """
+
+    metrics: dict[str, float]
+    applied: dict[str, Any]
+    dropped: list[str]
+    preprocessing: dict[str, Any]
+    model_path: str | None
+    paired: dict[str, Any]
+    schema_path: str | None
+    internal_validation: dict[str, Any]
+    applied_pipeline: list[str] = field(default_factory=list)
+
+
 def run_training(
     cfg: dict[str, Any],
     log: LogBuffer,
     model_out: Path | None = None,
     predictions_out: Path | None = None,
     schema_out: Path | None = None,
-) -> tuple[
-    dict[str, float],
-    dict[str, Any],
-    list[str],
-    dict[str, Any],
-    str | None,
-    dict[str, Any],
-    str | None,
-    dict[str, Any],
-]:
-    """Fit and score.
-
-    ``(metrics, applied, dropped, preprocessing, model_path, paired, schema_path,
-    internal_validation)``.
-
-    Four of those eight say what the run was *configured* with rather than what it scored,
-    and they are returned rather than re-derived because only this function saw the
-    estimator: the config is a request the executor is allowed to narrow. ``paired`` is the
-    comparison against the run's best so far, which is empty unless the caller asked for one
-    (:func:`paired_against_baseline`). ``schema_path`` is the other half of ``model_path`` —
-    the encoding that model was fitted with, without which it can be loaded but not applied.
-    ``internal_validation`` is the training rows early stopping kept back — whoever made the
-    split, the estimator itself (:func:`describe_internal_validation`) or the harness
-    (:func:`fit_estimator`) — and is empty when none were kept.
+    decision_out: Path | None = None,
+) -> TrainingRun:
+    """Fit and score, returning a :class:`TrainingRun`.
 
     Scores are validation-set scores: the test slice
     (:mod:`automl_agent.scoring.splits`) is not read here at all, so nothing the loop selects on
@@ -1671,6 +2030,83 @@ def run_training(
             groups_train = groups_train[:keep]
         log.write(f"train_subsample={subsample} -> {keep} rows")
 
+    # The rows the decision cut will be chosen on, taken out of train *before* the fit so the
+    # estimator never sees them. Only when a plan asked for a tuned cut: an attempt that does not
+    # is fitted on exactly the rows it always was.
+    request = requested_cut(cfg, log)
+    x_cut, y_cut = None, None
+    cut_rows: dict[str, Any] = {}
+    # What was asked for, kept because every refusal below clears ``request`` — and why it was
+    # refused, for the same reason ``dropped_hyperparams`` exists. ``applied_threshold``'s absence
+    # says a cut is not in force; it cannot say whether one was ever wanted, so a reader of
+    # ``history.json`` could not tell "no plan asked" from "the executor said no, here is why".
+    cut_requested = request
+    cut_declined: str | None = None
+    goal = goal_metric(cfg, task)
+    if request is not None and (METRICS.get(goal) or METRICS["f1"]).needs_proba:
+        # ``roc_auc`` and ``pr_auc`` are computed from the probabilities alone, so every candidate
+        # cut scores the same and ``tune_threshold`` was always going to decline. Checked here
+        # rather than there for the reason the target check below is: by the time the sweep finds
+        # out, the slice is already out of the fit. One real run paid 5,658 training rows for a
+        # cut it could not have chosen, and the only trace was ``applied_threshold`` being absent.
+        log.write(
+            f"decision.threshold={request!r} ignored: the goal metric {goal} is computed from "
+            "the probabilities, not from the labels, so no cut changes it"
+        )
+        request, cut_declined = None, f"the goal metric {goal} is cut-invariant"
+    if request is not None and (regression or n_classes != 2):
+        # Checked *before* the rows are carved, not after the sweep declines them. There is no
+        # cut to choose on a continuous target and no single cut on a multiclass one, so
+        # ``tune_threshold`` was always going to answer ``None`` here — but the slice would
+        # already be out of the fit by then, and the attempt would have paid 20% of its training
+        # rows for a lever that cannot exist on this target.
+        log.write(
+            f"decision.threshold={request!r} ignored: "
+            + (
+                "the target is continuous, so there is no decision rule to move"
+                if regression
+                else f"the target has {n_classes} classes and a single cut is a binary rule"
+            )
+        )
+        request = None
+        cut_declined = (
+            "the target is continuous" if regression else f"the target has {n_classes} classes"
+        )
+    if request == DECISION_TUNED:
+        fit_idx, cut_idx = held_back_indices(
+            x_train, y_train, seed, not regression, groups_train, CUT_FRACTION
+        )
+        if len(cut_idx) < MIN_CUT_ROWS:
+            # Turned off rather than shrunk, on the same terms as an undersized stopping slice:
+            # a cut chosen on 40 rows is a number the report would have to disclaim, and the
+            # default rule is at least a rule. ``request`` is cleared so nothing downstream
+            # believes a cut was asked for.
+            log.write(
+                f"decision.threshold={DECISION_TUNED!r} not applied: the slice held back to "
+                f"choose the cut would hold {len(cut_idx)} rows, under the {MIN_CUT_ROWS} needed"
+            )
+            request = None
+            cut_declined = (
+                f"the slice to choose the cut on would hold {len(cut_idx)} rows, "
+                f"under the {MIN_CUT_ROWS} needed"
+            )
+        else:
+            x_cut, y_cut = x_train[cut_idx], y_train[cut_idx]
+            x_train, y_train = x_train[fit_idx], y_train[fit_idx]
+            if groups_train is not None:
+                groups_train = groups_train[fit_idx]
+            cut_rows = {"cut_held_out_rows": len(cut_idx), "cut_fraction": CUT_FRACTION}
+            log.write(
+                f"decision.threshold={DECISION_TUNED!r}: {len(cut_idx)} of train's rows are held "
+                f"out of the fit to choose the cut on, leaving {len(fit_idx)} to fit — the price "
+                "of the lever, and reported in internal_validation"
+            )
+
+    # The declared pipeline, interpreted here because a step names *columns* and the schema is
+    # what says which column is which. ``None`` — the absent key — leaves the flag path in place,
+    # so every config written before this block behaves exactly as it did.
+    declared, applied_pipeline = declared_steps(cfg, schema, x_train.shape[1], task, log)
+
     model, applied, dropped = build_estimator(
         str(cfg.get("model") or "hist_gbdt"),
         dict(cfg.get("hyperparams") or {}),
@@ -1683,6 +2119,7 @@ def run_training(
         # value of the column would be both useless and a set of cell values.
         labels=None if regression else sorted(set(y_train.tolist())),
         task=task,
+        declared=declared,
     )
     log.write(f"fitting on {len(x_train)} rows, validating on {len(x_val)} rows")
     # Two estimators can hold training rows back, and only one of them can be asked afterwards.
@@ -1730,6 +2167,76 @@ def run_training(
     # file describes a pass nothing was scored on.
     pred_val = model.predict(x_val)
     proba_val = _proba(model, x_val, n_classes, log)
+
+    # The operating point, settled before anything is scored or saved. The tuned path reads the
+    # rows carved off above — never ``x_train``, which this estimator was fitted on, and never
+    # ``x_val``, which it is about to be scored on.
+    # Narrowed here rather than returned narrow, because ``requested_cut`` has two honest
+    # answers — a keyword and a number — and one of them is only resolvable after the fit. The
+    # branch is explicit so the type says what the code has always done: past this point a
+    # threshold is a float or nothing, never the keyword.
+    threshold: float | None
+    if request == DECISION_TUNED:
+        threshold = tune_threshold(
+            y_cut, _proba(model, x_cut, n_classes, log), target_metric, average, task, log
+        )
+    elif isinstance(request, (int, float)) and not isinstance(request, bool):
+        threshold = float(request)
+    else:
+        threshold = None
+    proba_train = None
+    if threshold is not None:
+        proba_train = _proba(model, x_train, n_classes, log)
+    if threshold is not None and (proba_train is None or proba_val is None):
+        log.write(f"decision.threshold={threshold} not applied: this model gives no probabilities")
+        threshold, cut_declined = None, "this model gives no probabilities"
+    if request is not None and threshold is None and cut_declined is None:
+        # The sweep itself declined — no admissible candidate, or none that scored better. Its
+        # own reason is in the log; this is the one line that says a cut was wanted and none came
+        # out, after the fit had already paid for the slice.
+        cut_declined = "the sweep found no cut worth applying"
+    if threshold is not None:
+        # Both splits, from the same cut. ``pred_val`` is relabelled *before* it is scored,
+        # saved and paired, so the file a later attempt pairs against holds the labels this
+        # attempt's own metrics were computed from; ``pred_train`` is relabelled for the same
+        # reason on the other side, so ``train_val_gap`` compares two scores at one rule.
+        pred_train = label_at_cut(proba_train, threshold)
+        pred_val = label_at_cut(proba_val, threshold)
+        if decision_out is not None:
+            save_decision(
+                {
+                    "threshold": threshold,
+                    # Which rows chose it, because that is what the number is worth knowing by:
+                    # ``held_back`` was measured on rows outside both the fit and the report,
+                    # while ``config`` was handed down and measured on nothing.
+                    "chosen_on": "held_back" if request == DECISION_TUNED else "config",
+                    "metric": target_metric,
+                    **cut_rows,
+                },
+                decision_out,
+                log,
+            )
+    if cut_requested is not None:
+        # Beside the rows, because a reader of the price is exactly the reader who needs to know
+        # whether anything was bought with it. Written only when a cut was asked for, so absence
+        # keeps meaning "no plan asked" — which is how every result from before this key still
+        # reads correctly, ``applied_threshold``'s own convention.
+        cut_rows["cut_requested"] = cut_requested
+        if cut_declined is not None:
+            cut_rows["cut_declined"] = cut_declined
+    if cut_rows:
+        # Merged into the channel that already reports rows an attempt did not fit on, rather
+        # than a channel of its own: to whoever reads the attempt it is the same fact, and the
+        # keys are distinct so an early-stopping slice in the same dict still reads as one.
+        #
+        # Reported whether or not a cut came out of those rows. The fit saw 20% fewer either
+        # way, so an attempt whose sweep declined — a cut-invariant goal metric, a model with no
+        # probabilities — has paid the price and would otherwise look score-comparable to one
+        # fitted on all of train. That is the reading this field exists to prevent.
+        internal_validation = {**internal_validation, **cut_rows}
+    applied_pipeline = (
+        describe_pipeline(model, applied_pipeline) if declared is not None else []
+    )
     metrics = evaluate_split(
         model,
         x_val,
@@ -1746,6 +2253,7 @@ def run_training(
         resamples=bootstrap_resamples(cfg),
         pred=pred_val,
         proba=proba_val,
+        threshold=threshold,
     )
 
     fingerprint = val_fingerprint(x_val, y_val)
@@ -1771,11 +2279,9 @@ def run_training(
     train_names = list(TRAIN_METRICS[task])
     if target_metric in METRICS and target_metric not in train_names:
         train_names.append(target_metric)
-    train_proba = (
-        _proba(model, x_train, n_classes, log)
-        if any(METRICS[name].needs_proba for name in train_names)
-        else None
-    )
+    train_proba = proba_train
+    if train_proba is None and any(METRICS[name].needs_proba for name in train_names):
+        train_proba = _proba(model, x_train, n_classes, log)
     for name, value in score_split(
         train_names, y_train, pred_train, train_proba, average, log, task
     ).items():
@@ -1803,15 +2309,16 @@ def run_training(
         log.write(f"train_val_gap measured on {gap_metric} ({direction_of(gap_metric)})")
 
     log.write("metrics: " + json.dumps({k: round(v, 4) for k, v in metrics.items()}))
-    return (
-        metrics,
-        applied,
-        dropped,
-        describe_preprocessing(model),
-        model_path,
-        paired,
-        schema_path,
-        internal_validation,
+    return TrainingRun(
+        metrics=metrics,
+        applied=applied,
+        dropped=dropped,
+        preprocessing=describe_preprocessing(model),
+        model_path=model_path,
+        paired=paired,
+        schema_path=schema_path,
+        internal_validation=internal_validation,
+        applied_pipeline=applied_pipeline,
     )
 
 
@@ -1820,27 +2327,26 @@ def score_saved_model(
 ) -> tuple[dict[str, float], dict[str, Any]]:
     """Score the held-back test split with a model fitted in an earlier process.
 
-    Nothing is fitted here, and nothing but ``x_test`` is predicted on: the point of the
-    number is that no decision in the run was made against these rows. The split is
-    rebuilt rather than stored, which is safe because it is a pure function of the file,
-    the target policy, the group column and the seed — all of which come from the same
-    ``train_config.json`` the fit used.
+    **Nothing is fitted, and nothing but ``x_test`` is predicted on** — the point of the number is
+    that no decision in the run was made against these rows. The split is rebuilt rather than
+    stored: it is a pure function of the file, the target policy, the group column and the seed,
+    all from the same ``train_config.json`` the fit used.
 
-    The preprocessing comes back alongside the metrics because it is read off the loaded
-    pipeline: this process never built one, so the config is the only other source and the
-    config is a request, not a record.
+    Three things come off disk rather than from the config, which is a request and not a record:
 
-    The encoding comes off disk too, from the schema saved beside the model, so the test rows
-    are encoded into the layout this estimator was fitted on. Re-deriving it from the file
-    would agree in the ordinary case and disagree silently in the case worth catching — a file
-    edited between the fit and the holdout, whose columns then line up by width alone. A run
-    from before schemas were saved has no such file; it is scored the old way, with a line in
-    the log saying so.
+    * the **preprocessing**, read off the loaded pipeline — this process never built one;
+    * the **encoding**, from the schema beside the model, so the rows land in the layout this
+      estimator was fitted on. Re-deriving would agree in the ordinary case and **disagree
+      silently** in the one worth catching. No schema (an older run) is scored the old way, logged.
+    * the **decision rule** — and re-deriving it here is not an option that exists, because these
+      are the test rows and choosing a cut on them is the one thing this function is for not doing.
+      No file means the attempt never tuned one.
     """
     import joblib
 
     seed = int(cfg.get("seed", 42))
     schema = load_schema(model_path.parent / SCHEMA_FILENAME, log)
+    threshold = load_decision(model_path.parent / DECISION_FILENAME, log)
     x_arr, y_arr, n_classes, groups, task, _schema = load_data(cfg, log, schema)
     splits = split_three_way(
         x_arr, y_arr, seed, groups=groups, stratify=task != TASK_REGRESSION
@@ -1863,6 +2369,7 @@ def score_saved_model(
         groups=splits.groups_test,
         seed=seed,
         resamples=bootstrap_resamples(cfg),
+        threshold=threshold,
     )
     log.write("test metrics: " + json.dumps({k: round(v, 4) for k, v in metrics.items()}))
     return metrics, describe_preprocessing(model)
@@ -1899,21 +2406,17 @@ NONFINITE_KEY = "nonfinite_dropped"
 def drop_nonfinite(value: Any, path: str = "") -> tuple[Any, list[str]]:
     """``value`` with every non-finite number removed, and the paths of what was removed.
 
-    The last guard before ``result.json`` is written, and it is not the first: ``score_split``
-    already refuses to record a metric sklearn answered with NaN, which is where the reachable
-    case was found. This one covers the *shape* rather than one producer — a NaN arriving
-    through any other key (a paired delta, a train-split score, a future block) would
-    otherwise reach the file, and ``json.dumps`` writes it as bare ``NaN``.
+    The last guard before ``result.json`` is written, covering the *shape* rather than one producer —
+    ``score_split`` already refuses a NaN metric, but one arriving through any other key would reach
+    the file, and ``json.dumps`` writes it as bare ``NaN``.
 
-    Bare ``NaN`` is not JSON. Python's own ``json.loads`` accepts it, which is exactly why it
-    went unnoticed: the orchestrator reads the file back without complaint and the value flows
-    into state, where every comparison against it is False — so a goal check reads "did not
-    reach the bar" and a report prints it as though a measurement had been made. Anything
-    reading the file from outside Python (``jq``, another language) simply fails on it.
+    **Bare ``NaN`` is not JSON, and Python's own ``json.loads`` accepts it** — which is why it went
+    unnoticed. Every comparison against the value is then False, so a goal check reads "did not reach
+    the bar" while a report prints it as a measurement. Anything reading the file from outside Python
+    simply fails.
 
-    Dropped rather than replaced with ``null``, so the file says the same thing the metrics
-    dict says elsewhere: a key that is not there was not measured, and a key with a value in
-    it was. ``null`` would add a third state that every reader would have to learn.
+    **Dropped, not replaced with ``null``**: absent means "not measured", which is what the metrics
+    dict already means elsewhere. ``null`` would add a third state every reader has to learn.
     """
     if isinstance(value, dict):
         kept: dict[str, Any] = {}
@@ -1954,6 +2457,7 @@ def write_result(
     applied_hyperparams: dict[str, Any] | None = None,
     dropped_hyperparams: list[str] | None = None,
     applied_preprocessing: dict[str, Any] | None = None,
+    applied_pipeline: list[str] | None = None,
     model_path: str | None = None,
     schema_path: str | None = None,
     paired: dict[str, Any] | None = None,
@@ -1989,6 +2493,18 @@ def write_result(
         # paired block.
         "threads": thread_state(),
     }
+    if applied_pipeline:
+        # One rendered line per step that really ran, in the order it ran. Omitted rather than
+        # written empty, like ``internal_validation``: absent means the attempt used the flag
+        # path, which is a different thing from a spec whose every step was dropped — that one
+        # arrives as a list holding only the safety nets.
+        #
+        # Strings and not the spec echoed back, because the two have different jobs. The spec is
+        # a request and already on disk in ``train_config.json``; this is the record, and the
+        # thing a reader needs from it is *what ran in what order over which columns*, which is
+        # one line each. It also means the field is a flat list of scalars, so
+        # ``privacy._public_params`` carries it with no new filter.
+        payload["applied_pipeline"] = list(applied_pipeline)
     if paired:
         # A block of scalars about a *comparison*, not about this model on these rows —
         # which is why it is not folded into ``metrics``. Kept even when it says "skipped",
@@ -2107,21 +2623,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         apply_simulation(cfg, log)
-        (
-            metrics,
-            applied,
-            dropped,
-            preprocessing,
-            model_path,
-            paired,
-            schema_path,
-            internal_validation,
-        ) = run_training(
+        run = run_training(
             cfg,
             log,
             model_out=out_path.parent / MODEL_FILENAME,
             predictions_out=out_path.parent / PREDICTIONS_FILENAME,
             schema_out=out_path.parent / SCHEMA_FILENAME,
+            decision_out=out_path.parent / DECISION_FILENAME,
         )
     except BaseException as exc:  # noqa: BLE001 - every failure must become a result
         error_type = classify_exception(exc)
@@ -2140,17 +2648,18 @@ def main(argv: list[str] | None = None) -> int:
     write_result(
         out_path,
         status="ok",
-        metrics=metrics,
+        metrics=run.metrics,
         train_time_sec=time.perf_counter() - started,
         error_type=None,
         log_tail=log.tail(),
-        applied_hyperparams=applied,
-        dropped_hyperparams=dropped,
-        applied_preprocessing=preprocessing,
-        model_path=model_path,
-        schema_path=schema_path,
-        paired=paired,
-        internal_validation=internal_validation,
+        applied_hyperparams=run.applied,
+        dropped_hyperparams=run.dropped,
+        applied_preprocessing=run.preprocessing,
+        applied_pipeline=run.applied_pipeline,
+        model_path=run.model_path,
+        schema_path=run.schema_path,
+        paired=run.paired,
+        internal_validation=run.internal_validation,
     )
     return 0
 

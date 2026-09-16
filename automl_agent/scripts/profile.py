@@ -16,30 +16,24 @@ EMIT   row/column counts, missing rates, class rates, distinct-count buckets,
        and the operator's caveats
 NEVER  cell values, min/max, mean/std/quantiles, class labels, example rows
 
-The two additions to that list are worth their own sentence, because both look like
-exceptions and neither is. A suspected sentinel publishes a *value* — but only one this
-repo's own constant list already contained, so what the data contributed is the rate
-(:mod:`automl_agent.dataset.sentinels`). A ``--caveat`` publishes free text — but it is typed by a
-human about their own data, not lifted from a row by any code path here
-(:mod:`automl_agent.dataset.caveats`).
+Four entries look like exceptions to that policy and none is:
 
-Baseline scores are in policy for the same reason training metrics are: a score over a
-~12,000-row holdout is an aggregate of the whole set, not a record. They are here
-because the goal threshold is derived from them — see :mod:`automl_agent.scoring.goal`. The KS
-rides along for the same reason and pays for the same derivation: it fixes the best
-``balanced_accuracy`` any cut of that ranking can reach, which is what makes an
-unreachable bar disclosable before the loop spends iterations on it
-(:mod:`automl_agent.scoring.ranking`). The bootstrap intervals under ``baseline.ci`` are there for
-the third form of the same question: a bar derived from a score with a ±0.05 interval is a
-bar inside the noise of the number it came from (:mod:`automl_agent.scoring.intervals`).
+* a **suspected sentinel** publishes a *value*, but only one this repo's own constant list
+  already held, so what the data contributed is the rate
+  (:mod:`automl_agent.dataset.sentinels`);
+* a **``--caveat``** publishes free text, typed by a human about their own data rather than
+  lifted from a row by any code path here (:mod:`automl_agent.dataset.caveats`);
+* **baseline scores, the KS, and ``baseline.ci``** are holdout aggregates, in policy for the reason
+  training metrics are, and here because the goal threshold is derived from all three: the score
+  sets the bar (:mod:`automl_agent.scoring.goal`), the KS fixes what any cut of that ranking can
+  reach (:mod:`automl_agent.scoring.ranking`), and the interval says whether a bar sits inside the
+  noise of the number it came from (:mod:`automl_agent.scoring.intervals`);
+* the **``data`` block** carries the file path so the executor can find it again, and is
+  private — :func:`automl_agent.privacy.public_card` strips it before the card enters state.
 
-Why buckets instead of numbers for scale and skew: a planner needs to know that a
-column is heavy-tailed and lives in the hundreds, not that patient 3's creatinine
-was 4.1. A min/max pair, by contrast, *is* two real patients' values.
-
-The single exception is the ``data`` block, which carries the file path so the
-executor can find it again. It is private: :func:`automl_agent.privacy.public_card`
-strips it before the card enters the graph's state.
+Buckets rather than numbers for scale and skew because a planner needs to know a column is
+heavy-tailed and lives in the hundreds, not that patient 3's creatinine was 4.1 — and a min/max
+pair *is* two real patients' values.
 
 Contract
 --------

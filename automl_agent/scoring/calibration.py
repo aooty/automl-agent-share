@@ -1,19 +1,14 @@
 """How much a predicted probability is worth as a probability.
 
-Everything else this project measures is about *ranking* or about *labels*: ``roc_auc`` asks
-whether the positive rows scored above the negative ones, ``f1`` asks how the hard 0/1 call
-came out. Neither asks the question an operator actually asks of the output CSV — "the model
-says 0.7 for this row; does 70% of anything happen?" A model can rank perfectly and be
-systematically overconfident, and every metric in the registry will be happy.
+Every other metric here is about *ranking* or *labels*, and **a model can rank perfectly, be
+systematically overconfident, and leave all of them happy.** Neither answers what an operator asks of
+the output CSV: "it says 0.7 for this row; does 70% of anything happen?"
 
-That gap is not hypothetical here. ``scripts/train.py`` predicts labels at sklearn's fixed 0.5
-cut and :mod:`automl_agent.capabilities` declares choosing a threshold a non-capability, so the
-probabilities are the part of the output that a caller *can* act on with their own cut. What
-this module does is measure whether they are worth acting on. What it deliberately does not do
-is change them: no ``CalibratedClassifierCV``, no shifted cut. Recalibration is a model change
-fitted on labelled rows, and the two places labelled rows exist here are the holdout — which is
-scored once and gates nothing — and a caller's own backtest file, which this process is not
-entitled to fit anything on. Measure, report, leave the model alone.
+**Measure, report, leave the model alone.** A caller applying the model to their own rows brings their
+own cut, so the probabilities are what they act on. **No ``CalibratedClassifierCV``, no shifted cut** —
+recalibration is a model change fitted on labelled rows, and the only labelled rows here are the
+holdout (scored once, gating nothing) and a caller's backtest file, which this process may not fit
+anything on.
 
 Two numbers, and they are not interchangeable:
 
@@ -31,14 +26,12 @@ Two numbers, and they are not interchangeable:
     only be 0, 0.25, 0.5, 0.75 or 1. So it is only reported above
     :data:`MIN_CALIBRATION_ROWS`, and its absence is disclosed rather than silent.
 
-Both are diagnostics, on the same terms as ``specificity`` and ``cut_headroom``: they are not
-in :mod:`automl_agent.scoring.metrics`' registry, so no goal can be set against them and no attempt can
-be selected for them. A run that optimised ``brier`` would be a different run than the one the
-operator asked for.
+**Both are diagnostics and neither is in the registry**, so no goal can be set against them and no
+attempt selected for them — a run that optimised ``brier`` would be a different run than the operator
+asked for. Same terms as ``specificity`` and ``balanced_accuracy_cut_headroom``.
 
-Dependency-free at import time, for the reason :mod:`automl_agent.scoring.ranking` is: the orchestrator
-process imports this to *describe* a number, while the two fixed scripts import it to measure
-one, and only the measuring functions touch numpy.
+Only the measuring functions touch numpy, so the orchestrator can import this to *describe* a number.
+Rationale: ``docs/rationale.md``.
 """
 
 from __future__ import annotations

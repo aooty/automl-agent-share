@@ -8,7 +8,7 @@ so each attempt is appended instead of overwriting the previous ones.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from .config import HOLDOUT_RESERVE_FRACTION, MIN_FIT_TIMEOUT_SEC
 
@@ -38,6 +38,8 @@ FAILURE_TYPES: tuple[str, ...] = (
     "unknown",
 )
 
+GoalDirection = Literal["maximize", "minimize"]
+
 
 class Attempt(TypedDict):
     """One full trip around the loop, appended to ``history``."""
@@ -49,6 +51,10 @@ class Attempt(TypedDict):
     hyperparams: dict
     result: dict  # {"f1": 0.72, "train_time_sec": 812} or {"error": "oom"}
     critic: dict | None  # {"failure_type": ..., "direction": ...}
+    # "llm" | "fallback" | "rules" — who chose this ``(model, hyperparams)``. The plan carries
+    # the same field for itself under ``plan["source"]``; see ``nodes/planning.py`` for why the
+    # three states are not two.
+    selection_source: str
 
 
 class AutoMLState(TypedDict):
@@ -74,6 +80,7 @@ class AutoMLState(TypedDict):
     plan: dict
     model: str
     hyperparams: dict
+    selection_source: str
     result: dict
     critic: dict
     history: Annotated[list[Attempt], operator.add]  # accumulated via reducer
@@ -136,20 +143,43 @@ def is_better(candidate: float | None, incumbent: float | None, direction: str) 
 def effective_hyperparams(state: AutoMLState) -> dict:
     """What the record should quote: the applied params, else the proposal.
 
-    ``state["hyperparams"]`` is a *proposal*. ``scripts/train.py`` narrows it to the
-    parameters the chosen estimator actually accepts, so a report quoting the proposal
-    can list a parameter that was silently dropped and present it as the configuration
-    that produced the score.
+    ``state["hyperparams"]`` is a *proposal*; ``scripts/train.py`` narrows it to what the chosen
+    estimator accepts. A report quoting the proposal can list a silently dropped parameter as the
+    configuration that produced the score.
 
-    A failed attempt is the one case where the proposal is the better record: nothing was
-    applied, and the proposal is exactly what the Critic needs to see to diagnose the
-    failure (the ``batch_size`` behind an OOM, say).
+    A failed attempt is the one case where the proposal is the better record — nothing was applied,
+    and the proposal is what the Critic needs to diagnose the failure (the ``batch_size`` behind an
+    OOM, say).
     """
     result = state.get("result") or {}
     applied = result.get("applied_hyperparams") if isinstance(result, dict) else None
     if result.get("status") == "ok" and isinstance(applied, dict):
         return dict(applied)
     return dict(state.get("hyperparams") or {})
+
+
+def drop_pinned_seed(hyperparams: Any, seed: int | None) -> dict:
+    """Hyperparameters minus a ``random_state`` that only restates the run's own seed.
+
+    Every estimator in :mod:`automl_agent.scripts.train` is built with ``random_state=seed``, so a
+    plan naming that same number changes the record and not the fit, and ``model_selection`` echoes it
+    often enough to matter.
+
+    Both callers compare two hyperparameter dicts and need the echo gone first, and both were bitten
+    by leaving it in. ``critic._other_levers_held``: a verdict prescribed one preprocessing step and
+    nothing else, the plan came back byte-identical, and the echoed ``random_state`` made the dicts
+    differ — so a clean single-lever transition was reported as confounded, on the row that *was* the
+    evidence. ``planning._signature``: the same echo puts pure noise into the fingerprint the novelty
+    guard reads.
+
+    Only when the value equals the seed. ``random_state: 7`` under ``--seed 42`` is a real lever — it
+    moves ``early_stopping``'s internal split — and stays counted.
+    """
+    values = dict(hyperparams or {})
+    pinned = values.get("random_state")
+    if seed is not None and not isinstance(pinned, bool) and pinned == seed:
+        values.pop("random_state")
+    return values
 
 
 def build_attempt(state: AutoMLState, critic: dict | None = None) -> Attempt:
@@ -167,6 +197,7 @@ def build_attempt(state: AutoMLState, critic: dict | None = None) -> Attempt:
         hyperparams=effective_hyperparams(state),
         result=dict(state.get("result") or {}),
         critic=dict(critic) if critic else None,
+        selection_source=str(state.get("selection_source") or ""),
     )
 
 
@@ -230,15 +261,15 @@ def loop_budget_exhausted(state: AutoMLState) -> bool:
 def fit_share_sec(state: AutoMLState) -> float | None:
     """One fit's slice: what the loop has left, divided by the iterations that may still run.
 
-    Divided rather than handed over whole. Either choice bounds the run, but giving the whole
-    remainder to the next fit lets iteration 1 spend the run — and a loop that cannot reach
-    iteration 2 is not the thing this repository is measuring. The current iteration counts
-    itself, so at iteration 1 of 5 a fit gets a fifth and at iteration 5 it gets the rest.
+    Divided, not handed over whole. Either bounds the run, but giving the whole remainder to the next
+    fit lets iteration 1 spend everything — and a loop that cannot reach iteration 2 is not what this
+    repository measures. The current iteration counts itself: at iteration 1 of 5 a fit gets a fifth,
+    at iteration 5 it gets the rest.
 
-    Can come back non-positive: ``route`` checks the budget between iterations, and the
-    planning and model-selection calls that follow its decision also cost time. The caller
-    decides what to do with that (``nodes/training.py`` declines to start the fit) — clamping
-    it to something positive here would spend budget the run does not have.
+    Can come back non-positive — ``route`` checks the budget between iterations, and the planning and
+    model-selection calls after its decision also cost time. The caller decides
+    (``nodes/training.py`` declines to start the fit); clamping to something positive here would spend
+    budget the run does not have.
     """
     remaining = loop_time_remaining_sec(state)
     if remaining is None:

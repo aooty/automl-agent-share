@@ -45,32 +45,30 @@ def route(
     3. the run has stalled (``stall_count`` consecutive non-improving iterations),
     4. the time budget is exhausted (``--time-budget-sec``, less holdout's reserved share).
 
-    Anything else continues the loop through the critic. Conditions 2 and 3 are what make an
-    infinite loop impossible, and they hold with or without ``search_past_goal`` — which is why
-    that flag can only ever cost iterations, never unbound them.
+    Anything else continues through the critic. Conditions 2 and 3 make an infinite loop
+    impossible and hold with or without ``search_past_goal`` — which is why that flag can only cost
+    iterations, never unbound them.
 
-    Condition 4 is checked *last*, and the order is the whole point of it. The first three are
-    conditions the loop reached on its own terms — it found what it was looking for, or it spent
-    what it was given, or it stopped moving — and any of them would have ended this run with the
-    clock stopped. The budget is only the reason a run ended when it is the thing that cut a loop
-    short that was otherwise still going, so ``out_of_time`` in the report names exactly that and
-    nothing else. Checked here at all because it was checked nowhere: ``--time-budget-sec`` was
-    handed to each training subprocess as its own timeout and read by nothing else, so five
-    iterations at the 3600s default bounded the run at 21,600 seconds.
+    **Condition 4 is checked last, and the order is the point.** The first three are conditions the
+    loop reached on its own terms — found what it wanted, spent what it was given, stopped moving —
+    and any of them would have ended the run with the clock stopped. The budget is the reason a run
+    ended only when it cut short a loop that was otherwise still going, so ``out_of_time`` names
+    exactly that. Checked here at all because it was checked nowhere: ``--time-budget-sec`` went to
+    each training subprocess as its own timeout and nothing else read it, so five iterations at the
+    3600s default bounded the run at 21,600 seconds.
 
-    On condition 1 being checked first, and what ``search_past_goal`` changes. In ``auto`` mode
-    the bar is derived from the card's baseline, so a first attempt that clears it ends the run
-    at iteration 1 and the Critic never runs — four of the five datasets in ``docs/RESULTS.md``
-    ended exactly that way, which means the diagnose-and-replan path the benchmark was comparing
-    did not execute on either arm. ``search_past_goal`` is how a run keeps going anyway: it does
-    not raise the bar and it does not change which attempt wins (``best`` is still val-best), it
-    only spends the remaining iterations. Off by default, because every number recorded under the
-    old behaviour was measured with a budget this flag changes — see
-    :attr:`automl_agent.config.RunConfig.search_past_goal`.
+    **Condition 1 first, and what ``search_past_goal`` changes.** In ``auto`` mode the bar comes
+    from the card's baseline, so a first attempt that clears it ends the run at iteration 1 and the
+    Critic never runs — four of the five datasets in ``docs/RESULTS.md`` ended that way, meaning
+    the diagnose-and-replan path the benchmark compared did not execute on either arm.
+    ``search_past_goal`` keeps a run going anyway: it does not raise the bar and does not change
+    which attempt wins (``best`` is still val-best), it only spends the remaining iterations. Off by
+    default, because every number recorded under the old behaviour was measured with a budget this
+    flag changes (:attr:`automl_agent.config.RunConfig.search_past_goal`).
 
-    ``goal_met`` is still evaluated on this iteration's result and still reaches the report:
-    ``report.stop_reason`` recomputes it, so a run that cleared the bar at iteration 1 and then
-    spent four more says ``goal_reached`` regardless of what the last attempt scored.
+    ``goal_met`` is still evaluated on this iteration's result and still reaches the report —
+    ``report.stop_reason`` recomputes it, so a run that cleared the bar at iteration 1 and spent
+    four more says ``goal_reached`` whatever the last attempt scored.
     """
     if not search_past_goal and goal_met(
         state.get("result", {}) or {}, state.get("goal", {}) or {}
@@ -94,22 +92,19 @@ def route(
 def make_checkpointer(db_path: Path = CHECKPOINT_DB) -> BaseCheckpointSaver:
     """Open the SQLite checkpointer used for interrupt/resume by ``thread_id``.
 
-    The connection is deliberately *not* wrapped in a context manager: the
-    compiled app must outlive any single ``with`` block so the CLI can keep
-    streaming. ``check_same_thread=False`` because LangGraph may touch it from a
-    worker thread.
+    Deliberately *not* in a context manager — the compiled app must outlive any single ``with``
+    block so the CLI can keep streaming. ``check_same_thread=False`` because LangGraph may touch it
+    from a worker thread.
 
-    One database holds every ``thread_id``, so two commands on the same machine share it —
-    ``show`` or ``predict`` read it while a ``run`` writes. The two settings below are what
-    make that ordinary instead of an error:
+    One database holds every ``thread_id``, so ``show`` or ``predict`` can read while a ``run``
+    writes. Two settings make that ordinary rather than an error:
 
-    * ``timeout`` is sqlite's busy handler. The stdlib default is 5 seconds, which a
-      checkpoint write can exceed while another process holds the lock; a run that has
-      already spent an hour training should wait, not abort.
-    * WAL lets readers proceed during a write at all. It is a property of the file, so it
-      is set once and survives; if the filesystem cannot support it (a network share), the
-      journal mode is left as it was — this is a concurrency improvement, not a
-      requirement, and refusing to open the database over it would be worse.
+    * ``timeout`` — sqlite's busy handler. The stdlib default of 5s is short for a checkpoint write
+      waiting on another process's lock, and a run an hour into training should wait, not abort.
+    * WAL — lets readers proceed during a write at all. A property of the file, so set once and it
+      survives; if the filesystem cannot support it (a network share) the journal mode is left as it
+      was. This is a concurrency improvement, not a requirement, and refusing to open the database
+      over it would be worse.
     """
     from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -133,25 +128,24 @@ class NodeFn(Protocol):
 def _bind(node: Callable[..., dict], config: RunConfig) -> NodeFn:
     """Bind ``config`` into a node, leaving a single-parameter ``(state)`` signature.
 
-    A plain ``partial(node, config=config)`` would still expose a parameter named
-    ``config``, which LangGraph reads as a request for its own ``RunnableConfig``
-    and warns about. Wrapping keeps the node's own naming intact.
+    A plain ``partial(node, config=config)`` would still expose a parameter named ``config``, which
+    LangGraph reads as a request for its own ``RunnableConfig`` and warns about. Wrapping keeps the
+    node's naming intact.
 
-    The run's clock is kept here too, for one reason: this is the only place every node passes
-    through. A budget that counts the nodes which remembered to report their own time is not a
-    budget, and the nodes whose time is easiest to forget are the reasoning ones — an LLM call
-    that retries through the backoff can cost minutes while measuring nothing itself. So the
-    wrapper times the call and folds the seconds into the ``budget`` channel, and a node stays a
-    function of ``state`` that knows nothing about the clock.
+    The run's clock lives here because this is the only place every node passes through. A budget
+    that counts the nodes which remembered to report their own time is not a budget, and the easiest
+    time to forget is the reasoning nodes' — an LLM call retrying through the backoff can cost
+    minutes while measuring nothing. So the wrapper times the call and folds the seconds into
+    ``budget``, and a node stays a function of ``state`` that knows nothing about the clock.
 
-    ``monotonic`` rather than wall clock because the number being accumulated is a duration; a
-    system clock adjustment mid-fit must not hand the run more budget or less. The accumulated
-    total is what survives in the checkpoint, so ``resume`` continues the budget instead of
-    restarting it — and instead of counting the hours the process was not running.
+    ``monotonic``, not wall clock: the accumulated number is a duration, and a system clock
+    adjustment mid-fit must not hand the run more budget or less. The total survives in the
+    checkpoint, so ``resume`` continues the budget rather than restarting it — or counting the hours
+    the process was not running.
 
-    A node that returns its own ``budget`` keeps it. Nothing does; the check is there so that if
-    something ever needs to (a node that corrects the accounting for time it knows was not
-    spent), the wrapper does not silently overwrite it.
+    A node returning its own ``budget`` keeps it. Nothing does; the check exists so that if
+    something ever needs to (correcting for time it knows was not spent), the wrapper does not
+    silently overwrite it.
     """
 
     def wrapped(state: AutoMLState) -> dict:
