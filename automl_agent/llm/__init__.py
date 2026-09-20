@@ -1,6 +1,6 @@
-"""The single place where LLM calls happen. Nodes never touch the SDK directly.
+"""LLM 호출이 일어나는 단 하나의 자리. 노드는 SDK를 직접 만지지 않는다.
 
-Everything lives in ``client``; import from there. This file re-exported four of its names for
-a while and nothing ever used the facade — every node and every test reaches for
-``automl_agent.llm.client`` directly.
+전부 ``client``에 있고, import도 거기서 한다. 한동안 이 파일이 그중 네 이름을 재수출했는데 그
+facade를 쓴 것은 아무것도 없었다 — 모든 노드와 모든 테스트가 ``automl_agent.llm.client``를 직접
+집는다.
 """

@@ -1,50 +1,36 @@
-"""The goal threshold, in two modes: ``auto`` (dataset-relative) and ``fixed``.
+"""목표 임계값, 두 모드로: ``auto``(데이터셋 상대)와 ``fixed``.
 
-**Why two.** A fixed ``f1 >= 0.85`` is unreachable on one card and free on another, so the loop's
-stopping condition stops meaning "this model is good" and starts meaning "this dataset is easy". But
-a fixed bar is exactly right when the number comes from *outside* the data — a deployment
-requirement, a regulatory floor. Different jobs, so different modes.
+**모드가 둘인 이유, 그리고 margin이 점수가 아니라 남은 여유에 붙는 이유는 ``docs/rationale.md``.**
 
-``auto`` (default) sets the bar relative to a reference baseline ``scripts/profile`` measures on the
-same data and the same holdout split:
+``auto``(기본)는 ``scripts/profile``이 같은 데이터·같은 holdout 분할에서 측정한 기준선에 상대적으로
+바를 놓는다::
 
     target = baseline + (1 - baseline) * margin        (bounded, maximize)
     target = baseline * (1 - margin)                   (minimize)
 
-**The margin is on the remaining headroom, not on the score** — the last 0.05 of roc_auc is far
-harder to win than the first. For an error metric the headroom *is* the error, so the margin comes
-off proportionally; that is the only scale-free reading available when the units are the target's.
+두 식 모두 :data:`MIN_LIFT`에 걸린다: **상수 예측기가 이미 넘는 목표는 목표가 아니다.**
 
-Both formulas are then held to :data:`MIN_LIFT`: **a goal a constant predictor already meets is not a
-goal.**
+``fixed``는 호출자의 숫자이거나 지표별 기본값이다. 데이터의 무엇도 그것을 움직이지 못한다.
 
-``fixed`` is the caller's number, or the per-metric default. Nothing about the data can move it.
+**어느 모드도 LLM에게 목표가 얼마여야 하는지 묻지 않는다** — 자기 바를 세우는 모델은 그것을 낮춰
+성공을 선언할 수 있다.
 
-**Neither mode asks the LLM what the target should be** — a model that sets its own bar can declare
-success by lowering it.
+**도달 가능성은 밝히고, 강제하지 않는다.** 유도된 바는 기준선의 *랭킹*이 어느 임계값에서도 허락하지
+않는 곳에 앉을 수 있고, 실제 실행 둘이 그것을 알아내는 데 반복 예산 전부를 썼다. ``auto``는 바를 그
+상한과 대조해 ``reference``에 적고 :func:`describe`가 찍는다. 바를 낮추지도(결과에 맞춰 움직이는 바는
+목표가 아니다), 실행을 거절하지도 않는다 — 상한은 *기준선*의 랭킹에 속하고 더 나은 계열은 그것을
+넘는다. 그래서 경고는 구조적으로 낮은 쪽으로 틀리고, 그것이 말하는 "랭킹 자체가 올라야 한다"는 그런
+실행이 실제로 하는 일이다. :mod:`automl_agent.scoring.ranking`을 보라.
 
-**Reachability is disclosed, never enforced.** A derived bar can sit above anything the
-baseline's *ranking* permits at any decision threshold, and two real runs spent their
-whole iteration budget finding that out. ``auto`` now compares the bar against that
-ceiling and records the comparison in ``reference`` for :func:`describe` to print, along
-with the margin that would have fitted. It does not lower the bar — a bar that moves to
-meet the result is not a goal — and it does not refuse to run, because the ceiling
-belongs to the *baseline's* ranking and a better family beats it — a run has cleared a bar that sat
-above its own card's ceiling. So the warning errs low by construction, and what it says — "the
-ranking itself has to improve" — is what such a run does. See
-:mod:`automl_agent.scoring.ranking`.
+**도달 가능성 검사 하나는 바를 움직인다, 위로.** ``baseline``은 0.5 컷에서 측정되므로 그 컷이 나쁘게
+대하는 지표는 유도에 깎인 출발점을 건네고 바가 그 손해를 물려받는다 — 기준선 자신의 랭킹이 *어떤*
+컷에서 이미 넘는 바는 아무것도 구분하지 않는다. ``auto``는 거기서 바닥을 치고, 그것은
+:data:`MIN_LIFT`의 예외를 한 걸음 더 읽은 것이다. 이것이 필요한 항등식을 가진 것은
+``balanced_accuracy``뿐이다. :func:`_raise_to_ranking_floor`를 보라.
 
-**One reachability check does move the bar, upward.** ``baseline`` is measured at the 0.5 cut, so a
-metric that cut treats badly hands the derivation a deflated starting point and the bar inherits the
-deficit — a bar the baseline's own ranking already clears at *some* cut separates nothing. ``auto``
-floors it there, which is :data:`MIN_LIFT`'s exception read one step further. Only
-``balanced_accuracy`` has the identity this needs; see :func:`_raise_to_ranking_floor`.
-
-**Resolution is disclosed too, and does not move the bar.** A bar derived from a baseline whose own
-95% interval is wider than the margin asks for a difference the slice cannot resolve; that is recorded
-as ``inside_baseline_ci``. See :mod:`automl_agent.scoring.intervals`.
-
-Rationale: ``docs/rationale.md``.
+**분해 가능성도 밝히고, 바를 움직이지 않는다.** 자기 95% 구간이 margin이 청하는 것보다 넓은 기준선에서
+유도한 바는 슬라이스가 분해할 수 없는 차이를 청한다. ``inside_baseline_ci``로 적힌다.
+:mod:`automl_agent.scoring.intervals`를 보라.
 """
 
 from __future__ import annotations
@@ -55,45 +41,42 @@ from .intervals import CI_LEVEL, contains
 from .metrics import ALIASES, METRICS, MINIMIZE, card_task, direction_of, spec, substitute_metric
 from .ranking import card_ceiling, passable_margin, required_ks
 
-# The two modes. ``auto`` measures the dataset; ``fixed`` takes the caller's number.
+# 두 모드. ``auto``는 데이터셋을 재고, ``fixed``는 호출자의 숫자를 받는다.
 MODE_AUTO = "auto"
 MODE_FIXED = "fixed"
 GOAL_MODES = (MODE_AUTO, MODE_FIXED)
 DEFAULT_MODE = MODE_AUTO
 
-# Fraction of the remaining headroom the agent is asked to close. ``auto`` only.
+# 에이전트가 닫으라고 청받는 남은 여유의 비율. ``auto``에만.
 DEFAULT_MARGIN = 0.25
 
-# Metrics living on [0, 1], where "remaining headroom" is meaningful. Derived from the
-# registry rather than restated: a metric this repo cannot compute must not get a bar.
-# Aliases are included so a card written with sklearn's name derives the same threshold.
+# [0, 1]에 사는 지표들, 곧 "남은 여유"가 뜻이 있는 곳. 다시 적는 대신 registry에서 유도한다: 이
+# 저장소가 계산할 수 없는 지표는 바를 받아서는 안 된다. sklearn의 이름으로 쓴 카드가 같은 임계값을
+# 유도하도록 alias도 포함한다.
 BOUNDED_METRICS = frozenset(
     {name for name, spec in METRICS.items() if spec.bounded}
     | {alias for alias, target in ALIASES.items() if METRICS[target].bounded}
 )
 
-# Never ask for a perfect score: on real data it means the target is unreachable and
-# the run always ends on the iteration budget, which hides genuine stalls.
+# 완벽한 점수는 결코 청하지 않는다: 실제 데이터에서 그것은 목표가 도달 불가라는 뜻이고, 실행은 항상
+# 반복 예산에서 끝나므로 진짜 정체가 가려진다.
 CEILING = 0.99
-# A target must sit at least this far above chance level, or a majority-class
-# predictor would satisfy it.
+# 목표는 chance 수준보다 최소 이만큼 위에 앉아야 한다. 아니면 다수 클래스 예측기가 그것을 만족한다.
 #
-# Read two ways, because chance is measured in the metric's own terms. On a bounded
-# maximizing metric it is an absolute distance (``chance + 0.02``). On an error metric it
-# is a *fraction* of the chance error (``chance * 0.98``), since an absolute 0.02 would mean
-# something different for a target in days than for one in dollars — the one thing a bar in
-# the target's units must never do. Same constant, same intent, stated in whichever unit the
-# metric brought with it.
+# chance가 지표 자신의 단위로 측정되므로 두 가지로 읽는다. bounded maximize 지표에서는 절대 거리
+# (``chance + 0.02``), 오차 지표에서는 chance 오차의 *비율*(``chance * 0.98``)이다 — 절대 0.02는
+# 일 단위 타깃과 달러 단위 타깃에서 다른 것을 뜻하게 되고, 타깃의 단위로 된 바가 결코 해서는 안 되는
+# 것이 그것이다. 같은 상수, 같은 의도, 지표가 갖고 온 단위로 적은 것.
 MIN_LIFT = 0.02
 
-# ``fixed`` mode's default bar, and ``auto``'s last resort when the card carries no
-# baseline at all (a hand-written card, or a profiling run with ``--no-baseline``). Same
-# derivation as above, so the two constants can never cover different metrics.
+# ``fixed`` 모드의 기본 바, 그리고 카드에 기준선이 아예 없을 때(손으로 쓴 카드, 또는
+# ``--no-baseline``으로 돈 프로파일링) ``auto``의 마지막 수단. 위와 같은 유도이므로 두 상수가 서로
+# 다른 지표를 덮는 일은 있을 수 없다.
 #
-# A metric in the target's own units has no entry, because it has no portable default: the
-# registry declares ``fallback=None`` for ``mae``/``rmse`` and this dict simply skips it.
-# Missing here means "this metric needs a measured baseline or an explicit --threshold",
-# which is a different state from "unknown metric" — see :func:`default_bar`.
+# 타깃 자신의 단위로 나오는 지표는 항목이 없다. 이식 가능한 기본값이 없기 때문이다 — registry가
+# ``mae``/``rmse``에 ``fallback=None``을 선언하고 이 dict는 그것을 그냥 건너뛴다. 여기 없다는 것은
+# "이 지표는 측정된 기준선이나 명시적 --threshold가 필요하다"이고, 그것은 "모르는 지표"와 다른 상태다.
+# :func:`default_bar`를 보라.
 _BARS = {name: item.fallback for name, item in METRICS.items() if item.fallback is not None}
 FALLBACK_THRESHOLDS: dict[str, float] = {
     **_BARS,
@@ -103,15 +86,15 @@ FALLBACK_DEFAULT = 0.85
 
 
 def default_bar(metric: str) -> float | None:
-    """The bar to use for ``metric`` when nothing was measured, or ``None`` if there is none.
+    """아무것도 측정되지 않았을 때 ``metric``에 쓸 바, 또는 그런 것이 없으면 ``None``.
 
-    Three cases, and the difference between the last two matters:
+    세 경우이고, 뒤 두 개의 차이가 중요하다:
 
-    * a registry metric with a portable default → that number;
-    * a registry metric in the target's units (``mae``, ``rmse``) → ``None``, because any
-      number here would be a claim about the column's scale rather than about the model;
-    * a name this harness does not know → :data:`FALLBACK_DEFAULT`, keeping the derivation
-      path tolerant of hand-written cards. ``RunConfig`` is where unknown names are refused.
+    * 이식 가능한 기본값이 있는 registry 지표 → 그 숫자;
+    * 타깃의 단위로 된 registry 지표(``mae``, ``rmse``) → ``None``. 여기 어떤 숫자든 모델이 아니라
+      그 열의 척도에 대한 주장이 되기 때문이다;
+    * 이 harness가 모르는 이름 → :data:`FALLBACK_DEFAULT`. 유도 경로를 손으로 쓴 카드에 관대하게
+      둔다. 모르는 이름을 거절하는 곳은 ``RunConfig``다.
     """
     found = spec(metric)
     if found is None:
@@ -120,7 +103,7 @@ def default_bar(metric: str) -> float | None:
 
 
 def _reference(card: dict[str, Any], metric: str) -> tuple[float | None, float | None]:
-    """Pull ``(baseline, chance)`` for ``metric`` out of the card's baseline block."""
+    """카드의 baseline 블록에서 ``metric``에 대한 ``(baseline, chance)``를 꺼낸다."""
     baseline_block = card.get("baseline")
     if not isinstance(baseline_block, dict):
         return None, None
@@ -137,12 +120,11 @@ def _reference(card: dict[str, Any], metric: str) -> tuple[float | None, float |
 
 def _target(baseline: float, metric: str, direction: str, margin: float) -> float:
     if direction == MINIMIZE:
-        # Error metrics are bounded below by zero, so the margin comes off the score.
+        # 오차 지표는 아래로 0에 막혀 있으므로 margin이 점수에서 빠진다.
         return max(0.0, baseline * (1.0 - margin))
     if metric in BOUNDED_METRICS:
         return baseline + (1.0 - baseline) * margin
-    # Unbounded and maximizing (a throughput-like metric): proportional lift is the
-    # only thing left that is scale-free.
+    # 상한 없는 maximize(throughput 같은 지표): 척도 없이 남는 것은 비례 상승뿐이다.
     return baseline * (1.0 + margin)
 
 
@@ -153,19 +135,17 @@ def derive_threshold(
     direction: str | None = None,
     margin: float = DEFAULT_MARGIN,
 ) -> tuple[float | None, dict[str, Any]]:
-    """Return ``(threshold, reference)`` for this card and metric.
+    """이 카드와 지표에 대한 ``(threshold, reference)``.
 
-    ``reference`` records how the number was reached, so the report and the Critic
-    prompt can say "0.865 = logreg's 0.821 plus a quarter of the headroom" instead of
-    presenting a bare constant.
+    ``reference``는 그 숫자에 이른 방식을 적는다. 그래서 보고서와 Critic 프롬프트가 맨 상수를
+    내놓는 대신 "0.865 = logreg의 0.821 더하기 남은 여유의 4분의 1"이라고 말할 수 있다.
 
-    ``direction`` is read from the metric registry when not given, and no caller has a
-    reason to give it: which way is better belongs to the metric.
+    ``direction``은 주지 않으면 지표 registry에서 읽는다. 호출자가 그것을 줄 이유는 없다 — 어느 쪽이
+    더 좋은지는 지표에 속한다.
 
-    The threshold is ``None`` in exactly one case — a metric in the target's own units
-    (``mae``, ``rmse``) with no measured baseline to derive from. There is no honest number
-    there, so the caller gets nothing rather than a guess, and
-    :mod:`automl_agent.nodes.profiling` refuses the run.
+    임계값이 ``None``인 경우는 정확히 하나다 — 유도할 측정된 기준선이 없는, 타깃 자신의 단위로 된
+    지표(``mae``, ``rmse``). 거기에 정직한 숫자는 없으므로 호출자는 추측 대신 아무것도 받지 않고,
+    :mod:`automl_agent.nodes.profiling`이 실행을 거절한다.
     """
     direction = direction or direction_of(metric)
     baseline, chance = _reference(card or {}, metric)
@@ -183,40 +163,35 @@ def derive_threshold(
     }
 
     if direction == MINIMIZE:
-        # The mirror of the chance rule below, and every bit as necessary: a Ridge baseline
-        # can score *worse* than predicting the mean (a negative r2 comes with an mae above
-        # chance), and ``baseline * (1 - margin)`` then produces a bar the mean predictor
-        # already clears. Tightening it — the bar moves down, never up — keeps the one
-        # invariant both directions share: an adjustment may only make the goal harder.
+        # 아래 chance 규칙의 거울이고 그만큼 필요하다: Ridge 기준선은 평균 예측보다 *나쁠* 수 있고
+        # (음수 r2에는 chance보다 높은 mae가 따라온다) 그러면 ``baseline * (1 - margin)``은 평균
+        # 예측기가 이미 넘는 바를 낸다. 조이는 것 — 바는 내려가고 결코 올라가지 않는다 — 이 두 방향이
+        # 공유하는 하나뿐인 불변식을 지킨다: 보정은 목표를 더 어렵게만 만든다.
         if chance is not None and threshold > chance * (1.0 - MIN_LIFT):
             threshold = chance * (1.0 - MIN_LIFT)
             reference["lowered_to_clear_chance"] = True
         if threshold <= 0.0:
-            # ``--margin 1.0``, or a baseline that already scores a perfect zero. Disclosed
-            # rather than nudged, on the same terms as ``exceeds_ceiling``: the bar asks for
-            # exact prediction, which no attempt will report, and the run would end on the
-            # iteration budget looking like a stall.
+            # ``--margin 1.0``, 또는 이미 완벽한 0을 받는 기준선. ``exceeds_ceiling``과 같은 조건으로
+            # 밀지 않고 밝힌다: 바가 정확한 예측을 청하고 있고, 어떤 시도도 그것을 보고하지 않으므로
+            # 실행은 정체처럼 보이는 모습으로 반복 예산에서 끝날 것이다.
             reference["demands_zero_error"] = True
     elif metric in BOUNDED_METRICS:
-        # Clamp first, then chance — never the other way round. Clamping last let the
-        # ceiling pull the bar back *below* chance (a 99.5%-majority cohort got
-        # ``accuracy >= 0.99``, which a constant predictor already beats), and the run
-        # then reported success without learning anything.
+        # 클램프 먼저, 그다음 chance — 반대 순서는 안 된다. 클램프를 나중에 하면 상한이 바를 chance
+        # *아래로* 되당길 수 있었고(다수 클래스 99.5% 코호트가 ``accuracy >= 0.99``를 받았다), 그때
+        # 실행은 아무것도 배우지 않은 채 성공을 보고했다.
         threshold = min(threshold, CEILING)
         if chance is not None and threshold < chance + MIN_LIFT:
-            # A baseline at or below chance would otherwise produce a target a
-            # majority-class predictor already clears.
+            # 아니면 chance 이하의 기준선이 다수 클래스 예측기가 이미 넘는 목표를 낸다.
             threshold = chance + MIN_LIFT  # chance 우선 — CEILING으로 되돌리지 않는다
             reference["raised_to_clear_chance"] = True
         threshold = _raise_to_ranking_floor(reference, card or {}, metric, threshold, baseline)
         if threshold > CEILING:
-            # Kept honest rather than quietly lowered: this metric cannot separate a real
-            # model from the majority class on this dataset, and ``describe`` says so.
+            # 조용히 낮추는 대신 정직하게 둔다: 이 지표는 이 데이터셋에서 실제 모델을 다수 클래스와
+            # 구분할 수 없고, ``describe``가 그렇게 말한다.
             reference["exceeds_ceiling"] = True
-        # Rounded before the disclosure, not after: the bar the run is judged by is the
-        # rounded one, and ``required_ks`` inverts an identity. A KS derived from the
-        # unrounded intermediate does not invert back to the bar on screen, which makes it a
-        # number the reader cannot check — 0.6077 against a printed 0.8038.
+        # 공개 전에 반올림한다, 후가 아니다: 실행이 판정받는 바는 반올림된 쪽이고 ``required_ks``는
+        # 항등식을 역으로 푼다. 반올림 안 한 중간값에서 유도한 KS는 화면의 바로 되돌아가지 않으므로
+        # 독자가 검산할 수 없는 숫자가 된다.
         threshold = round(threshold, 4)
         _note_ranking_ceiling(reference, card or {}, metric, threshold, baseline)
     _note_baseline_interval(reference, card or {}, metric, round(threshold, 4))
@@ -232,59 +207,35 @@ def _raise_to_ranking_floor(
     threshold: float,
     baseline: float,
 ) -> float:
-    """Raise the bar to the baseline ranking's own best cut, when the bar sits under it.
+    """바가 기준선 랭킹 자신의 최적 컷 아래에 앉을 때, 거기까지 바를 올린다.
 
-    Mirror of :func:`_note_ranking_ceiling`, which was one-directional — it disclosed a bar the
-    baseline's ranking cannot reach at *any* cut, and said nothing about one that ranking already
-    reaches at *some* cut. Same defect in the same number: ``baseline`` is measured at the 0.5 cut
-    (``profile.py`` calls ``predict()``, like every attempt), so whatever the cut costs the baseline
-    is subtracted from the bar derived from it.
+    :func:`_note_ranking_ceiling`의 거울이다. 그쪽은 한 방향이었다 — 기준선 랭킹이 *어느* 컷에서도
+    닿지 못하는 바는 밝혔고, 그 랭킹이 *어떤* 컷에서 이미 넘는 바에는 아무 말도 하지 않았다. 같은
+    숫자의 같은 결함이다: ``baseline``은 0.5 컷에서 측정되므로(``profile.py``도 모든 시도처럼
+    ``predict()``를 부른다) 그 컷이 기준선에 물리는 값이 그대로 거기서 유도한 바에서 빠진다.
 
-    On the four bench cards that cost is ``balanced_accuracy``'s alone. Every threshold-dependent
-    metric loses something at 0.5; only here does the loss outrun what the margin adds:
+    bench 카드 넷에서 그 값이 margin이 붙이는 것을 넘어서는 지표는 ``balanced_accuracy``뿐이다. 네
+    카드의 표와 그 이유는 ``docs/goal.md``. 요약하면, 두 오류율을 같은 무게로 평균하는 지표라서 KS
+    항등식이 여기서만 성립하고 불균형에서 0.5 컷이 가장 비싼 것도 여기다. 그래서
+    ``card_ceiling``이 다른 곳에서 ``None``을 돌려주는 것은 빈틈이 아니라 맞는 답이다.
 
-    ======================  ==============  ============  ===========================
-    bank-marketing          0.5 cut         best cut       margin 0.25 adds
-    ======================  ==============  ============  ===========================
-    ``f1``                  0.4552          0.5834         0.1362 — covers the 0.1282
-    ``accuracy``            0.9026          0.9051         0.0244 — covers the 0.0025
-    ``balanced_accuracy``   0.6620          0.8400         0.0845 — under the 0.1780
-    ======================  ==============  ============  ===========================
+    **이것은 바를 움직이고, 이 모듈의 다른 무엇도 그러지 않는다.** :data:`MIN_LIFT`가 이미 만드는
+    같은 예외, 같은 방향이다: 상수 예측기가 이미 넘는 목표가 목표가 아닌 것처럼, 기준선 자신의 랭킹을
+    다시 자른 것이 이미 넘는 목표도 목표가 아니다. 둘 다 바를 더 어렵게만 만든다. 대가는 ``--margin``이
+    바닥 아래에서 바를 못 움직이게 되는 것이므로, 바닥에 걸린 margin을 밝혀 :func:`describe`가 찍는다:
+    자기 플래그를 무시하는 바는 그렇다고 말해야 한다.
 
-    Recomputable from ``bench/cards/bank-marketing-seed42.json``: the 0.5-cut column
-    (``baseline.scores``), the last column (``(1 - score) * 0.25``), and ``balanced_accuracy``'s
-    best cut (``baseline.balanced_accuracy_at_best_cut``, the ``(1 + ks) / 2`` this module reads).
-    The other two best cuts are **not** — ``card_ceiling`` returns ``None`` off
-    ``SYMMETRIC_METRICS`` because no identity exists there. They were measured once off the
-    baseline's own validation probabilities; checking them means redoing that, not reading a card.
-
-    Not a quirk of this dataset. ``balanced_accuracy`` weights the two error rates equally, which is
-    both why the KS identity holds (:mod:`automl_agent.scoring.ranking`) and why the 0.5 cut costs
-    most under imbalance — recall collapses to 0.3478 and half of that lands in the score.
-    ``accuracy`` rides the majority class; ``f1`` never counts negatives. So this fires for the one
-    metric that needs it, and ``card_ceiling``'s ``None`` elsewhere is the right answer, not a gap.
-    ``precision``/``recall`` are excluded further: their best cut is 1.0000 by predicting nothing or
-    everything, so a floor there is degenerate rather than demanding.
-
-    **This moves the bar, which nothing else in this module does.** Same exception
-    :data:`MIN_LIFT` already makes, same direction: a goal a constant predictor already meets is not
-    a goal, and neither is one that re-cutting the baseline's own ranking already meets. Both only
-    ever make the bar harder. The cost is that ``--margin`` stops moving it below the floor — 0.25
-    through 0.526 all give 0.8400 on bank-marketing — so the floored margin is disclosed and
-    :func:`describe` prints it: a bar that ignores its flag has to say so.
-
-    Clamped at :data:`CEILING`, not allowed past it — a ranking with KS above 0.98 would otherwise
-    push the bar over the clamp and collect the ``exceeds_ceiling`` disclosure, whose wording blames
-    ``chance`` and would be false here.
+    :data:`CEILING`에서 클램프하고 그것을 넘게 두지 않는다 — KS가 0.98을 넘는 랭킹이라면 바를 클램프
+    밖으로 밀고 ``exceeds_ceiling`` 공개를 받아 갈 텐데, 그 문구는 ``chance``를 탓하므로 여기서는
+    거짓이 된다.
     """
     _ks, ceiling = card_ceiling(card, metric)
     if ceiling is None or threshold >= ceiling:
         return threshold
     reference["raised_to_ranking_floor"] = True
     reference["ranking_floor"] = ceiling
-    # The bar this card's margin actually produced, kept because it is the only number in the
-    # disclosure the reader cannot recompute from the others — and because a run whose bar was
-    # moved should be able to say what it was moved from.
+    # 이 카드의 margin이 실제로 낸 바. 공개 안에서 독자가 나머지로 재계산할 수 없는 유일한 숫자이고,
+    # 바가 움직여진 실행은 무엇에서 움직여졌는지 말할 수 있어야 하므로 남긴다.
     reference["margin_bar"] = round(threshold, 4)
     floored = passable_margin(baseline, ceiling)
     if floored is not None:
@@ -299,20 +250,17 @@ def _note_ranking_ceiling(
     threshold: float,
     baseline: float,
 ) -> None:
-    """Record whether the bar sits above what any cut of the baseline ranking can reach.
+    """바가 기준선 랭킹의 어느 컷도 닿을 수 없는 곳에 앉는지 적는다.
 
-    A *disclosure*, never an adjustment. The bar is not lowered to meet it, because a bar
-    that moves to meet the result stops being a goal — and because the ceiling belongs to
-    the baseline's ranking, which a better model family is free to beat
-    (:mod:`automl_agent.scoring.ranking` has the numbers). Advisory both ways: a card with no KS
-    simply gets no note, so the check can never block a run it misjudged.
+    보정이 아니라 *공개*다. 바는 그것에 맞춰 낮춰지지 않는다. 결과에 맞춰 움직이는 바는 목표이기를
+    그치고, 상한은 더 나은 계열이 자유롭게 넘을 수 있는 기준선의 랭킹에 속하기 때문이다
+    (:mod:`automl_agent.scoring.ranking`에 수가 있다). 양방향으로 조언일 뿐이다: KS가 없는 카드는
+    그냥 아무 note도 받지 않으므로, 이 검사가 자기가 잘못 판단한 실행을 막는 일은 있을 수 없다.
 
-    When it does fire, the bar is recorded *twice*: once on the metric the caller asked for
-    and once on the ranking axis that owns the shortfall (``required_ks`` against the
-    baseline's ``ks``). One bar, two requirements, each with a size — which is the whole
-    difference between "the ranking has to improve" and a number a family swap can be
-    compared against. See :func:`automl_agent.scoring.ranking.required_ks` for what that comparison
-    cost when it was missing.
+    발사할 때 바는 *두 번* 적힌다. 한 번은 호출자가 청한 지표에, 한 번은 그 부족분을 소유한 랭킹 축에
+    (기준선의 ``ks``에 대고 ``required_ks``). 하나의 바, 두 개의 요구, 각각 크기를 갖는다 — 그것이
+    "랭킹이 올라야 한다"와 계열 교체에 대고 비교할 수 있는 숫자 사이의 차이 전부다. 그 비교가 없을 때
+    무엇을 물었는지는 :func:`automl_agent.scoring.ranking.required_ks`를 보라.
     """
     ks, ceiling = card_ceiling(card, metric)
     if ks is None or ceiling is None:
@@ -334,21 +282,19 @@ def _note_ranking_ceiling(
 def _note_baseline_interval(
     reference: dict[str, Any], card: dict[str, Any], metric: str, threshold: float
 ) -> None:
-    """Record whether the bar sits inside the baseline score's own confidence interval.
+    """바가 기준선 점수 자신의 신뢰구간 안에 앉는지 적는다.
 
-    A *disclosure*, like the ranking ceiling above, and for the same reason: the margin is
-    the caller's to choose and a bar that moves to meet the measurement is not a goal.
+    위의 랭킹 상한처럼 *공개*이고, 이유도 같다: margin은 호출자가 고르는 것이고 측정치에 맞춰 움직이는
+    바는 목표가 아니다.
 
-    What it means when it fires: the distance from the baseline to the bar is smaller than
-    the spread of the baseline measurement itself, so this validation slice cannot resolve
-    a difference that size. What it does *not* mean is that an attempt clearing the bar
-    learned nothing — attempts are scored on the same rows as the baseline, so the two
-    errors move together and a paired comparison is tighter than either interval. The
-    honest reading is "this margin is at the noise floor of this slice", and the number that
-    settles it is the held-back test score (:mod:`automl_agent.nodes.holdout`).
+    발사할 때의 뜻: 기준선에서 바까지의 거리가 기준선 측정 자체의 폭보다 작으므로, 이 검증 슬라이스는
+    그만한 차이를 분해할 수 없다. *아닌* 것: 바를 넘긴 시도가 아무것도 배우지 않았다는 뜻은 아니다 —
+    시도는 기준선과 같은 행에서 채점되므로 두 오차가 함께 움직이고 짝지은 비교는 두 구간 어느 것보다
+    좁다. 정직한 독법은 "이 margin은 이 슬라이스의 잡음 바닥에 있다"이고, 그것을 정하는 숫자는 떼어 둔
+    test 점수다 (:mod:`automl_agent.nodes.holdout`).
 
-    Advisory both ways: a card written before intervals existed, or one whose validation
-    slice was too small for one, simply gets no note.
+    양방향으로 조언일 뿐이다: 구간이 있기 전에 쓰인 카드나 검증 슬라이스가 구간에 너무 작았던 카드는
+    그냥 아무 note도 받지 않는다.
     """
     block = card.get("baseline")
     interval = (block or {}).get("ci") if isinstance(block, dict) else None
@@ -360,8 +306,8 @@ def _note_baseline_interval(
     if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
         return
     reference["baseline_ci"] = [round(float(low), 4), round(float(high), 4)]
-    # ``unit`` matters to the reading: a grouped interval is the wide, honest one, and its
-    # width is the reason a bar can land inside it at all on clustered data.
+    # ``unit``이 독법에 중요하다: 그룹 단위 구간이 넓고 정직한 쪽이며, 군집된 데이터에서 바가 구간 안에
+    # 들어갈 수 있는 이유가 그 폭이다.
     if isinstance(interval, dict) and interval.get("unit"):
         reference["baseline_ci_unit"] = str(interval["unit"])
     if contains((float(low), float(high)), threshold):
@@ -377,21 +323,19 @@ def derive_goal(
     threshold: float | None = None,
     margin: float = DEFAULT_MARGIN,
 ) -> dict[str, Any]:
-    """Build the ``goal`` channel for one of the two modes.
+    """두 모드 중 하나에 대한 ``goal`` 채널을 세운다.
 
-    Naming a ``threshold`` *is* choosing ``fixed``, so it implies the mode rather than
-    conflicting with it — a caller who hands over a number never has it silently
-    ignored. The CLI refuses ``--goal-mode auto --threshold`` outright, so that
-    inference only ever applies where the intent is unambiguous.
+    ``threshold``를 대는 것이 ``fixed``를 고르는 것*이므로*, 모드와 충돌하는 대신 모드를 함의한다 —
+    숫자를 건넨 호출자가 그것이 조용히 무시되는 일을 겪지 않는다. CLI는
+    ``--goal-mode auto --threshold``를 아예 거절하므로, 그 추론은 의도가 모호하지 않은 곳에만 걸린다.
 
-    In ``auto`` this is called twice on the ``--data`` path: once in ``initial_state``
-    (no card yet, so the per-metric default applies) and again by the ``profiling`` node
-    once the card exists. The second call overwrites the first, which is why the channel
-    is a plain value and not an accumulating one.
+    ``auto``에서 이것은 ``--data`` 경로에서 두 번 불린다: 한 번은 ``initial_state``에서(아직 카드가
+    없으므로 지표별 기본값), 한 번은 카드가 생긴 뒤 ``profiling`` 노드에서. 두 번째가 첫 번째를 덮어쓰고,
+    그래서 이 채널이 누적형이 아니라 맨 값이다.
 
-    ``direction`` comes from the metric registry unless a caller overrides it, so
-    ``threshold`` always means "the bar", never "the bar, in whichever direction someone
-    asked for". ``threshold`` can come back ``None`` — see :func:`derive_threshold`.
+    ``direction``은 호출자가 덮어쓰지 않으면 지표 registry에서 온다. 그래서 ``threshold``는 항상
+    "그 바"를 뜻하고 "누군가 청한 방향으로 읽은 바"를 뜻하지 않는다. ``threshold``는 ``None``으로
+    돌아올 수 있다 — :func:`derive_threshold`를 보라.
     """
     if threshold is not None:
         mode = MODE_FIXED
@@ -405,9 +349,8 @@ def derive_goal(
         elif goal["threshold"] is not None:
             goal["source"] = "fixed_default"
         else:
-            # ``fixed`` with no number, for a metric whose units make every number
-            # arbitrary. Refused by the profiling node rather than here, so the message
-            # can name the measured alternative.
+            # 숫자 없는 ``fixed``, 단위 때문에 모든 숫자가 임의가 되는 지표에 대해. 메시지가 측정된
+            # 대안을 댈 수 있도록 여기가 아니라 profiling 노드가 거절한다.
             goal["source"] = "unset"
         return goal
 
@@ -429,27 +372,24 @@ def resolve_goal(
     threshold: float | None = None,
     margin: float = DEFAULT_MARGIN,
 ) -> tuple[dict[str, Any], str | None]:
-    """:func:`derive_goal`, with the metric swapped when it cannot score this card's target.
+    """:func:`derive_goal`, 지표가 이 카드의 타깃을 채점할 수 없을 때 그것을 바꿔서.
 
-    Returns ``(goal, note)``; ``note`` is the Korean line explaining the swap, ``None`` on the
-    ordinary path. Every construction of the ``goal`` channel goes through here because the swap has
-    to happen in exactly one place — ``goal["metric"]`` is read by every node from ``training`` to
-    ``holdout``, and substituting downstream would leave two metrics in one run.
+    ``(goal, note)``를 돌려준다. ``note``는 교체를 설명하는 한글 한 줄이고, 평범한 경로에서는
+    ``None``이다. ``goal`` 채널의 모든 구성이 여기를 지나는 이유는 교체가 정확히 한 곳에서 일어나야
+    하기 때문이다 — ``goal["metric"]``은 ``training``부터 ``holdout``까지 모든 노드가 읽고, 하류에서
+    대체하면 한 실행 안에 지표가 둘 남는다.
 
-    Three things move together; the two easy to forget are why this is a function and not two lines
-    per call site:
+    셋이 함께 움직이고, 잊기 쉬운 둘이 이것이 호출부마다 두 줄이 아니라 함수인 이유다:
 
-    * ``direction`` is re-read from the new metric. Carrying the old one is no smaller a bug than the
-      mismatch it fixes — ``rmse``'s ``minimize`` on ``f1`` inverts the run, keeping the *worst*
-      attempt as ``best`` and firing ``goal_met`` below the bar (``RunConfig.__post_init__`` guards
-      the same trap by hand).
-    * an explicit ``threshold`` is dropped: it was in the old metric's units, and ``--threshold 3.2``
-      for ``rmse`` reused as an ``f1`` bar is an unreachable goal wearing the caller's number. The
-      *mode* is kept, so a ``fixed`` run gets the new metric's default and ``source`` reads
-      ``fixed_default``.
+    * ``direction``을 새 지표에서 다시 읽는다. 옛것을 들고 가는 것은 그것이 고치는 어긋남만큼 큰
+      버그다 — ``f1``에 ``rmse``의 ``minimize``는 실행을 뒤집어 *최악*의 시도를 ``best``로 지키고
+      바 아래에서 ``goal_met``을 발사한다 (``RunConfig.__post_init__``이 같은 함정을 손으로 막는다).
+    * 명시적 ``threshold``는 버린다: 옛 지표의 단위로 된 값이고, ``rmse``의 ``--threshold 3.2``를
+      ``f1`` 바로 다시 쓰면 호출자의 숫자를 입은 도달 불가 목표가 된다. *모드*는 지키므로 ``fixed``
+      실행은 새 지표의 기본값을 받고 ``source``는 ``fixed_default``로 읽힌다.
 
-    ``substituted_from`` is recorded on the goal, so the swap survives into the checkpoint and the
-    report; :func:`describe` prints it wherever the goal is printed.
+    ``substituted_from``은 goal에 적히므로 교체가 체크포인트와 보고서까지 살아남는다.
+    :func:`describe`가 goal이 찍히는 모든 곳에서 그것을 찍는다.
     """
     task = card_task(card or {})
     swap = substitute_metric(task, metric) if task else None
@@ -464,8 +404,8 @@ def resolve_goal(
         f"기록되고 반복 예산만 소모됩니다. {swap}로 바꿔 실행합니다"
     )
     if threshold is not None:
-        # Said, not silently absorbed: the caller gave a number and this run will not be
-        # judged by it. The number is in the old metric's units, so there is nothing to carry.
+        # 조용히 흡수하지 않고 말한다: 호출자가 숫자를 줬고 이 실행은 그것으로 판정되지 않는다.
+        # 그 숫자는 옛 지표의 단위이므로 들고 갈 것이 없다.
         note += (
             f". --threshold {threshold}는 {metric}의 단위로 준 값이라 {swap}의 바로 쓸 수 없어 "
             f"버립니다 — {swap} 기준으로 다시 지정하려면 --metric {swap} --threshold <값>"
@@ -476,23 +416,22 @@ def resolve_goal(
 
 
 def goal_threshold(goal: dict[str, Any], default: float) -> float:
-    """The goal's bar as a float, falling back to ``default`` when it has none.
+    """goal의 바를 float으로, 없으면 ``default``로.
 
-    ``goal.get("threshold", default)`` does not do this: the key is *present* and ``None``
-    for a metric whose bar could not be derived, so the default never applies and the
-    caller gets a ``TypeError`` from ``float(None)``. Every node inside the loop runs after
-    ``profiling`` has refused that case, so this is a guard rather than a code path.
+    ``goal.get("threshold", default)``는 이 일을 하지 않는다: 바를 유도할 수 없었던 지표에서 키는
+    *있고* 값이 ``None``이므로 기본값이 결코 걸리지 않고 호출자는 ``float(None)``에서 ``TypeError``를
+    받는다. 루프 안의 모든 노드는 ``profiling``이 그 경우를 거절한 뒤에 돌므로, 이것은 코드 경로가
+    아니라 가드다.
     """
     raw = goal.get("threshold")
     return default if raw is None else float(raw)
 
 
 def missing_bar_message(metric: str) -> str:
-    """Why this run cannot start, and the two ways to give it a bar.
+    """이 실행이 시작할 수 없는 이유, 그리고 바를 주는 두 방법.
 
-    Shared by every caller that refuses an unset threshold, so the operator reads the same
-    two options whichever path found it (``--dataset-card`` at startup, ``--data`` after
-    profiling).
+    설정되지 않은 임계값을 거절하는 모든 호출자가 공유하므로, 어느 경로가 그것을 찾았든(시작 시
+    ``--dataset-card``, 프로파일링 뒤 ``--data``) 운영자는 같은 두 선택지를 읽는다.
     """
     return (
         f"{metric}는 정답 열의 단위로 나오는 지표라서 이식 가능한 기본 목표값이 없습니다 — "
@@ -504,25 +443,23 @@ def missing_bar_message(metric: str) -> str:
 
 
 def describe(goal: dict[str, Any]) -> str:
-    """One-line Korean explanation: which mode, what bar, and where it came from."""
+    """한글 한 줄 설명: 어느 모드, 어떤 바, 그리고 그것이 어디서 왔는지."""
     metric = str(goal.get("metric", "metric"))
     threshold = goal.get("threshold")
     direction = "이하" if str(goal.get("direction")) == "minimize" else "이상"
     mode = str(goal.get("mode") or DEFAULT_MODE)
     head = f"{mode} 모드 — {metric} {threshold} {direction}"
     if goal.get("substituted_from"):
-        # Printed with the bar rather than only once at startup: this run is judged by a
-        # metric nobody asked for, and every place that shows the goal — the console header,
-        # the Critic's prompt, report.md — has to carry that with it. A swap that appears in
-        # one line of console output and nowhere else is a swap the reader of the report
-        # cannot see.
+        # 시작 시 한 번이 아니라 바와 함께 찍는다: 이 실행은 아무도 청하지 않은 지표로 판정되고,
+        # goal을 보여 주는 모든 곳 — 콘솔 헤더, Critic의 프롬프트, report.md — 이 그것을 함께 날라야
+        # 한다. 콘솔 출력 한 줄에만 나오고 다른 데 없는 교체는 보고서의 독자가 볼 수 없는 교체다.
         head += f" (요청한 지표 {goal['substituted_from']}는 이 task의 지표가 아니라 대체됨)"
     source = str(goal.get("source") or "")
     reference = goal.get("reference") or {}
 
     if source == "unset" or threshold is None:
-        # No number to print, so the line says what is missing instead of printing "None".
-        # The run does not get this far unless something skipped the profiling node's check.
+        # 찍을 숫자가 없으므로 "None"을 찍는 대신 무엇이 없는지 말한다. profiling 노드의 검사를
+        # 무언가 건너뛰지 않았다면 실행은 여기까지 오지 않는다.
         return f"{mode} 모드 — {metric} 목표값 미정 (이 지표는 기본 바가 없습니다)"
     if source == "fixed":
         return f"{head} (직접 지정)"
@@ -532,8 +469,8 @@ def describe(goal: dict[str, Any]) -> str:
         baseline = reference.get("baseline")
         margin = reference.get("margin", DEFAULT_MARGIN)
         if str(goal.get("direction")) == MINIMIZE:
-            # "남은 여유" would be a lie here: the margin comes off the error itself, and the
-            # reader needs to see which arithmetic produced the number in front of them.
+            # 여기서 "남은 여유"는 거짓이 된다: margin이 오차 자체에서 빠지고, 독자는 눈앞의 숫자를
+            # 낸 산술이 어느 것인지 봐야 한다.
             detail = f"기준선 {baseline}에서 {float(margin):.0%} 감소"
         else:
             detail = f"기준선 {baseline} + 남은 여유의 {float(margin):.0%}"
@@ -554,18 +491,17 @@ def describe(goal: dict[str, Any]) -> str:
                 "덜 휘둘리는 지표로 바꾸십시오"
             )
         if reference.get("demands_zero_error"):
-            # The minimize counterpart of the line above, and it needs its own wording: the
-            # metric is not the problem here (mae is the right thing to measure), the margin is.
+            # 위 줄의 minimize 짝이고, 자기 문구가 필요하다: 여기서 문제는 지표가 아니라(mae는 재기에
+            # 맞는 것이다) margin이다.
             line += (
                 f" (도달 불가) — 오차 0을 요구하는 바입니다. --margin을 1보다 작게 두거나, "
                 f"실제 허용 오차를 알고 있다면 --goal-mode fixed --threshold <{metric} 값>으로 "
                 "직접 지정하십시오"
             )
         if reference.get("raised_to_ranking_floor"):
-            # The counterpart of the ``exceeds_ranking_ceiling`` line below, and it has to
-            # carry two numbers the reader cannot recompute: what the margin would have
-            # produced, and why the flag they passed stopped mattering. Silently ignoring
-            # ``--margin`` is the failure mode this wording exists to prevent.
+            # 아래 ``exceeds_ranking_ceiling`` 줄의 짝이고, 독자가 재계산할 수 없는 두 숫자를 날라야
+            # 한다: margin이 낸 바, 그리고 넘긴 플래그가 왜 무의미해졌는지. ``--margin``을 조용히
+            # 무시하는 것이 이 문구가 막으려고 있는 실패 양태다.
             line += (
                 f" — margin이 낸 바는 {reference.get('margin_bar')}였지만, 같은 기준선의"
                 f" 랭킹을 최적 컷에서 자르면 {reference.get('ranking_floor')}"
@@ -579,22 +515,21 @@ def describe(goal: dict[str, Any]) -> str:
                     " 더 어려운 목표를 원하면 그보다 크게 주십시오"
                 )
         if reference.get("exceeds_ranking_ceiling"):
-            # A different kind of out of reach from the one above: not the metric's own
-            # limit but this ranking's. Worth naming as such — the fix is a better
-            # ranking, and the previous wording would have sent the caller to change the
-            # metric, which is the one thing that does not help here.
-            # "이 랭킹으로는" is load-bearing: the ceiling is the baseline's and a better family
-            # beats it — runs have cleared bars sitting above their own card's ceiling. An
-            # unqualified "도달할 수 없다" would read as a verdict on the run.
+            # 위와는 다른 종류의 도달 불가: 지표 자신의 한계가 아니라 이 랭킹의 한계다. 그렇게 이름
+            # 붙일 값이 있다 — 고칠 것은 더 나은 랭킹이고, 예전 문구는 호출자를 지표를 바꾸는 쪽으로
+            # 보냈을 텐데 그것이 여기서 도움이 안 되는 하나뿐인 일이다.
+            # "이 랭킹으로는"이 지지대다: 상한은 기준선의 것이고 더 나은 계열은 그것을 넘는다 —
+            # 자기 카드의 상한 위에 앉은 바를 넘긴 실행이 있었다. 단서 없는 "도달할 수 없다"는 그
+            # 실행에 대한 판정으로 읽힐 것이다.
             passable = reference.get("passable_margin")
             line += (
                 f" — 이 바는 기준선 랭킹의 상한 {reference.get('ranking_ceiling')}를 넘습니다"
                 f" (KS {reference.get('ks')}). 이 랭킹으로는 어떤 임계값을 골라도 닿지 않으니"
                 " 랭킹 자체를 올려야 합니다 — 모델 family나 특성"
             )
-            # The size, on the axis the lever is on. Without it "랭킹을 올려야 한다" is a direction
-            # with no scale, and a family swap reads as a plausible answer to it — which is what
-            # runs have spent an iteration finding out it is not.
+            # 레버가 놓인 축에서의 크기. 그것 없이 "랭킹을 올려야 한다"는 척도 없는 방향이고, 계열
+            # 교체가 그럴듯한 답으로 읽힌다 — 실행들이 반복 하나를 써서 그렇지 않다는 것을 알아낸 것이
+            # 그것이다.
             demanded = reference.get("required_ks")
             if demanded is not None:
                 line += (
@@ -605,10 +540,9 @@ def describe(goal: dict[str, Any]) -> str:
             if passable is not None:
                 line += f". 지금 기준선에서 이 상한 안에 드는 margin은 {passable} 이하입니다"
         if reference.get("inside_baseline_ci"):
-            # A third way a bar can be a bad bar, independent of the two above: not out of
-            # reach but indistinguishable from where it started. Wording stays modest —
-            # attempts are scored on the same rows as the baseline, so this is a statement
-            # about the slice's resolution, not a verdict on an attempt that clears it.
+            # 위 둘과 독립인, 바가 나쁜 바일 수 있는 세 번째 방식: 도달 불가가 아니라 출발점과 구분이
+            # 안 되는 것. 문구는 겸손하게 둔다 — 시도는 기준선과 같은 행에서 채점되므로 이것은
+            # 슬라이스의 분해력에 대한 진술이고 바를 넘긴 시도에 대한 판정이 아니다.
             interval = reference.get("baseline_ci") or []
             unit = "그룹" if reference.get("baseline_ci_unit") == "group" else "행"
             line += (

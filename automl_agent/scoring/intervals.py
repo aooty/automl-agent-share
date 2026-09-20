@@ -1,38 +1,30 @@
-"""How much of a score is the model, and how much is the rows it was measured on.
+"""점수의 얼마가 모델이고 얼마가 그것이 측정된 행인지.
 
-Every number here is a point estimate over one slice, and every comparison is between two of them.
-So each scored split publishes a 95% percentile bootstrap interval on the goal metric, and the
-consumers that compare say whether their difference fits inside it.
+여기 모든 수는 한 슬라이스 위의 점추정이고, 모든 비교는 그 둘 사이의 것이다. 그래서 채점된 분할마다
+목표 지표에 95% percentile bootstrap 구간을 공개하고, 비교하는 소비자들이 자기 차이가 그 안에 드는지
+말한다.
 
-**Two halves, for two different decisions.**
+**두 반쪽, 서로 다른 두 결정을 위해.** 짝지은 쪽이 왜 필요한지, 다중성을 교정하지 않는 이유, train
+분할에 구간을 안 붙이는 이유는 ``docs/rationale.md``.
 
-*Marginal* (:func:`bootstrap_interval`) — the width of one score. **Overlapping intervals mean
-"these rows cannot tell these models apart", not "the models are the same".** And it is sampling
-noise, **not** the selection bias of taking the best of five: that error points one way, and the
-held-back test split is what measures it (:mod:`automl_agent.nodes.holdout`).
+*주변*(:func:`bootstrap_interval`) — 한 점수의 폭. **겹치는 구간은 "이 행들로는 이 모델들을 가를 수
+없다"는 뜻이고 "모델이 같다"가 아니다.** 그리고 그것은 표집 잡음이며, 다섯 중 최고를 취하는
+선택 편향이 **아니다**: 그 오차는 한 방향을 가리키고, 그것을 재는 것은 떼어 둔 test 분할이다
+(:mod:`automl_agent.nodes.holdout`).
 
-*Paired* (:func:`paired_delta`) — resamples the difference itself, because most of a marginal width
-is row noise common to both attempts and cancels. Strictly narrower question: "did *this change* move
-the score on these rows". **It does not fix confounding** — two attempts that each moved two levers
-have a well-resolved difference and still no attribution.
+*짝지은 쪽*(:func:`paired_delta`) — 차이 자체를 재표집한다. 더 좁은 질문이다: "*이 변경*이 이 행들에서
+점수를 움직였는가". **교란은 고치지 못한다** — 레버를 둘씩 움직인 두 시도는 잘 분해된 차이를 갖고도
+귀속은 없다.
 
-**Grouped splits resample whole groups.** A row-level bootstrap over five visits per patient reports
-an interval for ``5 * n_patients`` samples when the data has ``n_patients``, too narrow by a factor
-that grows with cluster size. ``unit`` says which was done.
+**그룹 분할은 그룹 전체를 재표집한다.** 환자당 5회 방문에 대한 행 단위 bootstrap은 데이터에
+``n_patients``가 있을 때 ``5 * n_patients`` 표본에 대한 구간을 보고하고, 그 좁아짐은 군집 크기와 함께
+자란다. ``unit``이 어느 쪽을 했는지 말한다.
 
-**The paired half is a steering instrument, tuned for sensitivity; the test split is the acceptance
-test.** Collapsing the two would make every steering decision as expensive as an acceptance. The
-price of that sensitivity is multiplicity, and **nothing here corrects for it** — the ledger reports
-each comparison on its own terms.
+**짝지은 반쪽은 민감함에 맞춰진 조종 계기이고, test 분할이 승인 시험이다.** 둘을 합치면 모든 조종
+결정이 승인만큼 비싸진다.
 
-Rationale: ``docs/rationale.md``.
-
-Train-split scores deliberately get no interval. An in-sample score's uncertainty is not
-what its width would describe, and the Critic reads the train number for the gap against
-validation, which is about capacity rather than about noise.
-
-Nothing here imports numpy or sklearn at module level: the orchestrator process imports
-this module to *read* a published interval, and only the fixed scripts measure one.
+모듈 수준에 numpy도 sklearn도 import하지 않는다: 오케스트레이터 프로세스는 공개된 구간을 *읽으려고*
+이 모듈을 import하고, 측정하는 것은 고정된 스크립트뿐이다.
 """
 
 from __future__ import annotations
@@ -43,32 +35,28 @@ from typing import Any
 
 from .metrics import MINIMIZE
 
-# Not configurable. Two runs whose intervals were computed at different levels would print
-# numbers that look comparable and are not, and there is no question here that a 90% or a
-# 99% interval answers better.
+# 설정 불가. 서로 다른 수준에서 구간을 계산한 두 실행은 비교 가능해 보이면서 그렇지 않은 숫자를 찍고,
+# 여기에는 90%나 99% 구간이 더 잘 답하는 질문이 없다.
 CI_LEVEL = 0.95
 
-# Enough that each 2.5% tail is estimated from ~10 resamples rather than from 1, and cheap
-# enough to leave switched on unconditionally: one metric over 400 resamples of a 10,000-row
-# split costs well under a second against a fit that costs tens of them. A caller that has
-# to have it cheaper passes ``resamples=0`` and gets no interval rather than a bad one.
+# 각 2.5% 꼬리가 1개가 아니라 ~10개 재표집에서 추정되기에 충분하고, 조건 없이 켜 둘 만큼 싸다:
+# 10,000행 분할의 400회 재표집에 지표 하나는 1초에 훨씬 못 미치는데 적합 하나는 그 수십 배다. 더 싸야
+# 하는 호출자는 ``resamples=0``을 넘겨 나쁜 구간이 아니라 구간 없음을 받는다.
 DEFAULT_RESAMPLES = 400
 
-# Below this there is nothing to resample. An interval from 15 rows would be wide, correct
-# and useless; a *grouped* interval from 4 patients is drawn from four distinct values, so
-# its percentiles are those values. Counted in resampling units — rows, or groups when the
-# split was grouped — because that is what the sample size actually is.
+# 이 아래에는 재표집할 것이 없다. 15행에서 나온 구간은 넓고 옳고 쓸모없다. 환자 4명에서 나온 *그룹*
+# 구간은 서로 다른 값 넷에서 뽑으므로 그 백분위는 그 값들 자체다. 재표집 단위 — 행, 또는 그룹 분할일
+# 때는 그룹 — 로 센다. 표본 크기가 실제로 그것이기 때문이다.
 MIN_UNITS = 20
 
-# A metric undefined in more than a fifth of the resamples has no interval worth
-# publishing: a single-class resample of a 3%-positive split makes ``roc_auc`` undefined,
-# and quietly keeping the resamples that happened to work would report an interval
-# conditioned on being lucky.
+# 재표집의 5분의 1보다 많은 곳에서 정의되지 않는 지표는 공개할 만한 구간이 없다: 양성 3% 분할의
+# 단일 클래스 재표집은 ``roc_auc``를 정의되지 않게 하고, 어쩌다 된 재표집만 조용히 지키는 것은 운이
+# 좋았다는 조건 아래의 구간을 보고하는 일이다.
 MIN_VALID_SHARE = 0.8
 
-# What can be resampled. Named rather than written inline at the two return sites because
-# :func:`automl_agent.privacy.public_result` checks this field against the closed set instead of
-# forwarding any string, and a set the writer and the sieve state separately can drift.
+# 재표집될 수 있는 것. 두 return 자리에 인라인으로 적는 대신 이름을 붙인 이유는
+# :func:`automl_agent.privacy.public_result`가 아무 문자열이나 전달하는 대신 이 필드를 닫힌 집합에 대고
+# 검사하기 때문이고, 쓰는 쪽과 체가 따로 적는 집합은 어긋날 수 있다.
 UNIT_ROW = "row"
 UNIT_GROUP = "group"
 RESAMPLE_UNITS: tuple[str, ...] = (UNIT_ROW, UNIT_GROUP)
@@ -76,14 +64,14 @@ RESAMPLE_UNITS: tuple[str, ...] = (UNIT_ROW, UNIT_GROUP)
 
 @dataclass(frozen=True)
 class Interval:
-    """A percentile bootstrap interval and what was resampled to get it."""
+    """percentile bootstrap 구간, 그리고 그것을 얻으려고 무엇을 재표집했는지."""
 
     low: float
     high: float
     resamples: int
-    # One of :data:`RESAMPLE_UNITS`. Not published as a metric — it is already implied by the protocol's
-    # ``grouped_by`` — but logged, because an interval measured the wrong way is narrow
-    # rather than absent and nothing else in the record would say so.
+    # :data:`RESAMPLE_UNITS` 중 하나. 지표로 공개되지 않는다 — 규약의 ``grouped_by``가 이미 함의한다 —
+    # 그러나 로그에 남긴다. 잘못된 방식으로 측정된 구간은 없는 것이 아니라 좁은 것이고, 기록의 다른
+    # 무엇도 그것을 말해 주지 않기 때문이다.
     unit: str
 
     @property
@@ -97,12 +85,75 @@ class Interval:
     def flatten(self, metric: str) -> dict[str, float]:
         """``{"<metric>_ci_low": ..., "<metric>_ci_high": ...}``.
 
-        Two floats rather than one pair because :func:`automl_agent.privacy.public_result`
-        keeps only numeric metric values — a tuple would be dropped on the way to the state
-        channel the report and the Critic read, which is the one place the interval has to
-        arrive.
+        한 쌍이 아니라 float 둘인 이유: :func:`automl_agent.privacy.public_result`는 숫자인 지표 값만
+        지키므로, tuple은 보고서와 Critic이 읽는 state 채널로 가는 길에 버려진다. 그 채널이 구간이
+        도착해야 하는 하나뿐인 곳이다.
         """
         return {f"{metric}_ci_low": self.low, f"{metric}_ci_high": self.high}
+
+
+def _sample_units(y_true: Any, groups: Any, resamples: int) -> tuple[Any, list[Any] | None, int, str] | None:
+    """``(y 배열, 단위별 행 인덱스, 단위 수, 단위 이름)``, 또는 재표집할 것이 없으면 ``None``.
+
+    두 측정 함수가 같은 일곱 줄로 시작했고, 그 순서가 계약의 일부다: ``resamples``와 빈 분할을 먼저 보고,
+    그다음에야 :func:`_units`가 어긋난 group 배열에 raise한다.
+    """
+    import numpy as np
+
+    if resamples <= 0:
+        return None
+    y_arr = np.asarray(y_true)
+    n_rows = int(len(y_arr))
+    if n_rows == 0:
+        return None
+    rows_by_unit, unit = _units(groups, n_rows)
+    n_units = n_rows if rows_by_unit is None else len(rows_by_unit)
+    if n_units < MIN_UNITS:
+        return None
+    return y_arr, rows_by_unit, n_units, unit
+
+
+def _resample(
+    measure: Callable[[Any], float | None],
+    rows_by_unit: list[Any] | None,
+    n_units: int,
+    seed: int,
+    resamples: int,
+) -> list[float] | None:
+    """재표집 인덱스마다 ``measure``를 불러 모은 값들, 또는 쓸 만한 것이 덜 모이면 ``None``.
+
+    두 측정 함수가 공유하는 루프다. 한쪽은 점수를, 다른 쪽은 두 점수의 차이를 재지만 뽑는 방식은 같아야
+    한다 — 같은 ``seed``에서 같은 인덱스가 나오는 것이 두 반복의 구간을 비교할 수 있게 만드는 것이다.
+
+    퇴화한 재표집은 ``None``을 돌려주거나 raise할 수 있다. 둘 다 "여기서는 정의되지 않음"이고 실패한
+    실행이 아니다. 그렇게 버려진 것이 :data:`MIN_VALID_SHARE`를 넘으면 구간 대신 ``None``이 된다.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    values: list[float] = []
+    for _ in range(resamples):
+        picks = rng.integers(0, n_units, n_units)
+        index = picks if rows_by_unit is None else np.concatenate([rows_by_unit[p] for p in picks])
+        try:
+            value = measure(index)
+        except (ValueError, IndexError, ZeroDivisionError):
+            continue
+        if value is None or not np.isfinite(value):
+            continue
+        values.append(float(value))
+    if len(values) < MIN_VALID_SHARE * resamples:
+        return None
+    return values
+
+
+def _percentiles(values: list[float]) -> tuple[float, float]:
+    """:data:`CI_LEVEL`의 양끝 백분위. 꼬리를 한 곳에서만 계산하려고 있다."""
+    import numpy as np
+
+    tail = (1.0 - CI_LEVEL) / 2.0 * 100.0
+    low, high = (float(x) for x in np.percentile(values, [tail, 100.0 - tail]))
+    return low, high
 
 
 def bootstrap_interval(
@@ -115,68 +166,52 @@ def bootstrap_interval(
     seed: int = 42,
     resamples: int = DEFAULT_RESAMPLES,
 ) -> Interval | None:
-    """Resample the scored split ``resamples`` times and return the percentile interval.
+    """채점된 분할을 ``resamples``번 재표집해 백분위 구간을 돌려준다.
 
-    ``score`` is a callable over ``(y_true, pred, proba)``, so this module knows nothing about which
-    metric or which library — the two fixed scripts pass their own scorer and stay the only importers
-    of sklearn. A degenerate resample may return ``None`` or raise ``ValueError``; both are "undefined
-    here", not a failed run.
+    ``score``는 ``(y_true, pred, proba)`` 위의 callable이므로 이 모듈은 어느 지표인지도 어느
+    라이브러리인지도 모른다 — 고정된 스크립트 둘이 자기 scorer를 넘기고 sklearn의 유일한 import자로
+    남는다.
 
-    **``None``, never an exception**, when there is no interval worth publishing (too few units,
-    ``resamples`` at 0, a metric undefined too often). Callers read that as "not measured", so a
-    degenerate split costs a disclosure rather than an attempt.
+    공개할 만한 구간이 없을 때(단위가 너무 적음, ``resamples``가 0, 지표가 너무 자주 정의되지 않음)
+    **예외가 아니라 ``None``**. 호출자들이 그것을 "측정되지 않음"으로 읽으므로, 퇴화한 분할은 시도가
+    아니라 공개 한 줄을 문다.
 
-    **Deterministic in ``seed``** — which is what lets two iterations' intervals be compared at all.
+    **``seed``에 대해 결정적** — 그것이 두 반복의 구간을 비교할 수 있게 만드는 것이다.
     """
     import numpy as np
 
-    if resamples <= 0:
+    prepared = _sample_units(y_true, groups, resamples)
+    if prepared is None:
         return None
-    y_arr = np.asarray(y_true)
-    n_rows = int(len(y_arr))
-    if n_rows == 0:
-        return None
-
-    # Raises on a misaligned group array rather than zipping to the shorter of the two:
-    # resampling the wrong groups yields a narrow interval, which reads as a confident
-    # measurement rather than as a bug — the same argument ``split_three_way`` makes.
-    rows_by_unit, unit = _units(groups, n_rows)
-    n_units = n_rows if rows_by_unit is None else len(rows_by_unit)
-    if n_units < MIN_UNITS:
-        return None
+    y_arr, rows_by_unit, n_units, unit = prepared
 
     pred_arr = np.asarray(pred)
     proba_arr = None if proba is None else np.asarray(proba)
-    rng = np.random.default_rng(seed)
-    values: list[float] = []
-    for _ in range(resamples):
-        picks = rng.integers(0, n_units, n_units)
-        index = picks if rows_by_unit is None else np.concatenate([rows_by_unit[p] for p in picks])
-        try:
-            value = score(
-                y_arr[index],
-                pred_arr[index],
-                None if proba_arr is None else proba_arr[index],
-            )
-        except (ValueError, IndexError, ZeroDivisionError):
-            continue
-        if value is None or not np.isfinite(value):
-            continue
-        values.append(float(value))
 
-    if len(values) < MIN_VALID_SHARE * resamples:
+    def measure(index: Any) -> float | None:
+        return score(
+            y_arr[index],
+            pred_arr[index],
+            None if proba_arr is None else proba_arr[index],
+        )
+
+    values = _resample(measure, rows_by_unit, n_units, seed, resamples)
+    if values is None:
         return None
-    tail = (1.0 - CI_LEVEL) / 2.0 * 100.0
-    low, high = (float(x) for x in np.percentile(values, [tail, 100.0 - tail]))
+    low, high = _percentiles(values)
     return Interval(low=round(low, 6), high=round(high, 6), resamples=len(values), unit=unit)
 
 
 def _units(groups: Any, n_rows: int) -> tuple[list[Any] | None, str]:
-    """``(row indices per resampling unit, unit name)``.
+    """``(재표집 단위별 행 인덱스, 단위 이름)``.
 
-    ``None`` for the row-level path, where the unit *is* the row and building a list of
-    1-element index arrays would only cost memory. Otherwise one index array per distinct
-    group, which is what makes a resample draw whole patients.
+    행 단위 경로에서는 ``None``이다. 거기서 단위는 행 *자체*이고, 1개짜리 인덱스 배열의 목록을 세우는
+    것은 메모리만 쓴다. 그 밖에는 서로 다른 그룹마다 인덱스 배열 하나이고, 그것이 재표집을 환자 단위로
+    뽑게 만드는 것이다.
+
+    길이가 어긋난 group 배열에는 둘 중 짧은 쪽으로 맞추는 대신 raise한다: 엉뚱한 그룹을 재표집하면
+    좁은 구간이 나오고, 그것은 버그가 아니라 자신 있는 측정으로 읽힌다 — ``split_three_way``가 대는
+    것과 같은 논거다.
     """
     import numpy as np
 
@@ -193,30 +228,28 @@ def _units(groups: Any, n_rows: int) -> tuple[list[Any] | None, str]:
 
 
 # --------------------------------------------------------------------------- #
-# The paired half: resampling a difference instead of two scores
+# 짝지은 반쪽: 두 점수가 아니라 차이를 재표집한다
 # --------------------------------------------------------------------------- #
 
-# Where a paired comparison lands in ``result.json``. A block of its own rather than four
-# more keys in ``metrics``, because these are properties of a *comparison* and not of the
-# model on these rows: ``p_better`` sitting beside ``roc_auc`` in the metrics dict would ride
-# into the report's metric table and read as a score. The precedent for a diagnostic living
-# in ``metrics`` — ``balanced_accuracy_cut_headroom`` — is a single-model measurement, which this is not.
+# 짝지은 비교가 ``result.json``에서 앉는 곳. ``metrics``에 키 넷을 더하는 대신 자기 블록인 이유는
+# 이들이 이 행들 위의 모델이 아니라 *비교*의 성질이기 때문이다: metrics dict에서 ``roc_auc`` 옆에 앉은
+# ``p_better``는 보고서의 지표 표로 실려 가 점수로 읽힌다. ``metrics``에 사는 진단의 선례
+# — ``balanced_accuracy_cut_headroom`` — 는 단일 모델 측정이고 이것은 그렇지 않다.
 PAIRED_KEY = "paired"
 
-# The four numbers, named once so the writer and every reader cannot disagree. Same argument
-# as :meth:`Interval.flatten`: four floats rather than a pair plus a scalar, because
-# :func:`automl_agent.privacy.public_result` keeps numbers and drops structures.
+# 네 숫자, 쓰는 쪽과 모든 읽는 쪽이 어긋날 수 없게 한 번만 이름 붙인다. :meth:`Interval.flatten`과 같은
+# 논거다: 쌍 더하기 스칼라가 아니라 float 넷인 이유는
+# :func:`automl_agent.privacy.public_result`가 숫자를 지키고 구조를 버리기 때문이다.
 PAIRED_FIELDS: tuple[str, ...] = ("delta_vs_best", "delta_ci_low", "delta_ci_high", "p_better")
 
 PAIRED_MEASURED = "measured"
 PAIRED_SKIPPED = "skipped"
-# Same argument as :data:`RESAMPLE_UNITS`: the sieve has to check ``status`` against the words
-# this module writes, not against ``str``.
+# :data:`RESAMPLE_UNITS`와 같은 논거: 체는 ``status``를 ``str``이 아니라 이 모듈이 쓰는 단어들에 대고
+# 검사해야 한다.
 PAIRED_STATUSES: tuple[str, ...] = (PAIRED_MEASURED, PAIRED_SKIPPED)
 
-# Why a comparison was not made. Published rather than left absent, because "no paired
-# verdict" and "the paired verdict found nothing" are different facts and a reader with only
-# the first would take silence for the second.
+# 비교가 이뤄지지 않은 이유. 없는 채로 두는 대신 공개하는 이유는 "짝지은 판정 없음"과 "짝지은 판정이
+# 아무것도 못 찾음"이 다른 사실이고, 앞의 것만 가진 독자는 침묵을 뒤의 것으로 받아들이기 때문이다.
 PAIRED_REASONS: dict[str, str] = {
     "no_baseline": "짝지을 직전 최고가 없습니다 — 첫 측정입니다",
     "baseline_missing": "직전 최고의 행별 예측 파일이 없습니다",
@@ -227,18 +260,17 @@ PAIRED_REASONS: dict[str, str] = {
 
 @dataclass(frozen=True)
 class PairedDelta:
-    """A resampled *difference* between two attempts scored on the same rows."""
+    """같은 행에서 채점된 두 시도 사이의 재표집된 *차이*."""
 
-    # Always candidate minus baseline, whichever way the metric goes. A signed difference
-    # that flipped with the metric's direction would make the ledger's "직전 최고 대비
-    # -0.0500" and this number disagree in sign on ``rmse`` — the direction is applied to
-    # ``p_better`` alone, where it belongs.
+    # 지표가 어느 쪽으로 가든 항상 candidate 빼기 baseline. 지표의 방향에 따라 뒤집히는 부호 있는 차이는
+    # ledger의 "직전 최고 대비 -0.0500"과 이 숫자가 ``rmse``에서 부호로 어긋나게 만든다 — 방향은
+    # ``p_better``에만, 그것이 속한 곳에만 적용된다.
     delta: float
     low: float
     high: float
-    # Share of resamples in which the candidate was *better*, so it reads the same way on a
-    # minimize metric. Ties count as not better: two attempts with bit-identical predictions
-    # get 0.0, which is the honest reading of "no resample showed an improvement".
+    # candidate가 *더 좋았던* 재표집의 비율. 그래서 minimize 지표에서도 같은 방식으로 읽힌다. 동점은
+    # 더 좋지 않은 것으로 센다: 비트까지 같은 예측을 낸 두 시도는 0.0을 받고, 그것이 "어떤 재표집도
+    # 개선을 보이지 않았다"의 정직한 독법이다.
     p_better: float
     resamples: int
     unit: str
@@ -249,16 +281,16 @@ class PairedDelta:
 
     @property
     def resolved(self) -> bool:
-        """Whether the interval of the difference excludes zero.
+        """차이의 구간이 0을 배제하는지.
 
-        Narrow on purpose, exactly like :func:`contains`: excluding zero means these rows
-        did separate the two attempts. It says nothing about *what* separated them — a
-        transition that moved two levers has a well-resolved difference and no attribution.
+        :func:`contains`와 정확히 같게 좁다: 0을 배제한다는 것은 이 행들이 두 시도를 실제로 갈랐다는
+        뜻이다. *무엇이* 그들을 갈랐는지는 아무 말도 하지 않는다 — 레버를 둘 움직인 전이는 잘 분해된
+        차이를 갖고도 귀속이 없다.
         """
         return not (self.low <= 0.0 <= self.high)
 
     def flatten(self) -> dict[str, float]:
-        """The four published numbers, keyed by :data:`PAIRED_FIELDS`."""
+        """공개되는 네 숫자, :data:`PAIRED_FIELDS`를 키로."""
         return dict(
             zip(PAIRED_FIELDS, (self.delta, self.low, self.high, self.p_better), strict=True)
         )
@@ -275,31 +307,24 @@ def paired_delta(
     seed: int = 42,
     resamples: int = DEFAULT_RESAMPLES,
 ) -> PairedDelta | None:
-    """Resample the *difference* between two predictions of the same rows.
+    """같은 행에 대한 두 예측 사이의 *차이*를 재표집한다.
 
-    **Each resample scores both on the identical draw** — the whole point, and why this cannot be
-    assembled out of two :func:`bootstrap_interval` calls.
+    **재표집마다 동일한 뽑기 위에서 둘 다 채점한다** — 그것이 요점 전부이고,
+    :func:`bootstrap_interval` 두 번으로 이것을 조립할 수 없는 이유다.
 
-    **``direction`` is required, never defaulted**: it decides which sign of ``delta`` counts toward
-    ``p_better``, and a wrong default reports an ``rmse`` regression as a 0.99 probability of
-    improvement.
+    **``direction``은 필수이고 기본값이 없다**: ``delta``의 어느 부호가 ``p_better``에 세어지는지를
+    그것이 정하고, 잘못된 기본값은 ``rmse``의 악화를 개선 확률 0.99로 보고한다.
 
-    ``None`` on the same three conditions :func:`bootstrap_interval` uses. **A *misaligned* baseline
-    does raise** — predictions of a different row count are not this split's, and pairing them gives a
-    narrow interval around a meaningless number.
+    :func:`bootstrap_interval`과 같은 세 조건에서 ``None``. **길이가 *어긋난* baseline은 raise한다** —
+    다른 행 수의 예측은 이 분할의 것이 아니고, 그것을 짝지으면 무의미한 숫자 주위의 좁은 구간이 나온다.
     """
     import numpy as np
 
-    if resamples <= 0:
+    prepared = _sample_units(y_true, groups, resamples)
+    if prepared is None:
         return None
-    y_arr = np.asarray(y_true)
+    y_arr, rows_by_unit, n_units, unit = prepared
     n_rows = int(len(y_arr))
-    if n_rows == 0:
-        return None
-    rows_by_unit, unit = _units(groups, n_rows)
-    n_units = n_rows if rows_by_unit is None else len(rows_by_unit)
-    if n_units < MIN_UNITS:
-        return None
 
     sides = [_side(part, n_rows) for part in (candidate, baseline)]
     (a_pred, a_proba), (b_pred, b_proba) = sides
@@ -319,24 +344,11 @@ def paired_delta(
     if observed is None or not np.isfinite(observed):
         return None
 
-    rng = np.random.default_rng(seed)
-    values: list[float] = []
-    for _ in range(resamples):
-        picks = rng.integers(0, n_units, n_units)
-        index = picks if rows_by_unit is None else np.concatenate([rows_by_unit[p] for p in picks])
-        try:
-            value = difference(index)
-        except (ValueError, IndexError, ZeroDivisionError):
-            continue
-        if value is None or not np.isfinite(value):
-            continue
-        values.append(float(value))
-
-    if len(values) < MIN_VALID_SHARE * resamples:
+    values = _resample(difference, rows_by_unit, n_units, seed, resamples)
+    if values is None:
         return None
     deltas = np.asarray(values)
-    tail = (1.0 - CI_LEVEL) / 2.0 * 100.0
-    low, high = (float(x) for x in np.percentile(deltas, [tail, 100.0 - tail]))
+    low, high = _percentiles(values)
     better = deltas < 0.0 if direction == MINIMIZE else deltas > 0.0
     return PairedDelta(
         delta=round(float(observed), 6),
@@ -349,11 +361,10 @@ def paired_delta(
 
 
 def _side(part: tuple[Any, Any], n_rows: int) -> tuple[Any, Any]:
-    """One attempt's ``(pred, proba)`` as arrays, checked against the row count.
+    """한 시도의 ``(pred, proba)``를 배열로, 행 수에 대고 검사해서.
 
-    Raises rather than truncating, for the reason :func:`_units` does: a length mismatch
-    means these are not the rows the caller thinks they are, and the cost of guessing is a
-    confident number about the wrong comparison.
+    :func:`_units`와 같은 이유로 자르는 대신 raise한다: 길이 어긋남은 이것이 호출자가 생각하는 행이
+    아니라는 뜻이고, 짐작의 대가는 엉뚱한 비교에 대한 자신 있는 숫자다.
     """
     import numpy as np
 
@@ -374,16 +385,16 @@ def _side(part: tuple[Any, Any], n_rows: int) -> tuple[Any, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Reading one back
+# 하나를 되읽기
 # --------------------------------------------------------------------------- #
 
 
 def interval_of(metrics: Mapping[str, Any] | None, metric: str) -> tuple[float, float] | None:
-    """The published bounds for ``metric``, or ``None`` if this result has none.
+    """``metric``에 공개된 양끝, 또는 이 결과에 그것이 없으면 ``None``.
 
-    The reader half of :meth:`Interval.flatten`. Every consumer goes through it rather than
-    spelling the two key names out, because a result written before intervals existed —
-    or one whose split was too small for one — has to read as "not measured" everywhere.
+    :meth:`Interval.flatten`의 읽는 반쪽. 모든 소비자가 두 키 이름을 적는 대신 이것을 지나는 이유는
+    구간이 있기 전에 쓰인 결과 — 또는 분할이 구간에 너무 작았던 결과 — 가 모든 곳에서 "측정되지 않음"으로
+    읽혀야 하기 때문이다.
     """
     if not metrics:
         return None
@@ -395,11 +406,10 @@ def interval_of(metrics: Mapping[str, Any] | None, metric: str) -> tuple[float, 
 
 
 def contains(bounds: tuple[float, float] | None, value: Any) -> bool:
-    """Whether ``value`` falls inside the interval. ``False`` when either is missing.
+    """``value``가 구간 안에 드는지. 어느 쪽이든 없으면 ``False``.
 
-    The one comparison the consumers make, and its meaning is narrow on purpose: a value
-    inside the interval is one *these rows cannot distinguish* from the measured score. It
-    is not a hypothesis test, and it does not say the two numbers are equal.
+    소비자들이 하는 하나뿐인 비교이고, 그 뜻은 일부러 좁다: 구간 안의 값은 *이 행들이 측정된 점수와
+    구분할 수 없는* 값이다. 가설 검정이 아니고, 두 숫자가 같다고 말하지도 않는다.
     """
     number = as_number(value)
     if bounds is None or number is None:
@@ -408,9 +418,9 @@ def contains(bounds: tuple[float, float] | None, value: Any) -> bool:
 
 
 def describe_interval(metric: str, score: Any, bounds: tuple[float, float] | None) -> str:
-    """One Korean fragment — ``f1=0.7412 (95% CI 0.7108~0.7702, 폭 0.0594)``.
+    """한글 조각 하나 — ``f1=0.7412 (95% CI 0.7108~0.7702, 폭 0.0594)``.
 
-    Empty string when there is nothing to say, so a caller can append it unconditionally.
+    말할 것이 없으면 빈 문자열이므로 호출자가 조건 없이 이어 붙일 수 있다.
     """
     value = as_number(score)
     if bounds is None:
@@ -423,17 +433,16 @@ def describe_interval(metric: str, score: Any, bounds: tuple[float, float] | Non
 def paired_of(
     result: Mapping[str, Any] | None, *, baseline_iteration: Any
 ) -> dict[str, Any] | None:
-    """This result's paired comparison — but only if it is the pair the caller is reporting.
+    """이 결과의 짝지은 비교 — 단, 호출자가 보고하는 그 짝일 때만.
 
-    ``baseline_iteration`` is not a filter, it is the invariant. The published fields are named
-    ``delta_vs_best`` and ``p_better``, so both must be about the *same* baseline as the sentence they
-    render into — subtracting against iteration 1 while printing a P computed against iteration 4 gives
-    a line where every number is real and the claim is not. Only here are both the block and the
-    caller's baseline in hand, so the check is required rather than optional, and a mismatch reads
-    "not measured" instead of being quietly rendered.
+    ``baseline_iteration``은 필터가 아니라 불변식이다. 공개되는 필드 이름이 ``delta_vs_best``와
+    ``p_better``이므로 둘 다 자기가 렌더되는 문장과 *같은* baseline에 대한 것이어야 한다 — iteration 1에
+    대고 빼면서 iteration 4에 대고 계산된 P를 찍으면, 모든 숫자가 진짜이고 주장은 아닌 줄이 나온다.
+    블록과 호출자의 baseline이 둘 다 손에 있는 곳은 여기뿐이라 검사가 선택이 아니라 필수이고, 어긋남은
+    조용히 렌더되는 대신 "측정되지 않음"으로 읽힌다.
 
-    ``None`` also for a skipped comparison, and for a block missing any of :data:`PAIRED_FIELDS` —
-    what a result written before this existed looks like.
+    건너뛴 비교, 그리고 :data:`PAIRED_FIELDS` 중 하나라도 없는 블록에도 ``None``이다 — 이것이 있기 전에
+    쓰인 결과가 그렇게 생겼다.
     """
     block = (result or {}).get(PAIRED_KEY)
     if not isinstance(block, Mapping) or block.get("status") != PAIRED_MEASURED:
@@ -447,11 +456,10 @@ def paired_of(
 
 
 def describe_paired(block: Mapping[str, Any] | None) -> str:
-    """One Korean fragment for a ledger row, or ``""`` when there is nothing to say.
+    """ledger 한 행을 위한 한글 조각, 또는 말할 것이 없으면 ``""``.
 
-    Deliberately states the verdict and stops. "0과 구분되지 않음" is the whole claim an
-    interval of a difference supports — not that the change did nothing, and not which of
-    the levers in that transition is responsible.
+    일부러 판정을 말하고 멈춘다. "0과 구분되지 않음"이 차이의 구간이 뒷받침하는 주장 전부다 — 변경이
+    아무것도 안 했다는 것도, 그 전이의 레버 중 어느 것 탓인지도 아니다.
     """
     if not isinstance(block, Mapping):
         return ""
@@ -469,17 +477,16 @@ def describe_paired(block: Mapping[str, Any] | None) -> str:
         f"P(개선) {p_better:.3f} — {verdict}]"
     )
     if block.get("threads_changed") is True:
-        # Appended rather than folded into the verdict, because the interval is still the
-        # interval: those two prediction vectors really do differ by that much. What the row
-        # can no longer say is that the plan is why: the same config across thread counts spans
-        # about as much as one of these intervals is wide (:mod:`automl_agent.threads`), so the
-        # environment is not a rounding error next to what is being claimed.
+        # 판정에 접어 넣는 대신 덧붙인다. 구간은 여전히 그 구간이기 때문이다: 두 예측 벡터는 정말 그만큼
+        # 다르다. 이 행이 더 이상 말할 수 없는 것은 계획이 그 이유라는 것이다 — 스레드 수를 넘나드는 같은
+        # 설정이 이 구간 하나의 폭만큼 벌어지므로(:mod:`automl_agent.threads`), 환경은 주장되는 것 옆에서
+        # 반올림 오차가 아니다.
         text += " [baseline과 스레드 상태가 다릅니다 — 이 Δ에는 환경 차이가 섞여 있습니다]"
     return text
 
 
 def _iteration(value: Any) -> int | None:
-    """An iteration number as ``int``, or ``None``. ``bool`` is not an iteration number."""
+    """반복 번호를 ``int``로, 또는 ``None``. ``bool``은 반복 번호가 아니다."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return int(value)
@@ -491,19 +498,18 @@ def resolution_note(
     *,
     others: Mapping[str, Any] | None = None,
 ) -> str:
-    """What this attempt's slice can and cannot resolve, as a paragraph for a prompt.
+    """이 시도의 슬라이스가 무엇을 분해할 수 있고 무엇을 못 하는지, 프롬프트용 한 단락으로.
 
-    ``others`` maps a label to a number this attempt will be compared against — the bar, each prior
-    score — and every one landing inside the interval is named. That answers the Critic's actual
-    failure mode: handed two point estimates and asked why the second is lower, it diagnosed a cause
-    for a difference the rows never established.
+    ``others``는 이 시도가 비교될 숫자에 라벨을 붙인 것이고 — 바, 이전 점수들 — 구간 안에 드는 것마다
+    이름이 불린다. 그것이 Critic의 실제 실패 양태에 답한다: 점추정 둘을 건네받고 왜 두 번째가 더 낮은지
+    물으면, 행들이 세운 적 없는 차이에 대해 원인을 진단했다.
 
-    **Deliberately does not say what to do about it.** An overlap can mean the knob did nothing or
-    that the slice is too small to see what it did; only the rest of the evidence separates those, and
-    a prescription here would preempt the diagnosis.
+    **일부러 그것에 대해 무엇을 할지는 말하지 않는다.** 겹침은 손잡이가 아무것도 안 했다는 뜻일 수도,
+    슬라이스가 그것이 한 일을 보기에 너무 작다는 뜻일 수도 있다. 그 둘을 가르는 것은 나머지 증거뿐이고,
+    여기서의 처방은 진단을 앞질러 버린다.
 
-    **A missing interval gets its own sentence, never silence** — the section exists either way, and an
-    empty one reads as "no uncertainty".
+    **없는 구간은 침묵이 아니라 자기 문장을 받는다** — 절은 어느 쪽이든 존재하고, 빈 절은 "불확실성
+    없음"으로 읽힌다.
     """
     bounds = interval_of(metrics, metric)
     if bounds is None:
@@ -531,7 +537,7 @@ def resolution_note(
 
 
 def as_number(value: Any) -> float | None:
-    """``float`` if this is a real number, else ``None``. ``bool`` is not a number here."""
+    """실수면 ``float``, 아니면 ``None``. 여기서 ``bool``은 숫자가 아니다."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)

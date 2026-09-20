@@ -1,29 +1,25 @@
-"""Profiling node: turns the private data reference into a public dataset card.
+"""Profiling 노드: 비공개 데이터 참조를 공개 데이터셋 카드로 바꾼다.
 
-Execution node — no LLM, and the graph's entry point. It reads the one channel the
-reasoning nodes never touch (``data_ref``) and writes the one they all read
-(``dataset_card``), so the card is the *only* thing that crosses from data to
-reasoning. That crossing is a node boundary, not a convention.
+실행 노드 — LLM 없음, 그리고 그래프의 진입점. 추론 노드가 절대 건드리지 않는 하나의 채널(``data_ref``)을
+읽어 그들이 모두 읽는 하나의 채널(``dataset_card``)에 쓰므로, 카드는 데이터에서 추론으로 건너오는
+*유일한* 것이다. 그 건넘은 관례가 아니라 노드 경계다.
 
-Like training, the work happens in a subprocess (``scripts/profile.py``): pandas is
-never imported into the process that renders prompts, so a data row cannot end up in
-one by accident.
+training처럼 작업은 서브프로세스(``scripts/profile.py``)에서 일어난다: pandas는 프롬프트를 렌더하는
+프로세스에 한 번도 import되지 않으므로, 데이터 행이 실수로 프롬프트에 들어갈 수 없다.
 
-Unlike training, a failure here is *not* handed to the Critic. A missing card is a
-setup error, not an experimental outcome — there is nothing to diagnose and no plan
-worth making without it — so this node raises and the run stops.
+training과 달리 여기서의 실패는 Critic에게 넘기지 *않는다*. 없는 카드는 실험 결과가 아니라 설정 오류다 —
+진단할 것도, 그것 없이 세울 만한 계획도 없다 — 그래서 이 노드는 raise하고 실행은 멈춘다.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from ..config import PROFILE_SCRIPT, PROFILE_TIMEOUT_SEC, RunConfig, decode_output, utf8_env
+from ..config import PROFILE_SCRIPT, PROFILE_TIMEOUT_SEC, RunConfig, run_fixed_script
 from ..privacy import CardSchemaError, public_card, register_private, validate_card
 from ..scoring.goal import describe, missing_bar_message, resolve_goal
 from ..scoring.metrics import TASK_REGRESSION, card_task, metrics_for, task_of
@@ -32,25 +28,25 @@ from ..state import AutoMLState
 
 
 class ProfilingFailed(RuntimeError):
-    """The card could not be built, so there is nothing to plan against."""
+    """카드를 세울 수 없었으므로 계획을 세울 대상이 없다."""
 
 
 def profiling(state: AutoMLState, *, config: RunConfig) -> dict:
-    """Return ``{"dataset_card": ..., "goal": ...}``, or nothing when a card is present."""
+    """``{"dataset_card": ..., "goal": ...}``, 또는 카드가 이미 있으면 아무것도."""
     reference = dict(state.get("data_ref") or {})
     if state.get("dataset_card"):
-        # A hand-written card (or a resumed run) wins: profiling never overwrites it.
+        # 손으로 쓴 카드(또는 재개된 실행)가 이긴다: profiling은 그것을 절대 덮어쓰지 않는다.
         card = dict(state["dataset_card"])
         assert_protocol_matches(card, config, reference)
-        # The goal on this path was derived in ``initial_state``, from this same card —
-        # there is nothing left to measure, so it is checked rather than recomputed.
+        # 이 경로의 목표는 같은 카드에서 ``initial_state``가 유도했다 — 더 잴 것이 없으므로 다시
+        # 계산하는 대신 검사한다.
         assert_goal_is_usable(card, dict(state.get("goal") or {}), config)
         return {}
 
     path = reference.get("path")
     if not path:
-        # No real data and no card: the executor will synthesise from the card's
-        # declared shape, and there is nothing here to profile.
+        # 실제 데이터도 카드도 없다: executor가 카드가 선언한 모양에서 합성할 것이고, 여기에는 프로파일할
+        # 것이 없다.
         return {}
 
     register_private(path)
@@ -59,14 +55,13 @@ def profiling(state: AutoMLState, *, config: RunConfig) -> dict:
         str(reference.get("target_column") or "target"),
         config,
     )
-    # In "auto" mode the goal is derived here, from the freshly measured reference
-    # baseline, because this is the first moment the baseline exists — ``initial_state``
-    # could only guess. In "fixed" mode this returns the same bar it was seeded with.
+    # "auto" 모드에서 목표는 방금 측정된 기준 baseline에서 여기서 유도된다. baseline이 존재하는 첫
+    # 순간이기 때문이다 — ``initial_state``는 짐작밖에 할 수 없었다. "fixed" 모드에서는 씨앗으로 받은
+    # 바를 그대로 돌려준다.
     #
-    # And this is also the first moment the *task* is known on the ``--data`` path, so it is
-    # where a metric belonging to the other task gets swapped for one that can score this
-    # target (:func:`automl_agent.scoring.goal.resolve_goal`). ``initial_state`` had no card and could
-    # not have caught it.
+    # 그리고 ``--data`` 경로에서 *task*가 알려지는 첫 순간도 여기이므로, 다른 task에 속한 지표가 이 정답
+    # 열을 채점할 수 있는 지표로 바뀌는 곳도 여기다(:func:`automl_agent.scoring.goal.resolve_goal`).
+    # ``initial_state``에는 카드가 없어 잡아낼 수 없었다.
     goal, substitution = resolve_goal(
         card,
         metric=config.metric,
@@ -81,14 +76,14 @@ def profiling(state: AutoMLState, *, config: RunConfig) -> dict:
     if goal != dict(state.get("goal") or {}):
         print(f"  [profiling] 목표: {describe(goal)}")
     try:
-        # The card comes from our own fixed script, so a violation here means that script
-        # regressed — exactly the case where stopping beats forwarding. A setup error,
-        # like the rest of this node's failures, so it is not handed to the Critic.
+        # 카드는 우리 자신의 고정된 스크립트에서 왔으므로, 여기서의 위반은 그 스크립트가 퇴행했다는
+        # 뜻이다 — 넘기기보다 멈추는 것이 나은 바로 그 경우다. 이 노드의 다른 실패들처럼 설정 오류이므로
+        # Critic에게 넘기지 않는다.
         validate_card(card)
     except CardSchemaError as exc:
         raise ProfilingFailed(str(exc)) from exc
-    # Our own script just wrote this one, so a mismatch here means the protocol changed
-    # under a resumed run rather than that the operator supplied a foreign card.
+    # 방금 우리 스크립트가 이것을 썼으므로, 여기서의 어긋남은 운영자가 남의 카드를 넣었다는 것이 아니라
+    # 재개된 실행 아래에서 규약이 바뀌었다는 뜻이다.
     assert_protocol_matches(card, config, reference)
     return {"dataset_card": public_card(card), "goal": goal}
 
@@ -96,22 +91,20 @@ def profiling(state: AutoMLState, *, config: RunConfig) -> dict:
 def assert_protocol_matches(
     card: dict[str, Any], config: RunConfig, reference: dict[str, Any] | None = None
 ) -> None:
-    """Stop when the card's baseline was measured over different rows than this run uses.
+    """카드의 baseline이 이 실행이 쓰는 것과 다른 행에서 측정되었으면 멈춘다.
 
-    The goal threshold comes from that baseline, so a protocol mismatch means the bar and the scores
-    it is compared against come from two different splits — a comparison that reads as a result and
-    is not one. Same stance as ``--on-missing-target``: a silently incomparable number is worse than
-    a stopped run. Cards with no ``protocol`` block predate the field and are accepted
-    (:func:`automl_agent.scoring.splits.protocol_mismatch`).
+    목표 문턱값이 그 baseline에서 오므로, 규약 어긋남은 바와 그것에 견줄 점수가 서로 다른 두 분할에서
+    왔다는 뜻이다 — 결과로 읽히면서 결과가 아닌 비교다. ``--on-missing-target``과 같은 태도: 조용히
+    비교 불가능한 수는 멈춘 실행보다 나쁘다. ``protocol`` 블록이 없는 카드는 그 필드보다 앞서므로
+    받아들인다(:func:`automl_agent.scoring.splits.protocol_mismatch`).
 
-    Group column read off ``data_ref``, not ``config``, because that is where the two sources are
-    already resolved: a card profiled with ``--group-column`` names it in its private ``data`` block,
-    so a ``--dataset-card`` run inherits it and is *not* refused for omitting the flag — while an
-    explicit flag disagreeing with the card still is.
+    group 열을 ``config``가 아니라 ``data_ref``에서 읽는 이유는 두 출처가 이미 거기서 해소되기 때문이다:
+    ``--group-column``으로 프로파일된 카드는 그것을 비공개 ``data`` 블록에 적어 두므로,
+    ``--dataset-card`` 실행은 그것을 물려받고 플래그를 뺐다고 거부당하지 *않는다* — 카드와 어긋나는
+    명시적 플래그는 여전히 거부된다.
 
-    Stratification read off the card's ``task`` for the same reason: a continuous target cannot be
-    stratified, so ``stratified: false`` on a regression card agrees with this run rather than
-    differing from it.
+    층화도 같은 이유로 카드의 ``task``에서 읽는다: 연속 정답은 층화할 수 없으므로, 회귀 카드의
+    ``stratified: false``는 이 실행과 어긋나는 것이 아니라 맞는 것이다.
     """
     group_column = dict(reference or {}).get("group_column") or config.group_column
     message = protocol_mismatch(
@@ -127,28 +120,26 @@ def assert_protocol_matches(
 def assert_goal_is_usable(
     card: dict[str, Any], goal: dict[str, Any], config: RunConfig
 ) -> None:
-    """Stop when the metric cannot score this target, or when the bar could not be derived.
+    """지표가 이 정답 열을 채점할 수 없거나, 바를 유도할 수 없었으면 멈춘다.
 
-    Both are setup errors, not experimental outcomes, and both are cheap here and expensive later.
-    ``f1`` on a continuous target does not produce a bad score, it produces *no* score — the loop
-    would spend its whole budget reporting "목표 미달" for a number never computed. And a ``None`` bar
-    compares against nothing: ``goal_met`` is False for every attempt by construction.
+    둘 다 실험 결과가 아니라 설정 오류이고, 둘 다 여기서는 싸고 나중에는 비싸다. 연속 정답에 대한 ``f1``은
+    나쁜 점수를 내지 않고 점수를 *못* 낸다 — 루프는 계산된 적 없는 수에 대해 "목표 미달"을 보고하며
+    예산 전부를 쓸 것이다. 그리고 ``None`` 바는 아무것에도 견주지 않는다: ``goal_met``이 구조적으로 모든
+    시도에 False다.
 
-    Metric read off the **goal**, not the config — ``goal["metric"]`` is what the run is judged by,
-    and :func:`automl_agent.scoring.goal.resolve_goal` may already have replaced the config's metric
-    with one this target has. Reading ``config.metric`` would refuse the very run substitution just
-    made runnable. What is left here is the case substitution cannot reach: a goal channel written by
-    something else (hand-edited checkpoint, future caller that forgets). A backstop, not the first
-    line.
+    지표를 config가 아니라 **goal**에서 읽는다 — 실행이 판정받는 것은 ``goal["metric"]``이고,
+    :func:`automl_agent.scoring.goal.resolve_goal`이 config의 지표를 이 정답 열이 가진 것으로 이미 바꿨을
+    수 있다. ``config.metric``을 읽으면 방금 치환이 실행 가능하게 만든 바로 그 실행을 거부하게 된다.
+    여기 남는 것은 치환이 닿지 못하는 경우다: 다른 무엇이 쓴 goal 채널(손으로 고친 체크포인트, 잊어버린
+    미래의 호출자). 첫 줄이 아니라 뒤를 받치는 것.
 
-    No ``task`` (or a label this build does not know) predates the field and is accepted, same terms
-    as a missing ``protocol`` block — this catches mismatches, it does not reject cards it cannot
-    judge.
+    ``task``가 없거나 이 빌드가 모르는 라벨이면 그 필드보다 앞서므로 받아들인다. ``protocol`` 블록이 없는
+    경우와 같은 조건이다 — 이것은 어긋남을 잡는 것이고, 판정할 수 없는 카드를 거부하는 것이 아니다.
 
-    An *empty* ``goal`` is accepted too, and is not the same as a derived bar of ``None``: it means
-    no goal yet, not that deriving failed. Only ``mae``/``rmse`` produce a ``None`` bar (no portable
-    default), so treating "no goal" as "no bar" would print a missing-units message about ``f1`` —
-    which has a default — and refuse a run that was about to work.
+    *빈* ``goal``도 받아들이고, 유도된 바가 ``None``인 것과 같지 않다: 아직 목표가 없다는 뜻이지 유도가
+    실패했다는 뜻이 아니다. ``None`` 바를 내는 것은 ``mae``/``rmse``뿐이므로(이식 가능한 기본값이 없다),
+    "목표 없음"을 "바 없음"으로 다루면 기본값이 *있는* ``f1``에 대해 단위 없음 메시지를 찍고 곧 돌아갈
+    실행을 거부하게 된다.
     """
     metric = str(goal.get("metric") or config.metric)
     declared = card_task(card)
@@ -164,7 +155,7 @@ def assert_goal_is_usable(
 
 
 def run_profiler(data_path: Path, target_column: str, config: RunConfig) -> dict[str, Any]:
-    """Spawn ``scripts/profile.py`` and read back the card it wrote."""
+    """``scripts/profile.py``를 띄우고 그것이 쓴 카드를 되읽는다."""
     config.ensure_dirs()
     card_path = config.run_dir / "dataset_card.json"
     log_path = config.run_dir / "profile.log"
@@ -178,48 +169,27 @@ def run_profiler(data_path: Path, target_column: str, config: RunConfig) -> dict
         target_column,
         "--out",
         str(card_path),
-        # So the baseline's holdout is the very split train.py will use.
+        # baseline의 holdout이 train.py가 쓸 바로 그 분할이 되도록.
         "--seed",
         str(config.seed),
     ]
     if config.on_missing_target:
-        # Left to the script's own default when unset, so the two defaults cannot drift.
+        # 설정되지 않았으면 스크립트 자신의 기본값에 맡긴다. 두 기본값이 어긋날 수 없게.
         command += ["--on-missing-target", config.on_missing_target]
     for note in config.caveats:
-        # The operator's knowledge of the raw data, on its way to becoming a card field the
-        # reasoning nodes read — automl_agent.dataset.caveats.
+        # 원본 데이터에 대한 운영자의 지식이 추론 노드가 읽는 카드 필드가 되어 가는 길 —
+        # automl_agent.dataset.caveats.
         command += ["--caveat", note]
     if config.group_column:
-        # So the baseline is measured under the same group-aware split train.py will use;
-        # without this the bar would be a row-level number and every attempt an out-of-group
-        # one, which is the incomparability protocol_mismatch exists to catch.
+        # baseline이 train.py가 쓸 같은 group 인지 분할 아래에서 측정되도록. 이것이 없으면 바는 행 단위
+        # 수가 되고 모든 시도는 그룹 밖 수가 되는데, 그것이 protocol_mismatch가 잡으려고 존재하는 바로
+        # 그 비교 불가능성이다.
         command += ["--group-column", config.group_column]
 
-    try:
-        completed = subprocess.run(  # noqa: S603 - fixed script, no shell
-            command,
-            capture_output=True,
-            text=True,
-            # Pinned, not left to the locale: the child prints Korean, and on a
-            # cp949 console ``text=True`` would raise UnicodeDecodeError inside
-            # subprocess' reader thread and lose the whole log.
-            encoding="utf-8",
-            errors="replace",
-            env=utf8_env(),
-            timeout=PROFILE_TIMEOUT_SEC,
-            check=False,
-        )
-        console = (completed.stdout or "") + (completed.stderr or "")
-        returncode = completed.returncode
-    except subprocess.TimeoutExpired as exc:
-        console = decode_output(exc.stdout) + decode_output(exc.stderr)
-        returncode = -9
-    except OSError as exc:
-        console = f"failed to spawn the profiling subprocess: {exc}"
-        returncode = -1
+    returncode, console = run_fixed_script(command, timeout=PROFILE_TIMEOUT_SEC, label="profiling")
 
-    # Local artifact only: the child's stderr may quote the data, so it is written to
-    # disk for a human and never returned into a state channel.
+    # 로컬 artifact일 뿐이다: 자식의 stderr가 데이터를 인용할 수 있으므로, 사람을 위해 디스크에 쓰고
+    # state 채널로는 절대 돌려보내지 않는다.
     with contextlib.suppress(OSError):
         log_path.write_text(console, encoding="utf-8")
 

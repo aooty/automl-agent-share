@@ -1,1 +1,1 @@
-"""Standalone execution scripts, invoked as subprocesses by the graph nodes."""
+"""홀로 도는 실행 스크립트. 그래프 노드가 subprocess로 띄운다."""

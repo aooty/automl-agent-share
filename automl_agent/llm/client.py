@@ -1,15 +1,14 @@
-"""The only module that talks to the Anthropic API.
+"""Anthropic API와 이야기하는 단 하나의 모듈.
 
-Responsibilities kept here so nodes stay simple: prompt loading, structured-output
-enforcement, one corrective retry, timeouts, transport retries, and archiving every
-prompt/response pair under ``artifacts/<thread_id>/llm/``.
+노드를 단순하게 두기 위해 여기 모아 둔 책임들 — 프롬프트 로딩, 구조화 출력 강제, 정정 재시도 한
+번, 타임아웃, 전송 재시도, 그리고 모든 프롬프트와 응답 짝을 ``artifacts/<thread_id>/llm/``에
+남기는 것.
 
-Credentials are read from the environment only (``ANTHROPIC_API_KEY``, or
-``AWS_REGION`` when ``AUTOML_USE_BEDROCK`` is set) and are never written to a log,
-an artifact, or an exception message.
+자격 증명은 환경에서만 읽고(``ANTHROPIC_API_KEY``, 또는 ``AUTOML_USE_BEDROCK``이 설정됐으면
+``AWS_REGION``) 로그·아티팩트·예외 메시지에 절대 쓰지 않는다.
 
-Being the only egress point, this is also where the raw-data guard sits: see
-:func:`render_prompt` and :mod:`automl_agent.privacy`.
+유일한 외부 출구이므로 원본 데이터 가드도 여기 있다 — :func:`render_prompt`와
+:mod:`automl_agent.privacy`.
 """
 
 from __future__ import annotations
@@ -33,48 +32,39 @@ from ..privacy import assert_clean
 
 
 class LLMUnavailable(RuntimeError):
-    """Raised when a call cannot be completed. Callers fall back deterministically."""
+    """호출을 끝낼 수 없을 때 올린다. 호출자는 결정적으로 폴백한다."""
 
 
 class TextCompletion(NamedTuple):
-    """A free-form completion, plus whether the model was cut off before finishing.
+    """자유 서술 완성과, 모델이 끝내기 전에 잘렸는지.
 
-    ``truncated`` exists because the fact was being thrown away. :meth:`LLMClient._archive`
-    has always written the API's ``stop_reason`` into the exchange JSON and no code path read
-    it, so ``test-1`` spent exactly its output allowance, wrote a ``report.md`` that ends in
-    the middle of a word, and reported success. A cut-off response is not an error the
-    transport can raise — it is a well-formed reply that happens to be incomplete — so the
-    only place it can be noticed is here, at the return.
-
-    Called ``truncated`` and not ``stop_reason`` on purpose:
-    :func:`automl_agent.nodes.report.stop_reason` already means *why the loop ended*, and one
-    name for both would make "why the run stopped" and "why the sentence stopped" the same
-    field in a reader's head.
+    잘린 응답은 전송 계층이 올릴 수 있는 오류가 아니라 우연히 불완전한, 형식이 올바른 답이다.
+    그래서 그것을 알아챌 수 있는 자리는 반환하는 여기뿐이다. 이름이 ``stop_reason``이 아닌 이유와
+    이 필드가 생긴 경위는 ``docs/rationale.md``.
     """
 
     text: str
     truncated: bool
 
 
-# Name of the single tool used when structured output has to be enforced via tool use.
+# 구조화 출력을 tool use로 강제해야 할 때 쓰는 단 하나의 tool 이름.
 STRUCTURED_TOOL_NAME = "submit_result"
 
-# A model id beginning with this goes to a locally served model instead of the API. A prefix on
-# the id and not a separate flag, because "which model" and "which transport" are one decision
-# here: there is no configuration in which a caller wants ``gemma3`` sent to Anthropic.
+# 이것으로 시작하는 모델 id는 API가 아니라 로컬에서 서비스되는 모델로 간다. 별도 플래그가 아니라
+# id의 접두사인 이유는 여기서 "어느 모델"과 "어느 전송"이 한 결정이기 때문이다 — ``gemma3``를
+# Anthropic으로 보내고 싶은 구성은 없다.
 OLLAMA_PREFIX = "ollama:"
 OLLAMA_HOST_ENV = "OLLAMA_HOST"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 
 
 def needs_anthropic(config: RunConfig) -> bool:
-    """Whether any node in this run will reach the Anthropic API.
+    """이 실행의 노드 중 하나라도 Anthropic API에 닿는지.
 
-    The two halves resolve separately — the proposer follows ``proposer_model`` when it is set
-    and ``llm_model`` otherwise — so a run can be fully local, fully remote, or split. Only the
-    fully local case needs no credentials, and ``main.check_credentials`` refuses before the
-    graph starts on the strength of this. Without it ``--model ollama:...`` was refused by a
-    guard written for a route it does not use.
+    두 반쪽이 따로 풀린다 — proposer는 ``proposer_model``이 설정돼 있으면 그것을, 아니면
+    ``llm_model``을 따른다. 자격 증명이 필요 없는 것은 전부 로컬인 경우뿐이고,
+    ``main.check_credentials``가 이것을 근거로 그래프 시작 전에 거절한다.
+    논증: ``docs/rationale.md``.
     """
     proposer = config.proposer_model or config.llm_model
     return not (
@@ -83,25 +73,25 @@ def needs_anthropic(config: RunConfig) -> bool:
 
 
 def ollama_host() -> str:
-    """Where the local server is. ``OLLAMA_HOST`` is Ollama's own variable, so a machine that
-    already runs it elsewhere needs nothing set here."""
+    """로컬 서버가 어디 있는지. ``OLLAMA_HOST``는 Ollama 자신의 변수이므로, 이미 다른 자리에서
+    그것을 돌리는 기계는 여기서 따로 설정할 것이 없다."""
     host = (os.environ.get(OLLAMA_HOST_ENV) or "").strip() or DEFAULT_OLLAMA_HOST
     return host if "://" in host else f"http://{host}"
 
 
 class OllamaTextBlock(NamedTuple):
-    """One text block, shaped like the SDK's so :func:`extract_text` needs no branch."""
+    """텍스트 블록 하나. SDK의 것과 같은 모양이라 :func:`extract_text`에 분기가 필요 없다."""
 
     text: str
     type: str = "text"
 
 
 class OllamaUsage(NamedTuple):
-    """Ollama's token counts under the names the archive already writes.
+    """Ollama의 토큰 수를, 아카이브가 이미 쓰는 이름으로.
 
-    No cache fields on purpose: ``_archive`` reads them with ``getattr(..., None)``, so their
-    absence records ``null`` — which is the honest answer for a route that has no prompt cache
-    to hit rather than a route that missed one.
+    캐시 필드가 없는 것은 일부러다. ``_archive``가 ``getattr(..., None)``으로 읽으므로 없으면
+    ``null``이 기록되고, 그것이 캐시를 놓친 경로가 아니라 맞힐 프롬프트 캐시가 아예 없는 경로에
+    대한 정직한 답이다.
     """
 
     input_tokens: int | None
@@ -109,17 +99,17 @@ class OllamaUsage(NamedTuple):
 
 
 class OllamaCompletion(NamedTuple):
-    """Enough of a ``Message`` for :func:`extract_text`, :func:`extract_structured` and the
-    archive. Deliberately not more — a fuller imitation would invite code that treats the two
-    routes as interchangeable in ways they are not."""
+    """:func:`extract_text`, :func:`extract_structured`, 아카이브에 필요한 만큼의 ``Message``.
+    그 이상은 일부러 아니다 — 더 완전한 모방은 두 경로를, 실제로는 아닌 방식으로 서로 바꿔 쓸 수
+    있는 것처럼 다루는 코드를 불러들인다."""
 
     content: list[OllamaTextBlock]
     usage: OllamaUsage
     stop_reason: str
 
-# How structured output is enforced, cached per transport for the life of the process.
-# Every node builds its own LLMClient, so holding this per instance would make each
-# node re-pay a rejected `output_config` round-trip before downgrading again.
+# 구조화 출력을 어떻게 강제하는지. 프로세스 수명 동안 전송별로 캐시한다. 모든 노드가 자기
+# LLMClient를 만들므로 이것을 인스턴스마다 들고 있으면, 노드마다 거절당하는 `output_config`
+# 왕복을 다시 치르고서야 내려앉는다.
 _STRUCTURED_MODE: dict[str, str] = {}
 
 
@@ -129,35 +119,31 @@ def _route_key() -> str:
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 
-# Where a prompt's cacheable prefix ends. Written in the ``.md`` file rather than decided here
-# because *which* blocks are stable is a property of the prompt, and this repository keeps
-# prompts out of the code. See ``docs/rationale.md``.
+# 프롬프트의 캐시 가능한 접두사가 끝나는 자리. 여기서 정하지 않고 ``.md`` 파일에 적는 이유는
+# *어느* 블록이 안정적인지가 프롬프트의 성질이기 때문이다. 논증: ``docs/rationale.md``.
 CACHE_MARKER = "<!-- cache -->"
-# The API allows four per request; a prompt asking for more is a mistake worth naming rather
-# than a 400 from inside the transport.
+# API가 요청당 넷을 허용한다. 그보다 많이 요구하는 프롬프트는 전송 계층 안쪽의 400이 아니라
+# 이름을 붙여 줄 값이 있는 실수다.
 MAX_CACHE_BREAKPOINTS = 4
-# 1h and not the 5-minute default: the gap between two calls to the same node is a whole
-# iteration — a fit that may take minutes — and a 5-minute entry is measured from the *start*
-# of the request that wrote it, so it is usually cold by the next call. The 1h write costs 2x
-# instead of 1.25x and needs three reads to pay for itself; a run does nine.
+# 기본 5분이 아니라 1시간. 같은 노드의 두 호출 사이 간격이 반복 하나 — 수 분이 걸릴 수 있는
+# 적합 — 이고, 5분 항목은 그것을 쓴 요청의 *시작*부터 재므로 다음 호출 때는 보통 식어 있다.
+# 1시간 쓰기는 1.25배가 아니라 2배이고 읽기 세 번이면 본전인데, 한 실행이 아홉 번 읽는다.
 CACHE_TTL = "1h"
 
 
 def prompt_content(prompt: str) -> str | list[dict[str, Any]]:
-    """One user message's content, split into cache blocks at every :data:`CACHE_MARKER`.
+    """user 메시지 하나의 content를, :data:`CACHE_MARKER`마다 캐시 블록으로 자른다.
 
-    Returns the string unchanged when the prompt carries no marker, so a prompt that has not
-    been ordered for caching (``report.md`` — one call per run, nothing to reuse) keeps the
-    shape it always had.
+    마커가 없는 프롬프트는 문자열을 그대로 돌려준다. 그래서 캐시를 위해 순서를 잡지 않은
+    프롬프트(``report.md`` — 실행당 한 번 호출, 재사용할 것이 없다)는 늘 갖던 모양을 유지한다.
 
-    The marker is left in the text that is sent. It costs a handful of tokens and it keeps
-    :meth:`LLMClient._archive` honest: what the archive shows is still byte-for-byte what the
-    model was sent, and a reader of the archive can see where the breakpoints were.
+    마커는 전송되는 텍스트에 남긴다. 몇 토큰이고, :meth:`LLMClient._archive`가 정직한 상태를
+    유지한다 — 아카이브가 보여 주는 것이 여전히 모델에 보낸 것과 바이트 단위로 같다.
     """
     if CACHE_MARKER not in prompt:
         return prompt
     head, *rest = prompt.split(CACHE_MARKER)
-    # Each marker ends the block before it, so the marker text belongs to that block.
+    # 각 마커는 자기 앞 블록을 끝내므로, 마커 텍스트는 그 블록에 속한다.
     chunks = [head + CACHE_MARKER, *rest[:-1]]
     chunks = [chunk if index == 0 else chunk + CACHE_MARKER for index, chunk in enumerate(chunks)]
     if len(chunks) > MAX_CACHE_BREAKPOINTS:
@@ -175,16 +161,15 @@ def prompt_content(prompt: str) -> str | list[dict[str, Any]]:
 
 
 def render_prompt(name: str, variables: dict[str, Any], prompts_dir: Path = PROMPTS_DIR) -> str:
-    """Load ``<name>.md`` and substitute ``{{var}}`` placeholders.
+    """``<name>.md``를 읽고 ``{{var}}`` 자리표시자를 치환한다.
 
-    Deliberately not ``str.format``: prompts contain JSON braces that would break it.
-    Non-string values are serialised as indented JSON so the model sees readable data.
+    ``str.format``이 아닌 것은 일부러다 — 프롬프트에 그것을 깨뜨리는 JSON 중괄호가 들어 있다.
+    문자열이 아닌 값은 들여쓴 JSON으로 직렬화해서 모델이 읽을 수 있는 데이터를 보게 한다.
 
-    Every prompt in the system is built here — including the ones only archived under
-    ``--dry-run``/``--no-llm`` — which makes this the single chokepoint for
-    :func:`automl_agent.privacy.assert_clean`. A registered dataset path raises
-    :class:`~automl_agent.privacy.RawDataLeak`; anything path-shaped is redacted. What
-    the archive shows is therefore byte-for-byte what the model was sent.
+    이 시스템의 모든 프롬프트가 여기서 만들어진다 — ``--dry-run``과 ``--no-llm``에서 아카이브만
+    되는 것까지 — 그래서 여기가 :func:`automl_agent.privacy.assert_clean`의 단일 관문이다. 등록된
+    데이터셋 경로는 :class:`~automl_agent.privacy.RawDataLeak`을 올리고, 경로 모양인 것은 가려진다.
+    따라서 아카이브가 보여 주는 것은 모델에 보낸 것과 바이트 단위로 같다.
     """
     template = (prompts_dir / f"{name}.md").read_text(encoding="utf-8")
 
@@ -205,12 +190,11 @@ def render_prompt(name: str, variables: dict[str, Any], prompts_dir: Path = PROM
 
 
 def archive_prompt_only(config: RunConfig, label: str, prompt: str) -> Path | None:
-    """Archive a rendered prompt without calling the API (the ``--dry-run`` path).
+    """API를 부르지 않고 렌더된 프롬프트만 아카이브한다(``--dry-run`` 경로).
 
-    Rendering for real under ``--dry-run`` is deliberate: it proves the templates
-    have no unfilled placeholders, and it makes the reasoning trail — e.g. that
-    iteration 2's planning prompt really does carry iteration 1's ``failure_type``
-    and ``direction`` — auditable without spending a token.
+    ``--dry-run``에서도 실제로 렌더하는 것은 일부러다. 템플릿에 채워지지 않은 자리표시자가 없음을
+    보이고, 추론 흔적 — 예컨대 반복 2의 planning 프롬프트가 정말 반복 1의 ``failure_type``과
+    ``direction``을 담고 있다는 것 — 을 토큰 한 개 쓰지 않고 감사할 수 있게 한다.
     """
     directory = config.llm_dir
     try:
@@ -223,43 +207,37 @@ def archive_prompt_only(config: RunConfig, label: str, prompt: str) -> Path | No
 
 
 def archive_label(prompt_name: str, *, iteration: int | None = None, attempt: int = 1) -> str:
-    """Name one archived exchange so it maps back to the iteration that made it.
+    """아카이브된 교환 하나에 이름을 붙여, 그것을 만든 반복으로 되짚을 수 있게 한다.
 
-    The real-route archive used to be ``planning_attempt1`` for every iteration —
-    ``attempt`` is the corrective-retry counter, not the loop counter — so files 001,
-    004 and 007 of a three-iteration run all carried the same name and could only be
-    tied to an iteration by counting. The ``--dry-run`` writer already said
-    ``planning_iter2``; this makes both routes say it.
+    ``attempt``는 정정 재시도 계수기이고 루프 계수기가 아니다. 논증: ``docs/rationale.md``.
     """
     parts = [prompt_name]
     if iteration:
         parts.append(f"iter{iteration}")
     if attempt > 1:
-        # Only a real retry earns a suffix, so the common case stays readable.
+        # 접미사는 실제 재시도에만 붙인다. 그래야 흔한 경우가 읽기 쉽다.
         parts.append(f"attempt{attempt}")
     return "_".join(parts)
 
 
 def _next_index(directory: Path) -> int:
-    """Next sequence number, counting *every* archived file.
+    """다음 순번. 아카이브된 파일을 *전부* 센다.
 
-    Both writers share the counter: a ``--force`` re-run that switches between
-    ``--dry-run`` and a real route writes into the same directory, and counting only
-    one suffix would restart the numbering and overwrite the other route's trail.
+    두 writer가 계수기를 공유한다. ``--dry-run``과 실제 경로를 번갈아 쓰는 ``--force`` 재실행이
+    같은 디렉터리에 쓰므로, 한쪽 접미사만 세면 번호가 처음으로 돌아가 다른 경로의 흔적을 덮어쓴다.
     """
     return len([path for path in directory.glob("*") if path.is_file()]) + 1
 
 
 class LLMClient:
-    """Thin, logged wrapper around ``messages.create``."""
+    """``messages.create``를 감싼, 얇고 기록을 남기는 래퍼."""
 
     def __init__(self, config: RunConfig, *, proposer: bool = False) -> None:
-        """``proposer=True`` for the two nodes that propose rather than judge.
+        """판단하지 않고 제안하는 두 노드는 ``proposer=True``.
 
-        A keyword and not a model string, so the two callers say *which node they are* and this
-        module owns the mapping. The alternative — every node reading ``config`` and picking a
-        field — puts the same three-line decision in four places, and a fifth node added later
-        gets it wrong silently.
+        모델 문자열이 아니라 키워드인 이유는, 두 호출자가 *자기가 어느 노드인지*만 말하고 대응은
+        이 모듈이 갖게 하려는 것이다. 다른 방법 — 노드마다 ``config``를 읽고 필드를 고르는 것 — 은
+        같은 세 줄짜리 결정을 네 곳에 두고, 나중에 더해진 다섯 번째 노드가 조용히 틀린다.
         """
         self.config = config
         self._client: Any | None = None
@@ -267,15 +245,15 @@ class LLMClient:
 
     @property
     def _structured_mode(self) -> str:
-        """Starts on the stricter ``output_config`` json_schema, downgrades to forced
-        tool use once a transport rejects it."""
+        """더 엄격한 ``output_config`` json_schema로 시작하고, 어느 전송이 그것을 거절하면
+        강제 tool use로 내려앉는다."""
         return _STRUCTURED_MODE.get(_route_key(), "output_config")
 
     @_structured_mode.setter
     def _structured_mode(self, mode: str) -> None:
         _STRUCTURED_MODE[_route_key()] = mode
 
-    # -- transport --------------------------------------------------------- #
+    # -- 전송 --------------------------------------------------------- #
 
     def _ensure_client(self) -> Any:
         if self._client is not None:
@@ -290,9 +268,8 @@ class LLMClient:
             if not region:
                 raise LLMUnavailable(f"{AWS_REGION_ENV} is not set, required for the Bedrock route")
             if not bedrock_signing_available():
-                # The SDK imports botocore only when signing, so without this the
-                # failure would escape as ModuleNotFoundError and abort the graph
-                # instead of falling back deterministically.
+                # SDK는 서명할 때만 botocore를 import하므로, 이것이 없으면 실패가
+                # ModuleNotFoundError로 빠져나가 결정적인 폴백 대신 그래프를 중단시킨다.
                 raise LLMUnavailable(
                     'botocore is not installed; run `pip install "anthropic[bedrock]"` '
                     "for the Bedrock route"
@@ -302,19 +279,11 @@ class LLMClient:
                 timeout=self.config.llm_timeout_sec,
                 max_retries=DEFAULT_LLM_MAX_RETRIES,
             )
-            # Bedrock names the vendor in the model id, so the default ``claude-opus-5`` has to
-            # become ``anthropic.claude-opus-5`` — which is the form this route wants, and the
-            # reason the prefixing exists at all.
-            #
-            # The test is for the vendor *anywhere* in the id rather than at the front, and that
-            # is about an id the caller passes explicitly. Bedrock also has cross-region
-            # inference profiles, which put a scope in front of the vendor
-            # (``global.anthropic.claude-opus-5``, ``us.anthropic.claude-...``). Anchored at the
-            # front, ``--model global.anthropic.claude-opus-5`` picked up a second prefix and
-            # became ``anthropic.global.anthropic.claude-opus-5``; the call 404s, and because
-            # ``planning`` treats an unavailable LLM as a fallback rather than an error, the run
-            # would go on to produce a rule-based result with one printed line about the outage.
-            # A scoped id may not be right for every endpoint, but mangling it is right for none.
+            # Bedrock은 모델 id에 벤더를 적으므로 기본값 ``claude-opus-5``가
+            # ``anthropic.claude-opus-5``가 되어야 한다. 검사가 앞자리가 아니라 id의 *어디든*을
+            # 보는 이유 — cross-region inference profile은 벤더 앞에 스코프를 붙이므로
+            # (``global.anthropic.claude-...``) 앞자리 앵커로 보면 접두사가 두 번 붙는다.
+            # 논증: ``docs/rationale.md``.
             if "anthropic." not in self._model:
                 self._model = f"anthropic.{self._model}"
         else:
@@ -380,10 +349,9 @@ class LLMClient:
                 **self._request_kwargs(messages, system, max_tokens, schema)
             )
         except anthropic.BadRequestError as exc:
-            # Not every transport accepts `output_config`: the Bedrock route rejects it
-            # with "output_config.format: Extra inputs are not permitted". Downgrade to
-            # forced tool use — which the spec also sanctions and every route supports —
-            # and remember the choice for the rest of the run.
+            # 모든 전송이 `output_config`를 받지는 않는다 — Bedrock 경로는
+            # "output_config.format: Extra inputs are not permitted"로 거절한다. 스펙도 허용하고
+            # 모든 경로가 지원하는 강제 tool use로 내려앉고, 그 선택을 남은 실행 동안 기억한다.
             if schema is None or self._structured_mode != "output_config":
                 raise LLMUnavailable(f"API rejected the request: {describe_api_error(exc)}") from exc
             self._structured_mode = "tool"
@@ -408,23 +376,22 @@ class LLMClient:
         max_tokens: int,
         schema: dict[str, Any] | None,
     ) -> Any:
-        """The same call against a locally served model.
+        """같은 호출을 로컬에서 서비스되는 모델에 대고 한다.
 
-        ``urllib`` and not a client library: this is one POST with a JSON body, and the reason
-        the Anthropic SDK is worth a dependency — retries, signing, streaming, typed errors —
-        does not apply to a request to localhost.
+        클라이언트 라이브러리가 아니라 ``urllib``인 이유 — 이것은 JSON 본문 하나를 실은 POST 한
+        번이고, Anthropic SDK가 의존성 값을 하는 이유(재시도, 서명, 스트리밍, 타입 있는 오류)는
+        localhost로 가는 요청에 해당하지 않는다.
 
-        Structured output is Ollama's ``format`` field, which takes the JSON schema directly.
-        That is the whole reason this route is viable: the enforcement the nodes rely on
-        (``validate_plan``, the registry, the clamps) sits *behind* the schema, and a route with
-        no schema at all would push every malformed answer onto those guards and record it as a
-        fallback. It is a different mechanism from forced tool use, not a weaker one — but
-        whether a given local model *obeys* it is unmeasured, which is what ``plan_source`` in
-        each attempt exists to report.
+        구조화 출력은 Ollama의 ``format`` 필드이고 JSON 스키마를 그대로 받는다. 이 경로가
+        성립하는 이유가 그것이다 — 노드가 의지하는 강제(``validate_plan``, registry, clamp)는
+        스키마 *뒤*에 있고, 스키마가 아예 없는 경로는 형식이 깨진 답을 전부 그 가드들에 떠넘기고
+        폴백으로 기록한다. 강제 tool use와 다른 기제이고 더 약한 기제는 아니다 — 다만 주어진 로컬
+        모델이 그것을 *지키는지*는 측정되지 않았고, 그것을 보고하기 위해 시도마다
+        ``plan_source``가 있다.
 
-        ``temperature`` 0 and the run's own ``seed``, because everything else in this repository
-        pins its seed and a proposer that does not would make two legs of one comparison differ
-        for a reason the comparison is not about.
+        ``temperature``는 0, ``seed``는 실행 자신의 것이다. 이 저장소의 다른 모든 것이 시드를
+        고정하는데 proposer가 그러지 않으면, 한 비교의 두 다리가 그 비교가 다루지 않는 이유로
+        달라진다.
         """
         import urllib.error
         import urllib.request
@@ -435,9 +402,9 @@ class LLMClient:
         for message in messages:
             content = message.get("content")
             if isinstance(content, list):
-                # Cache breakpoints are an Anthropic billing feature; here they are just blocks
-                # to join back. Dropping the marker text would make the archive disagree with
-                # what was sent, so it stays in — see :func:`prompt_content`.
+                # 캐시 breakpoint는 Anthropic의 청구 기능이고, 여기서는 다시 이어 붙일
+                # 블록일 뿐이다. 마커 텍스트를 떼면 아카이브가 보낸 것과 어긋나므로 남긴다
+                # (:func:`prompt_content`).
                 content = "".join(str(block.get("text", "")) for block in content)
             chat.append({"role": str(message.get("role") or "user"), "content": str(content)})
 
@@ -445,19 +412,10 @@ class LLMClient:
             "model": self._model[len(OLLAMA_PREFIX) :],
             "messages": chat,
             "stream": False,
-            # Off, and this is the difference between this route working and not. A thinking
-            # model puts its reasoning in ``message.thinking`` and the answer in
-            # ``message.content``, and both come out of one output allowance. On the real
-            # planning prompt ``gemma4:12b`` spent all 8,000 tokens thinking, returned
-            # ``done_reason: length`` with **empty content**, and the node recorded a fallback —
-            # so the first measurement of that model scored 0% and was measuring this, not the
-            # model. With thinking off the same call answers in 6 output tokens.
-            #
-            # Safe on models that do not think: Ollama accepts the flag and ignores it (checked
-            # on qwen2.5-coder:14b and medgemma:4b). And the two nodes on this route have their
-            # answers read by a code gate rather than by a person, so the reasoning was never
-            # consumed by anything — unlike the Critic's ``evidence``, which is why the Critic
-            # stays on the other route.
+            # 끈다. 이것이 이 경로가 되는 것과 안 되는 것의 차이다 — thinking 모델은 추론을
+            # ``message.thinking``에, 답을 ``message.content``에 넣고 둘이 하나의 출력 허용량에서
+            # 나온다. 생각하지 않는 모델에서도 안전하다(Ollama가 플래그를 받고 무시한다).
+            # 논증: ``docs/rationale.md``.
             "think": False,
             "options": {"num_predict": max_tokens, "temperature": 0, "seed": self.config.seed},
         }
@@ -473,8 +431,8 @@ class LLMClient:
             with urllib.request.urlopen(request, timeout=self.config.llm_timeout_sec) as response:
                 body = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            # The body carries Ollama's own message ("model 'x' not found"), which is the one
-            # thing that makes a 404 here actionable.
+            # 본문에 Ollama 자신의 메시지("model 'x' not found")가 있고, 여기서 404를 조치
+            # 가능하게 만드는 것은 그것뿐이다.
             detail = exc.read().decode("utf-8", errors="replace")[:200]
             raise LLMUnavailable(f"ollama returned {exc.code}: {detail}") from exc
         except (urllib.error.URLError, TimeoutError) as exc:
@@ -489,12 +447,12 @@ class LLMClient:
                 input_tokens=body.get("prompt_eval_count"),
                 output_tokens=body.get("eval_count"),
             ),
-            # Ollama says ``length`` where the Anthropic route says ``max_tokens``; every caller
-            # reads the latter, so the translation belongs here rather than in each of them.
+            # Anthropic 경로가 ``max_tokens``라고 하는 자리에서 Ollama는 ``length``라고 한다.
+            # 모든 호출자가 후자를 읽으므로, 번역은 그들 각각이 아니라 여기 있어야 한다.
             stop_reason="max_tokens" if body.get("done_reason") == "length" else "end_turn",
         )
 
-    # -- public API -------------------------------------------------------- #
+    # -- 공개 API -------------------------------------------------------- #
 
     def complete_text(
         self,
@@ -505,10 +463,10 @@ class LLMClient:
         max_tokens: int | None = None,
         iteration: int | None = None,
     ) -> TextCompletion:
-        """Free-form completion. Used only where prose is the product (the report).
+        """자유 서술 완성. 산문 자체가 산출물인 곳(보고서)에서만 쓴다.
 
-        Returns the text *and* whether it was cut off — see :class:`TextCompletion` for why
-        that second field is not something the caller can be trusted to remember to ask for.
+        텍스트*와* 잘렸는지를 함께 돌려준다 — 두 번째 필드를 호출자가 물어 볼 것이라고 믿을 수
+        없는 이유는 :class:`TextCompletion`에.
         """
         prompt = render_prompt(prompt_name, variables)
         label = archive_label(prompt_name, iteration=iteration)
@@ -536,10 +494,10 @@ class LLMClient:
         max_tokens: int | None = None,
         iteration: int | None = None,
     ) -> dict[str, Any]:
-        """Schema-enforced completion with exactly one corrective retry.
+        """스키마를 강제하는 완성. 정정 재시도는 정확히 한 번.
 
-        Raises :class:`LLMUnavailable` when the second attempt still fails to parse;
-        the calling node is responsible for the deterministic fallback.
+        두 번째 시도도 파싱에 실패하면 :class:`LLMUnavailable`을 올린다. 결정적인 폴백은
+        호출하는 노드의 책임이다.
         """
         prompt = render_prompt(prompt_name, variables)
         messages: list[dict[str, Any]] = [{"role": "user", "content": prompt_content(prompt)}]
@@ -571,7 +529,7 @@ class LLMClient:
             last_error = "the response contained no JSON object"
 
             if attempt == 1:
-                # One corrective turn, then give up and let the node fall back.
+                # 정정 한 턴, 그다음에는 포기하고 노드가 폴백하게 둔다.
                 messages = [
                     *messages,
                     {"role": "assistant", "content": text or "(empty)"},
@@ -586,13 +544,13 @@ class LLMClient:
 
         raise LLMUnavailable(f"structured output failed twice for {prompt_name}: {last_error}")
 
-    # -- archiving --------------------------------------------------------- #
+    # -- 보관 --------------------------------------------------------- #
 
     def _archive_failure(self, label: str, prompt: str, system: str | None, reason: str) -> None:
-        """Record a call that never produced a response.
+        """응답을 한 번도 내지 못한 호출을 기록한다.
 
-        Without this a fallback leaves no trace on disk, so a transient 5xx is
-        indistinguishable after the fact from a malformed request.
+        이것이 없으면 폴백이 디스크에 흔적을 남기지 않고, 그러면 일시적인 5xx와 형식이 깨진 요청을
+        사후에 구분할 수 없다.
         """
         payload = {
             "label": label,
@@ -606,7 +564,7 @@ class LLMClient:
         self._write_artifact(f"{label}.error", payload)
 
     def _write_artifact(self, stem: str, payload: dict[str, Any]) -> None:
-        """Write one numbered JSON artifact. Losing it must never fail the run."""
+        """번호가 붙은 JSON 아티팩트 하나를 쓴다. 그것을 잃는 것이 실행을 실패시켜서는 안 된다."""
         directory = self.config.llm_dir
         try:
             directory.mkdir(parents=True, exist_ok=True)
@@ -623,7 +581,7 @@ class LLMClient:
         text: str,
         response: Any,
     ) -> None:
-        """Persist the exchange so the reasoning trail is auditable after the run."""
+        """교환을 남겨서 실행 뒤에도 추론 흔적을 감사할 수 있게 한다."""
         usage = getattr(response, "usage", None)
         payload = {
             "label": label,
@@ -636,10 +594,10 @@ class LLMClient:
             "usage": {
                 "input_tokens": getattr(usage, "input_tokens", None),
                 "output_tokens": getattr(usage, "output_tokens", None),
-                # Whether the cache breakpoints in the prompt actually held. Recorded because
-                # a miss is invisible everywhere else: the run works, the numbers are right,
-                # and only the bill moves — so without these two fields "we turned caching on"
-                # is a claim no artifact can check. ``None`` on a route that reports neither.
+                # 프롬프트의 캐시 breakpoint가 실제로 들었는지. 기록하는 이유는 놓친 것이
+                # 다른 어디에서도 보이지 않기 때문이다 — 실행은 되고 수도 맞고 청구서만 움직인다.
+                # 이 두 필드가 없으면 "캐싱을 켰다"는 어느 아티팩트도 확인할 수 없는 주장이다.
+                # 둘 다 보고하지 않는 경로에서는 ``None``.
                 "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
                 "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", None),
             },
@@ -649,11 +607,11 @@ class LLMClient:
 
 
 def describe_api_error(exc: Any) -> str:
-    """Summarise an ``APIStatusError`` without leaking credentials.
+    """자격 증명을 흘리지 않고 ``APIStatusError``를 요약한다.
 
-    The status code alone is not diagnosable: a 500 needs its ``request_id`` to be
-    traceable, and a 400 needs the server's message to say *what* was rejected.
-    The error body carries neither keys nor headers, so it is safe to log.
+    상태 코드만으로는 진단이 안 된다. 500은 추적 가능하려면 ``request_id``가 필요하고, 400은
+    *무엇이* 거절됐는지 말해 주는 서버 메시지가 필요하다. 오류 본문에는 키도 헤더도 없으므로
+    로그에 남겨도 안전하다.
     """
     parts = [f"status {getattr(exc, 'status_code', '?')}"]
 
@@ -674,7 +632,7 @@ def describe_api_error(exc: Any) -> str:
 
 
 def extract_text(response: Any) -> str:
-    """Concatenate the text blocks, skipping thinking blocks."""
+    """텍스트 블록들을 이어 붙인다. thinking 블록은 건너뛴다."""
     parts: list[str] = []
     for block in getattr(response, "content", []) or []:
         if getattr(block, "type", None) == "text":
@@ -683,10 +641,10 @@ def extract_text(response: Any) -> str:
 
 
 def extract_structured(response: Any) -> dict[str, Any] | None:
-    """Read the structured answer from whichever enforcement mode produced it.
+    """어느 강제 방식이 만들었든 구조화된 답을 읽는다.
 
-    Forced tool use puts it in a ``tool_use`` block's ``input``; ``output_config``
-    json_schema puts it in the text. ``None`` means neither yielded an object.
+    강제 tool use는 그것을 ``tool_use`` 블록의 ``input``에 넣고, ``output_config`` json_schema는
+    텍스트에 넣는다. ``None``은 둘 다 객체를 내지 않았다는 뜻이다.
     """
     for block in getattr(response, "content", []) or []:
         if getattr(block, "type", None) == "tool_use":

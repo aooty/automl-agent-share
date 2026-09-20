@@ -1,67 +1,40 @@
-"""Fixed prediction script: a fitted model plus new rows in, labelled rows out.
+"""고정 예측 스크립트: 적합된 모델과 새 행을 받아 라벨이 붙은 행을 낸다.
 
-The third and last file that opens a data file, and the only one that opens a file the run
-never trained on. Like the other two it runs as a subprocess, so the orchestrator process
-still never holds a data row — and unlike the other two it produces *per-row* output, which
-is why nothing it writes goes anywhere near a state channel.
+데이터 파일을 여는 세 번째이자 마지막 파일이고, 이 실행이 학습한 적 없는 파일을 여는 유일한
+파일이다. 다른 둘처럼 subprocess로 돌아서 orchestrator 프로세스는 여전히 데이터 행을 들지 않고,
+다른 둘과 달리 *행 단위* 출력을 내므로 여기서 쓰는 것은 어느 state 채널에도 가지 않는다.
 
-Why this exists
----------------
-**``model.joblib`` on its own is not a usable model.** The encoder reads the level set, the column
-order and the missing-column decision off *the file in front of it*, so a second file encodes
-differently. Differing widths make sklearn raise; **matching widths — the ordinary case for a monthly
-export of the same table — raise nothing and compute every prediction from columns that mean
-something else**, invisibly in the output and in every metric over it.
+**``model.joblib`` 하나만으로는 쓸 수 있는 모델이 아니다.** 인코더는 수준 집합, 열 순서, 결측 열
+결정을 *눈앞의 파일*에서 읽으므로 두 번째 파일은 다르게 인코딩된다. 폭이 다르면 sklearn이 예외를
+낸다. **폭이 같으면 — 같은 표를 매달 내보내는 흔한 경우다 — 아무것도 나지 않고 다른 것을 뜻하는
+열에서 모든 예측이 계산된다.** 출력에서도 그 위의 모든 지표에서도 보이지 않게.
 
-So the encoding is saved at fit time and replayed here by
-:func:`~automl_agent.dataset.features.encode_with_schema`. This script refuses everything that cannot
-be replayed and discloses everything replayed with a caveat:
+그래서 인코딩은 적합 시점에 저장되고 여기서
+:func:`~automl_agent.dataset.features.encode_with_schema`가 재생한다. 재생할 수 없는 것은 전부
+거절하고, 재생한 것은 경고를 달아 전부 알린다:
 
-* a source column the fit needs and this file does not have — refused
+* 적합이 필요로 하는데 이 파일에 없는 원본 열 — 거절
   (:class:`automl_agent.dataset.features.FeatureSchemaMismatch`);
-* a schema whose version this build does not know — refused;
-* an assembled width the estimator disagrees with — refused, even though the encoder and the
-  schema already agree, because two artifacts that were meant to be saved together are the
-  one thing a directory cannot prove;
-* a new category, a gap where training had none, a column that has become text, a column the
-  file added — carried out as a warning per finding, because each of those has a defined
-  encoding and pretending otherwise would be the silence this file exists to remove.
+* 이 빌드가 모르는 버전의 스키마 — 거절;
+* 조립된 폭에 추정기가 동의하지 않는 경우 — 인코더와 스키마는 이미 일치하지만 거절한다. 함께
+  저장되도록 만들어진 두 artifact가 그 짝이라는 것은 디렉터리가 증명할 수 없는 단 하나다;
+* 새 범주, 학습에는 없던 결측, 텍스트가 된 열, 파일이 더한 열 — 발견마다 경고로 내보낸다. 각각
+  정의된 인코딩이 있고, 아닌 척하는 것이 이 파일이 없애려고 있는 그 침묵이다.
 
-Scoring a batch that already has its labels
--------------------------------------------
-``--label-column`` names a column of true labels and turns the run into a backtest: predicted
-exactly as it would be without the flag, then scored. Three things about that score are
-deliberate.
+``--label-column``은 참 라벨 컬럼을 이름 지어 실행을 backtest로 바꾼다: 플래그가 없을 때와 똑같이
+예측하고, 그다음 채점한다. 그 점수에 대해 일부러 그렇게 한 것이 셋이다 — 이 실행의 프로토콜이
+아니라고 말하는 것, 적합 시점에 기록된 지표(``schema["metric"]``)로 재는 것, 클래스 목록을 이
+파일에서 다시 유도하지 않는 것. 논증: ``docs/rationale.md``.
 
-**Not the run's protocol.** The holdout in ``result.json`` is rows held back before any fit,
-scored once, gating nothing — its meaning comes from how it was produced. How *this* file was
-assembled is unknown here: a later month, a different site, or the training rows themselves. So
-the score says that out loud, because "0.71 on the holdout, 0.62 here" is a fact about two
-different things until someone says which two.
+계약
+----
+입력 : ``--model <model.joblib> --schema <feature_schema.json> --data <csv> --out <csv>``,
+       배치를 채점하려면 ``--label-column <name>``
+출력 : ``--out``의 예측 CSV — 입력 순서로 입력 행마다 한 줄. 요청하면 ``--report``에 JSON 요약.
+       stdout에 한글 요약. 성공 0, 실패 1 (stderr는 로컬에 남고 프롬프트로 가지 않는다).
 
-**The metric the run was steered by** (``schema["metric"]``, recorded at fit time), not one the
-person scoring the batch picks — so the two numbers are one measurement over different rows.
-
-**The schema's ``classes`` list**, never re-derived from this file. Re-deriving is this script's
-own defect one level up: a batch missing one class would code the rest to different integers and
-score the model's ``1`` against the file's other class. Rows whose label is missing or unknown
-to the schema are excluded and counted.
-
-Nothing about the score changes the model — it is measured after the fact on rows this process
-may not fit anything on (:mod:`automl_agent.scoring.calibration` makes the same argument about
-the probabilities).
-
-Contract
---------
-Input  : ``--model <model.joblib> --schema <feature_schema.json> --data <csv> --out <csv>``,
-         optionally ``--label-column <name>`` to score the batch
-Output : the predictions CSV at ``--out``, one row per input row in input order; a JSON
-         summary at ``--report`` when asked for; a Korean summary on stdout; exit 0 on
-         success, 1 on failure (stderr stays local and is never prompted).
-
-Every output of this script is per-row data. The CSV is the point of the run and belongs
-wherever the caller keeps their data; the report holds category names, so it defaults to
-``artifacts/``, which ``.gitignore`` blocks.
+이 스크립트의 모든 출력은 행 단위 데이터다. CSV는 실행의 목적이고 호출자가 자기 데이터를 두는
+곳에 속한다. report는 범주 이름을 들고 있어서 ``.gitignore``가 막는 ``artifacts/``가 기본값이다.
 """
 
 from __future__ import annotations
@@ -72,58 +45,55 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Same reason as the other two scripts: run by path, so the repo root is not on sys.path and
-# a relative import is impossible. Adding it is what lets this file replay the *same* encoder
-# the fit used instead of a copy of it.
+# 다른 두 스크립트와 같은 이유: 경로로 실행되니 repo 루트가 sys.path에 없고 상대 import가
+# 불가능하다. 이것을 더하는 덕분에 이 파일이 적합이 쓴 인코더의 사본이 아니라 *같은* 인코더를
+# 재생한다. 아래 import들에 붙은 ``E402`` 무시도 모두 이 수정 때문이다.
 if __package__ in (None, ""):  # pragma: no cover - only when run as a file
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from automl_agent.config import DECISION_FILENAME  # noqa: E402 - needs the path fix above
-from automl_agent.dataset.features import (  # noqa: E402 - needs the path fix above
+from automl_agent.config import DECISION_FILENAME  # noqa: E402
+from automl_agent.dataset.features import (  # noqa: E402
     FeatureSchemaMismatch,
     describe_drift,
     encode_with_schema,
 )
-from automl_agent.scoring import calibration  # noqa: E402 - needs the path fix above
-from automl_agent.scoring.intervals import DEFAULT_RESAMPLES  # noqa: E402 - needs the path fix above
-from automl_agent.scoring.metrics import (  # noqa: E402 - needs the path fix above
+from automl_agent.scoring import calibration  # noqa: E402
+from automl_agent.scoring.intervals import DEFAULT_RESAMPLES  # noqa: E402
+from automl_agent.scoring.metrics import (  # noqa: E402
     ALIASES as METRIC_ALIASES,
 )
-from automl_agent.scoring.metrics import (  # noqa: E402 - needs the path fix above
+from automl_agent.scoring.metrics import (  # noqa: E402
     TASK_REGRESSION,
     canonical,
 )
 
-# Imported rather than copied, for the same reason the encoder is: a second implementation of
-# "score this split" is a second answer, and the whole point of a batch score is that it is
-# comparable to the holdout in ``result.json``. train.py's own imports are all pure-python
-# package modules — sklearn and pandas are imported inside its functions — so this costs no
-# import-time dependency that this script does not already have.
-from automl_agent.scripts.train import (  # noqa: E402 - needs the path fix above
+# 인코더와 같은 이유로 베끼지 않고 import한다: "이 분할을 채점한다"의 두 번째 구현은 두 번째
+# 답이고, 배치 점수의 존재 이유는 ``result.json``의 홀드아웃과 비교 가능하다는 것이다. train.py의
+# import는 전부 순수 파이썬 패키지 모듈이라(sklearn과 pandas는 함수 안에서 import한다) 이
+# 스크립트가 이미 갖지 않은 import 시점 의존성은 늘지 않는다.
+from automl_agent.scripts.train import (  # noqa: E402
     LogBuffer,
     evaluate_split,
     label_at_cut,
     load_decision,
 )
 
-# The column the predicted label lands in, and the prefix each class probability gets. Named
-# here because the caller's downstream code keys on them.
+# 예측 라벨이 들어갈 컬럼과 클래스 확률마다 붙는 접두사. 호출자의 하류 코드가 이 이름들로 키를
+# 잡으니 여기서 이름 짓는다.
 PREDICTION_COLUMN = "prediction"
 PROBA_PREFIX = "proba_"
 
-# The label a batch score is reported under, so a report that carries both this and the run's
-# holdout cannot have them confused by a reader or by a later script.
+# 배치 점수가 보고되는 이름. 이것과 실행의 홀드아웃을 함께 든 report에서 읽는 사람도 나중의
+# 스크립트도 둘을 섞지 못하게 한다.
 BATCH_SCORE_KEY = "batch_metrics"
 
 
 def load_schema(path: Path) -> dict[str, Any]:
-    """Read the encoding saved beside the model.
+    """모델 옆에 저장된 인코딩을 읽는다.
 
-    A missing file is a refusal with the reason spelled out, not a fallback to re-deriving the
-    layout. Re-deriving is precisely the operation that produces a silently misaligned matrix,
-    and the two runs that legitimately have no schema — a synthetic-data run, and a run from
-    before schemas were written — are both runs whose model cannot be applied to new rows at
-    all. Saying so is the useful answer.
+    파일이 없으면 배치를 다시 유도하는 폴백이 아니라, 이유를 적은 거절이다. 다시 유도하는 것이
+    바로 조용히 어긋난 행렬을 만드는 연산이고, 스키마가 정당하게 없는 실행 둘(합성 데이터 실행,
+    스키마를 쓰기 전에 만들어진 실행)은 어차피 모델을 새 행에 적용할 수 없는 실행이다.
     """
     if not path.exists():
         raise FileNotFoundError(
@@ -141,16 +111,15 @@ def load_schema(path: Path) -> dict[str, Any]:
 def prepare_features(
     frame: Any, schema: dict[str, Any], label_column: str | None = None
 ) -> tuple[Any, list[str]]:
-    """Drop the columns that were never features, and say which were dropped.
+    """애초에 피처가 아니었던 열을 빼고, 무엇을 뺐는지 말한다.
 
-    Target and group column are dropped by *name from the schema*, not guessed: a new file may carry
-    the true label (a backtest) or the patient id, and both were excluded from the matrix at fit time.
-    Otherwise they get reported as columns the training file did not have — true and useless.
+    타깃과 그룹 열은 추측이 아니라 *스키마의 이름으로* 뺀다: 새 파일은 참 라벨(backtest)이나 환자
+    id를 들고 있을 수 있고 둘 다 적합 시점에 행렬에서 제외됐다. 그러지 않으면 학습 파일에 없던
+    열로 보고된다 — 맞는 말이지만 쓸모가 없다.
 
-    ``label_column`` is dropped for the same reason, into the same list. Usually it *is* the schema's
-    target column under the same name and already handled, but a backtest export calling it
-    ``outcome_actual`` would otherwise reach the encoder as an unexpected extra column — reported as
-    drift when it is the thing being scored against.
+    ``label_column``도 같은 이유로 같은 목록에 넣는다. 보통은 그것이 같은 이름의 스키마 타깃 열이라
+    이미 처리되지만, 그것을 ``outcome_actual``이라 부르는 backtest 내보내기는 예상 못 한 여분의
+    열로 인코더에 닿는다 — 채점 대상인 것이 drift로 보고된다.
     """
     dropped: list[str] = []
     for key in ("target_column", "group_column"):
@@ -163,16 +132,15 @@ def prepare_features(
 
 
 def check_width(model: Any, n_columns: int) -> None:
-    """Refuse a matrix the estimator was not fitted on, before it silently accepts one.
+    """추정기가 적합되지 않은 행렬을, 그것이 조용히 받아들이기 전에 거절한다.
 
-    The encoder already asserted it produced the schema's columns, so this only fires when schema and
-    model are not the pair they were saved as — a file copied out of one iteration's directory next to
-    another's. sklearn would catch the width itself, with a message about arrays; this one names the
-    cause.
+    인코더는 스키마의 열을 냈다고 이미 단언했으므로, 이것이 발화하는 것은 스키마와 모델이 함께
+    저장된 짝이 아닐 때뿐이다 — 한 iteration 디렉터리의 파일을 다른 쪽 옆에 복사한 경우. 폭 자체는
+    sklearn도 잡지만 메시지가 배열에 대한 것이고, 이쪽은 원인을 이름 짓는다.
 
-    ``n_features_in_`` is absent on an unfitted estimator and on a few that do not record it. Absent
-    means "cannot check", not "mismatch" — refusing there would reject working pairs to guard a case
-    that has not happened.
+    ``n_features_in_``은 적합되지 않은 추정기와 그것을 기록하지 않는 몇몇에 없다. 없음은
+    "불일치"가 아니라 "검사할 수 없음"이다 — 거기서 거절하면 일어난 적 없는 경우를 막으려고
+    작동하는 짝을 버린다.
     """
     expected = getattr(model, "n_features_in_", None)
     if expected is None or int(expected) == int(n_columns):
@@ -185,13 +153,12 @@ def check_width(model: Any, n_columns: int) -> None:
 
 
 def label_predictions(raw: Any, schema: dict[str, Any]) -> list[Any]:
-    """Class codes back into the labels the file used. Regression values pass through.
+    """클래스 코드를 파일이 쓴 라벨로 되돌린다. 회귀 값은 그대로 지나간다.
 
-    ``encode_target`` category-coded the target column, so a fitted classifier predicts ``1``
-    where the caller asked about ``died``. The schema's ``classes`` list is index-aligned with
-    those codes, so this is a lookup rather than an inference. A code outside the list is left
-    as the code: it means the schema and the model disagree about the label set, and inventing
-    a name for it would be worse than showing the number.
+    ``encode_target``이 타깃 열을 범주 코드로 바꿨으므로, 호출자가 ``died``를 물은 자리에서 적합된
+    분류기는 ``1``을 예측한다. 스키마의 ``classes`` 목록은 그 코드와 인덱스가 맞으니 이것은 추론이
+    아니라 조회다. 목록 밖의 코드는 코드로 남긴다: 스키마와 모델이 라벨 집합에 대해 어긋났다는
+    뜻이고, 이름을 지어내는 것은 숫자를 보여주는 것보다 나쁘다.
     """
     if schema.get("task") == TASK_REGRESSION:
         return [float(value) for value in raw.tolist()]
@@ -205,11 +172,11 @@ def label_predictions(raw: Any, schema: dict[str, Any]) -> list[Any]:
 
 
 def probability_matrix(model: Any, matrix: Any, schema: dict[str, Any]) -> Any:
-    """``predict_proba`` once, or ``None``. Computed here so it is computed once.
+    """``predict_proba``를 한 번, 아니면 ``None``. 한 번만 계산되도록 여기서 계산한다.
 
-    Both the output columns and the batch score need these numbers, and calling
-    ``predict_proba`` twice would let a non-deterministic estimator put two different sets of
-    probabilities under one report — the CSV saying 0.70 and the Brier score priced on 0.68.
+    출력 컬럼과 배치 점수 둘 다 이 수를 필요로 하고, ``predict_proba``를 두 번 부르면 비결정적인
+    추정기가 한 report 안에 서로 다른 두 확률 집합을 넣을 수 있다 — CSV는 0.70이라 말하고 Brier는
+    0.68로 값 매겨진다.
     """
     if schema.get("task") == TASK_REGRESSION or not hasattr(model, "predict_proba"):
         return None
@@ -220,15 +187,13 @@ def probability_matrix(model: Any, matrix: Any, schema: dict[str, Any]) -> Any:
 
 
 def probability_columns(proba: Any, model: Any, schema: dict[str, Any]) -> dict[str, Any]:
-    """Per-class probabilities, keyed by the label rather than by the code.
+    """클래스별 확률. 코드가 아니라 라벨로 키를 잡는다.
 
-    Empty for a regression target, and empty for a classifier without ``predict_proba`` —
-    absent columns rather than a fabricated 0/1 confidence, which is what a hard label
-    reported as a probability would be.
+    회귀 타깃에서도, ``predict_proba``가 없는 분류기에서도 비어 있다 — 0/1 확신도를 지어내지 않고
+    컬럼을 없애는 쪽이다. 지어낸 값은 딱딱한 라벨을 확률이라 보고하는 것이니까.
 
-    Keyed off ``model.classes_``, not off the schema's list, because a class with no rows in
-    the training split has no column in the output and the two lists would then be offset by
-    one for every class after it.
+    스키마의 목록이 아니라 ``model.classes_``로 키를 잡는다. 학습 분할에 행이 없는 클래스는 출력에
+    컬럼이 없고, 그러면 그 뒤의 모든 클래스에서 두 목록이 한 칸씩 어긋난다.
     """
     if proba is None:
         return {}
@@ -243,14 +208,13 @@ def probability_columns(proba: Any, model: Any, schema: dict[str, Any]) -> dict[
 
 
 def positive_class_proba(proba: Any, model: Any) -> Any:
-    """The column of ``proba`` belonging to class code ``1``, or ``None``.
+    """클래스 코드 ``1``에 속하는 ``proba``의 컬럼, 아니면 ``None``.
 
-    ``train.py``'s ``_proba`` takes ``[:, 1]`` because its ``classes_`` is the sorted codes
-    ``[0, 1]`` and column 1 is therefore code 1. Here the position is looked up instead of
-    assumed: it is the same column whenever both classes were present at fit time, and when one
-    was not, ``[:, 1]`` would be some other class's probability scored as if it were the
-    positive one. A binary metric computed off the wrong column is the failure mode of this
-    entire file, so it is not worth saving three lines over.
+    ``train.py``의 ``_proba``는 ``[:, 1]``을 집는다 — 그쪽 ``classes_``는 정렬된 코드 ``[0, 1]``이라
+    컬럼 1이 곧 코드 1이다. 여기서는 가정하지 않고 위치를 찾는다: 적합 시점에 두 클래스가 모두
+    있었다면 같은 컬럼이고, 하나가 없었다면 ``[:, 1]``은 다른 클래스의 확률을 양성인 것처럼 채점한
+    값이다. 틀린 컬럼에서 계산한 이진 지표는 이 파일 전체의 실패 양식이므로, 세 줄 아끼자고 할 일이
+    아니다.
     """
     if proba is None or getattr(proba, "ndim", 0) != 2 or proba.shape[1] < 2:
         return None
@@ -261,20 +225,19 @@ def positive_class_proba(proba: Any, model: Any) -> Any:
 
 
 def encode_batch_labels(series: Any, schema: dict[str, Any]) -> tuple[Any, Any, dict[str, int]]:
-    """True labels as the codes the model predicts, plus a mask of which rows are usable.
+    """참 라벨을 모델이 예측하는 코드로. 그리고 어느 행이 쓸 수 있는지의 마스크.
 
-    Returns ``(codes, keep, counts)`` where ``keep`` is a boolean mask over the input rows.
+    ``(codes, keep, counts)``를 돌려주고 ``keep``은 입력 행에 대한 불리언 마스크다.
 
-    Coded through ``schema["classes"]`` by position — the same list ``label_predictions`` reads
-    the other direction — and never through ``encode_target``. Re-deriving categories from this
-    file is what would silently renumber the labels: a batch missing one class would code its
-    remaining labels ``0..n-2``, so the model's ``1`` would be scored against a different class
-    than the fit meant by it, and every metric over that is a number about nothing.
+    ``schema["classes"]``의 위치로 코드를 매긴다 — ``label_predictions``가 반대 방향으로 읽는 그
+    목록이다 — 절대 ``encode_target``을 거치지 않는다. 이 파일에서 범주를 다시 유도하는 것이 라벨을
+    조용히 다시 번호 붙이는 일이다: 한 클래스가 빠진 배치는 남은 라벨을 ``0..n-2``로 매기므로 모델의
+    ``1``이 적합이 뜻한 것과 다른 클래스에 대해 채점되고, 그 위의 모든 지표는 아무것도 아닌 것에
+    대한 숫자다.
 
-    Rows the schema has no code for are dropped and counted rather than mapped to something:
-    ``missing`` for a blank label, ``unknown`` for a value the fit never saw. A new class in a
-    backtest file is real news, and the honest form of it is "these rows could not be scored",
-    not a score computed as if they were negatives.
+    스키마에 코드가 없는 행은 무엇으로 매핑하지 않고 빼서 센다: 빈 라벨은 ``missing``, 적합이 본 적
+    없는 값은 ``unknown``. backtest 파일의 새 클래스는 진짜 소식이고, 그것의 정직한 형태는 "이
+    행들은 채점할 수 없었다"이지 음성인 것처럼 계산한 점수가 아니다.
     """
     import numpy as np
     import pandas as pd
@@ -292,9 +255,9 @@ def encode_batch_labels(series: Any, schema: dict[str, Any]) -> tuple[Any, Any, 
             "this schema records no class list, so the batch's labels cannot be coded the way "
             "the model's outputs were. Scoring would compare two different numberings."
         )
-    # As text on both sides, because a CSV round-trip turns the integer label 1 into the string
-    # "1" and a JSON schema stores whatever the fit's column held. Matching on the rendered
-    # value is what makes 1 and "1" the same class instead of one known and one unknown.
+    # 양쪽을 텍스트로 본다. CSV를 왕복하면 정수 라벨 1이 문자열 "1"이 되고, JSON 스키마는 적합의
+    # 열이 들고 있던 것을 그대로 저장한다. 렌더된 값으로 맞추는 것이 1과 "1"을 하나는 알려진 것
+    # 하나는 모르는 것이 아니라 같은 클래스로 만든다.
     lookup = {str(label): index for index, label in enumerate(classes)}
     raw = series.astype("string")
     mapped = raw.map(lookup)
@@ -315,16 +278,16 @@ def score_batch(
     pred: Any,
     schema: dict[str, Any],
 ) -> dict[str, Any]:
-    """Score the labelled rows of this batch, on the metric the run was steered by.
+    """이 배치의 라벨 붙은 행을, 이 실행이 목표로 삼았던 지표로 채점한다.
 
-    Everything here is measured through :func:`automl_agent.scripts.train.evaluate_split`, the
-    same function that produced the holdout number in ``result.json``. What differs is the rows
-    and — said in the summary, not hidden — that how these rows were assembled is unknown.
+    전부 :func:`automl_agent.scripts.train.evaluate_split`로 잰다 — ``result.json``의 홀드아웃
+    숫자를 낸 그 함수다. 다른 것은 행이고, 그리고 이 행들이 어떻게 이루어졌는지 알 수 없다는 것 —
+    숨기지 않고 요약에 적는다.
     """
     codes, keep, counts = encode_batch_labels(labels, schema)
     scored = int(len(codes))
     result: dict[str, Any] = {
-        "label_column": None,  # filled by the caller, which knows the name
+        "label_column": None,  # 이름을 아는 호출자가 채운다
         "scored_rows": scored,
         "excluded_rows": counts,
         "metric": None,
@@ -343,8 +306,8 @@ def score_batch(
     average = "binary" if n_classes == 2 else "macro"
     metric = schema.get("metric")
     metric = canonical(str(metric)) if metric else None
-    # Collect without printing: the skip reasons belong in the summary block beside the score
-    # they explain, not scattered above it.
+    # 찍지 않고 모은다: 건너뛴 이유는 위에 흩어지는 게 아니라 그것이 설명하는 점수 옆의 요약
+    # 블록에 속한다.
     log = LogBuffer(echo=False)
 
     kept_pred = pred[keep]
@@ -358,11 +321,10 @@ def score_batch(
         log,
         task=task,
         interval_metric=metric,
-        # No groups: this file's clustering is not knowable here. The schema's group column may
-        # well be present, but whether *these* rows are one export of many per subject is a
-        # fact about how the batch was assembled, which is the thing this script does not know.
-        # A row-resampled interval on clustered rows is too narrow, so the interval is reported
-        # with that caveat rather than dressed up as a group interval it is not.
+        # groups 없음: 이 파일의 군집 구조는 여기서 알 수 없다. 스키마의 그룹 열이 있을 수도
+        # 있지만, *이* 행들이 대상마다 여러 번 나온 것 중 하나인지는 배치가 어떻게 이루어졌는지에
+        # 대한 사실이고 그것이 이 스크립트가 모르는 것이다. 군집된 행에 대한 row 단위 재표집
+        # 구간은 실제보다 좁으므로, 아닌 그룹 구간으로 꾸미지 않고 그 경고를 달아 보고한다.
         groups=None,
         seed=int(schema.get("seed") or 42),
         resamples=DEFAULT_RESAMPLES,
@@ -372,15 +334,14 @@ def score_batch(
     result["metric"] = metric
     result[BATCH_SCORE_KEY] = metrics
     result["resamples"] = DEFAULT_RESAMPLES
-    # The interval line is dropped: ``describe_score`` prints the same bounds beside the metric
-    # itself, and the same number twice trains the reader to skip the block that also carries
-    # the "roc_auc skipped: only one class present" kind of line.
+    # 구간 줄은 뺀다: ``describe_score``가 같은 경계를 지표 옆에 찍고, 같은 수를 두 번 보여주면
+    # "roc_auc skipped: only one class present" 같은 줄도 든 이 블록을 건너뛰도록 읽는 사람을
+    # 길들인다.
     result["notes"] = [line for line in log.lines if not line.startswith(f"{metric}=")]
     if kept_proba is not None and scored >= calibration.MIN_CALIBRATION_ROWS:
-        # Gated on the same floor as ``calibration_error``, and for the same reason: below it a
-        # bin holds a handful of rows, so a table of "1행, 예측 0.79, 실제 0.000" reads as a
-        # model that is wrong where it is only unmeasured. Withholding the summary number while
-        # printing the bins it was withheld over would be having it both ways.
+        # ``calibration_error``와 같은 하한으로 막는다. 이유도 같다: 그 아래에서는 한 bin이 행
+        # 몇 개를 들고 있어서 "1행, 예측 0.79, 실제 0.000" 표가 재지 못한 곳을 틀린 모델로 읽히게
+        # 한다. 요약 숫자는 참으면서 그것을 참은 이유인 bin은 찍는 것은 양쪽을 다 갖는 짓이다.
         result["reliability"] = calibration.reliability(codes, kept_proba)
     return result
 
@@ -393,11 +354,10 @@ def run_prediction(
     id_column: str | None = None,
     label_column: str | None = None,
 ) -> dict[str, Any]:
-    """Predict every row of ``data_path`` and write the CSV. Returns the summary.
+    """``data_path``의 모든 행을 예측해 CSV로 쓴다. 요약을 돌려준다.
 
-    ``label_column`` adds a score over the rows whose label the schema can code. It does not
-    change a single prediction: the batch is encoded, checked and predicted identically either
-    way, and the labels are read only after that.
+    ``label_column``은 스키마가 라벨을 코드로 매길 수 있는 행에 대한 점수를 더한다. 예측은 하나도
+    바뀌지 않는다: 어느 쪽이든 배치는 똑같이 인코딩·검사·예측되고, 라벨은 그 뒤에야 읽는다.
     """
     import joblib
     import pandas as pd
@@ -424,10 +384,9 @@ def run_prediction(
     proba = probability_matrix(model, matrix, schema)
     positive = positive_class_proba(proba, model)
 
-    # The rule the labels in this CSV are made with. Read from beside the model, never chosen
-    # here: the cut this attempt earned its score at was chosen on its training rows, and a
-    # caller applying a different one would get labels the run's reported numbers do not
-    # describe. No file is the ordinary case and means sklearn's fixed 0.5 rule.
+    # 이 CSV의 라벨을 만드는 규칙. 모델 옆에서 읽고 여기서 고르지 않는다: 이 시도가 점수를 얻은
+    # 컷은 그 시도의 학습 행에서 골라졌고, 다른 컷을 적용하는 호출자는 이 실행이 보고한 숫자가
+    # 설명하지 않는 라벨을 받는다. 파일이 없는 것이 흔한 경우이고 sklearn의 고정 0.5 규칙을 뜻한다.
     decision_log = LogBuffer(echo=False)
     threshold = load_decision(model_path.parent / DECISION_FILENAME, decision_log)
     if threshold is not None and positive is None:
@@ -440,9 +399,9 @@ def run_prediction(
         raw = label_at_cut(positive, threshold)
 
     predictions = label_predictions(raw, schema)
-    # The id column first, so the output can be joined back without positional trust, then the
-    # prediction, then the probabilities. The input's other columns are deliberately not copied:
-    # this file is a second copy of the caller's data if it is, and they already have the first.
+    # id 컬럼을 먼저 둬서 위치를 믿지 않고도 출력을 되붙일 수 있게 하고, 그다음 예측, 그다음 확률.
+    # 입력의 나머지 컬럼은 일부러 베끼지 않는다: 베끼면 이 파일이 호출자 데이터의 두 번째 사본이
+    # 되고, 첫 번째는 이미 그쪽에 있다.
     out: dict[str, Any] = {}
     if id_column:
         out[id_column] = frame[id_column]
@@ -461,14 +420,13 @@ def run_prediction(
         "task": schema.get("task"),
         "n_features": int(encoded.shape[1]),
         "columns": [str(name) for name in result.columns],
-        # Named, so a backtest can tell "the label column was excluded" from "the label column
-        # was fed to the model as a feature".
+        # 이름을 적어 둬서 backtest가 "라벨 컬럼을 제외했다"와 "라벨 컬럼을 피처로 모델에
+        # 먹였다"를 구분할 수 있게 한다.
         "dropped_non_features": dropped,
         "drift": drift,
-        # ``load_decision`` says nothing when there is simply no rule to apply, so anything it
-        # did say means a file that exists and could not be used — which changes every label in
-        # the output and belongs in the block a reader is told to read. When it *was* applied,
-        # the summary line prints the cut itself instead.
+        # ``load_decision``은 적용할 규칙이 아예 없을 때 아무 말도 하지 않으므로, 말한 것이
+        # 있다면 존재하지만 쓸 수 없었던 파일이라는 뜻이다 — 출력의 모든 라벨이 달라지는 일이고,
+        # 읽으라고 지시받은 블록에 속한다. *적용된* 경우에는 요약 줄이 컷 자체를 찍는다.
         "warnings": describe_drift(drift) + (decision_log.lines if threshold is None else []),
     }
     if threshold is not None:
@@ -488,19 +446,18 @@ def run_prediction(
 
 
 def describe_score(scored: dict[str, Any]) -> list[str]:
-    """The batch score as Korean lines, with what it is not.
+    """배치 점수를 한글 줄로. 그것이 아닌 것과 함께.
 
-    The caveat is not a footnote here, it is the second line. A batch score's meaning comes
-    entirely from how the batch was assembled, and this script cannot see that: the same
-    function that scored the holdout produced this number, over rows whose provenance is the
-    caller's knowledge and not the harness's. A number printed without that said is a number
-    that will be compared to the holdout as though the comparison were valid.
+    여기서 경고는 각주가 아니라 둘째 줄이다. 배치 점수의 뜻은 전부 배치가 어떻게 이루어졌는지에서
+    오고 이 스크립트는 그것을 볼 수 없다 — 홀드아웃을 채점한 그 함수가 이 수를 냈지만, 행의 출처는
+    harness가 아니라 호출자의 지식이다. 그 말 없이 찍힌 수는 비교가 유효한 것처럼 홀드아웃과 비교될
+    수다.
     """
     metrics = dict(scored.get(BATCH_SCORE_KEY) or {})
     rows = int(scored.get("scored_rows") or 0)
     label = scored.get("label_column")
-    # Phrased so the column name is not followed by a Korean particle: the right particle
-    # depends on the last syllable of a name this script does not choose.
+    # 컬럼 이름 뒤에 조사가 오지 않게 쓴다: 맞는 조사는 이 스크립트가 고르지 않는 이름의 마지막
+    # 음절에 달려 있다.
     lines = [f"이 배치를 채점했습니다 — 라벨 컬럼 {label!r}, {rows}행"]
 
     excluded = dict(scored.get("excluded_rows") or {})
@@ -510,8 +467,8 @@ def describe_score(scored: dict[str, Any]) -> list[str]:
         if missing:
             parts.append(f"라벨이 빈 행 {missing}개")
         if unknown:
-            # Worth its own words: an unknown label is not a dirty cell, it is a class the fit
-            # never saw, and the model has no code to predict it with.
+            # 따로 말할 값이 있다: 모르는 라벨은 더러운 칸이 아니라 적합이 본 적 없는
+            # 클래스이고, 모델에는 그것을 예측할 코드가 없다.
             parts.append(f"학습 때 없던 라벨 값을 가진 행 {unknown}개")
         lines.append(f"  채점에서 제외: {', '.join(parts)}")
 
@@ -530,31 +487,28 @@ def describe_score(scored: dict[str, Any]) -> list[str]:
             )
         lines.append(headline + " ← 이 실행이 목표로 삼았던 지표")
     else:
-        # Said, not skipped. Without this line the block below reads as an ordinary score
-        # sheet where one of the numbers happens to be the goal — and the reader has no way
-        # to tell which, because the schema could not name one. The metric also carries the
-        # only confidence interval, so its absence quietly removes the interval too.
+        # 건너뛰지 않고 말한다. 이 줄이 없으면 아래 블록은 숫자 중 하나가 우연히 목표인 평범한
+        # 점수표로 읽히고 — 스키마가 지표를 이름 짓지 못했으니 읽는 사람은 어느 것인지 알 길이
+        # 없다. 신뢰구간을 든 것도 목표 지표뿐이라, 그것이 없으면 구간도 조용히 사라진다.
         #
-        # Two different absences, and the branch below keeps them apart. A *named* metric that
-        # this batch cannot compute is ordinary and current: ``roc_auc`` over rows that all
-        # carry the same label is undefined, and ``score_split`` drops it rather than
-        # recording NaN. An *unnamed* one is a schema written before ``train.goal_metric``
-        # existed, when a goal metric belonging to the other task was recorded as ``null``
-        # instead of being substituted — a file on disk, not a path this build can produce.
+        # 없음이 두 가지이고 아래 분기가 둘을 갈라 둔다. *이름이 적힌* 지표를 이 배치가 계산할
+        # 수 없는 것은 평범하고 현재의 일이다: 모든 행이 같은 라벨인 곳에서 ``roc_auc``는
+        # 정의되지 않고, ``score_split``은 NaN을 기록하지 않고 뺀다. *이름이 없는* 쪽은
+        # ``train.goal_metric`` 전에 쓰인 스키마다 — 다른 태스크의 목표 지표가 대체되지 않고
+        # ``null``로 기록됐다. 디스크의 파일이지 이 빌드가 만들 수 있는 길은 아니다.
         lines.append(
             "  이 배치에는 목표 지표가 없습니다"
-            # Parenthesised rather than inflected: the particle after a metric name depends on
-            # its last syllable ("f1을" but "rmse를"), and the name comes from the schema.
+            # 굴절시키지 않고 괄호에 넣는다: 지표 이름 뒤의 조사는 마지막 음절에 달려 있고
+            # ("f1을"이지만 "rmse를"), 이름은 스키마에서 온다.
             + (f" — 스키마가 적은 지표({metric})는 이 행들에서 계산할 수 없었습니다" if metric else
                " — 스키마에 목표 지표가 적혀 있지 않습니다 (지표를 대체해 기록하기 전에 만들어진 "
                "스키마입니다). 이 모델을 다시 학습하면 기록됩니다")
             + ". 아래 지표는 모두 같은 채점에서 나온 값이지만, 어느 것이 이 실행이 목표로 "
             "삼았던 숫자인지는 여기서 알 수 없고 신뢰구간도 없습니다"
         )
-    # Everything else the same scoring call produced, minus three groups that would be noise
-    # here: the goal metric (its own line above), the two probability diagnostics (their own
-    # line below), the interval bounds (already printed with the metric they bound), and the
-    # registry's aliases, which are the same number under a second name.
+    # 같은 채점 호출이 낸 나머지 전부. 여기서 소음이 될 넷은 뺀다: 목표 지표(위에 자기 줄이
+    # 있다), 확률 진단값 둘(아래에 자기 줄이 있다), 구간 경계(그것이 감싸는 지표와 함께 이미
+    # 찍혔다), 그리고 같은 수를 다른 이름으로 내는 registry의 alias들.
     hidden = {metric, calibration.BRIER_KEY, calibration.CALIBRATION_KEY, *METRIC_ALIASES}
     others = ", ".join(
         f"{name}={float(value):.4f}"
@@ -571,7 +525,7 @@ def describe_score(scored: dict[str, Any]) -> list[str]:
         lines.append(f"  {probability}")
     lines += [f"  {line}" for line in calibration.describe_table(scored.get("reliability") or [])]
 
-    # The label the module docstring argues for, printed every time the score is.
+    # 모듈 docstring이 논증하는 그 딱지. 점수가 찍힐 때마다 함께 찍는다.
     lines.append(
         "  이 점수는 이 실행의 채점 프로토콜이 아닙니다 — result.json의 홀드아웃은 학습 전에 "
         "떼어 둔 행을 한 번만 채점한 값이지만, 이 파일이 어떤 행으로 이루어졌는지는 여기서 알 "
@@ -584,7 +538,7 @@ def describe_score(scored: dict[str, Any]) -> list[str]:
 
 
 def summarise(summary: dict[str, Any]) -> str:
-    """The run as Korean lines for a human. The warnings are the part worth reading."""
+    """실행을 사람이 읽을 한글 줄로. 읽을 값이 있는 부분은 확인할 점이다."""
     lines = [
         f"{summary['rows']}행을 예측해 {summary['out']}에 저장했습니다 "
         f"(인코딩된 피처 {summary['n_features']}개, task={summary['task']})"
@@ -593,9 +547,9 @@ def summarise(summary: dict[str, Any]) -> str:
         names = ", ".join(summary["dropped_non_features"])
         lines.append(f"피처가 아닌 컬럼은 제외했습니다: {names}")
     if summary.get("threshold") is not None:
-        # Printed every time, not only when it is surprising: the labels in the CSV are not what
-        # ``predict_proba`` at 0.5 would have said, and a caller comparing this file to another
-        # model's output has to know that before comparing anything.
+        # 놀라운 때만이 아니라 매번 찍는다: CSV의 라벨은 0.5에서의 ``predict_proba``가 말했을
+        # 것이 아니고, 이 파일을 다른 모델의 출력과 비교하는 호출자는 비교 전에 그것을 알아야
+        # 한다.
         lines.append(
             f"라벨은 이 모델과 함께 저장된 결정 규칙으로 만들었습니다 — 양성 확률 "
             f"{summary['threshold']} 이상 (sklearn 기본값 0.5가 아닙니다)"
@@ -604,9 +558,9 @@ def summarise(summary: dict[str, Any]) -> str:
         lines += describe_score(dict(summary["score"]))
     warnings = list(summary.get("warnings") or [])
     if warnings:
-        # "확인할 점" rather than "경고": a column the fit already ignored is reported every
-        # time and is not an anomaly, so calling all of these warnings would train the reader
-        # to skip the block that also carries the unseen-category lines.
+        # "경고"가 아니라 "확인할 점": 적합이 이미 무시한 열은 매번 보고되고 이상이 아니므로,
+        # 이것들을 모두 경고라 부르면 못 본 범주 줄도 든 이 블록을 건너뛰도록 읽는 사람을
+        # 길들인다.
         lines.append(f"확인할 점 {len(warnings)}건 — 예측은 나왔지만 아래를 읽으십시오:")
         lines += [f"  - {line}" for line in warnings]
     else:
@@ -663,8 +617,8 @@ def main(argv: list[str] | None = None) -> int:
             label_column=args.label_column,
         )
     except (OSError, ValueError, KeyError, ImportError) as exc:
-        # FeatureSchemaMismatch is a ValueError, so the refusals this script exists for come
-        # out as a message rather than a traceback.
+        # FeatureSchemaMismatch는 ValueError이므로, 이 스크립트가 있는 이유인 거절들은
+        # traceback이 아니라 메시지로 나온다.
         sys.stderr.write(f"prediction failed: {type(exc).__name__}: {exc}\n")
         return 1
 
@@ -676,10 +630,9 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(summary, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
             )
         except OSError as exc:
-            # The predictions are already on disk by now. Unguarded, a bad --report path
-            # ended the command in a traceback, and what the operator concluded from that
-            # was that the prediction had failed — so the message names the file that *did*
-            # get written, and the summary below is printed either way.
+            # 이 시점에 예측은 이미 디스크에 있다. 막지 않았을 때는 잘못된 --report 경로가
+            # 명령을 traceback으로 끝냈고, 운영자가 그것을 보고 내린 결론은 예측이 실패했다는
+            # 것이었다 — 그래서 메시지는 *써진* 파일을 이름 짓고, 아래 요약은 어느 쪽이든 찍는다.
             sys.stderr.write(
                 f"report not written: {type(exc).__name__}: {exc}\n"
                 f"  the predictions themselves are in {args.out}\n"

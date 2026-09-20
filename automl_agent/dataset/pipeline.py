@@ -1,29 +1,18 @@
-"""An ordered list of feature-space transforms, declared as JSON and interpreted from a whitelist.
+"""특성 공간 변환의 순서 있는 목록. JSON으로 선언되고 whitelist에서 해석된다.
 
-The four flags it replaces say *what* and never *where* or *in which order* — one imputation strategy
-for the whole matrix, ``missing_indicator`` over every column or none. So a step here carries a column
-list and the list carries an order.
+**``exec``되는 것은 없고 설정에서 이름으로 import되는 것도 없다.** :data:`STEPS`는 닫힌 집합이고,
+이 모듈이 모르는 단계는 해석되는 대신 이유와 함께 떨어진다.
 
-**Nothing is ``exec``'d and nothing is imported by name from the config.** :data:`STEPS` is a closed
-set, and a step this module does not know is dropped with a reason rather than resolved.
+**whitelist가 짧은 것은 재 봤기 때문이다** (``docs/PIPELINE-STEPS.md``). 후보 일곱 중 둘만 남았고
+**다섯은 일부러 없으며 각 부재가 하나의 측정이다**. 남은 둘이 합성되는 것이 이것을 플래그 둘이 아니라
+순서 있는 목록으로 만든다 (``docs/rationale.md``).
 
-**The whitelist is short because it was measured** (``docs/PIPELINE-STEPS.md``): of seven candidates,
-two moved the ranking with the interval clear of zero and **five are deliberately absent, each absence
-a measurement** — monotone transforms cannot change a tree's splits, feature selection and PCA lose
-ranking on every family tried, ``VarianceThreshold`` moves nothing because no encoded column is
-constant. Putting them in the registry would invite an iteration on a lever measured to lose.
+**열 동일성은 이름으로, 적합된 스키마에 대고 해석되고, 그 이름은 인코딩된 쪽이다** — one-hot 원본
+열은 여럿이 되었고, ``city``를 대는 계획은 그 전부를 뜻한다. 이 모듈이
+:mod:`automl_agent.dataset.features`를 아는 이유는 그 해석뿐이다.
 
-**The two that survive compose, and that is why this is an ordered list and not two more flags**: the
-interaction step consumes the indicator columns the imputation step appended, so together they beat
-their own sum. Both gains are on the *ranking* axis, which a fixed 0.5 cut does not show — what they
-raise is the ceiling, and ``tune_threshold`` collects it.
-
-**Column identity is by name, resolved against the fitted schema, and the names are the encoded
-ones** — a one-hot source column became several, and a plan naming ``city`` means all of them. That
-resolution is the only reason this module knows about :mod:`automl_agent.dataset.features`.
-
-Import-light: the orchestrator imports :data:`STEPS` to allowlist a plan before the subprocess exists;
-sklearn is imported inside :func:`build_steps`. Rationale: ``docs/rationale.md``.
+import가 가볍다: 오케스트레이터는 subprocess가 생기기 전에 계획을 allowlist하려고 :data:`STEPS`를
+import하고, sklearn은 :func:`build_steps` 안에서 import한다.
 """
 
 from __future__ import annotations
@@ -33,8 +22,8 @@ from typing import Any
 
 from .features import LEVEL_SEPARATOR
 
-# What a step may be called. A closed set: the interpreter resolves nothing by name from the
-# config, so an unknown step is a dropped step and not an import.
+# 단계가 가질 수 있는 이름. 닫힌 집합이다 — 해석기는 설정에서 아무것도 이름으로 해석하지 않으므로,
+# 모르는 단계는 떨어진 단계이고 import가 아니다.
 STEP_IMPUTE = "impute"
 STEP_INTERACTIONS = "interactions"
 STEP_SCALE = "scale"
@@ -48,57 +37,49 @@ STEPS: tuple[str, ...] = (
     STEP_MISSING_COUNT,
 )
 
-# The two steps that append rather than replace, and therefore have to come before any imputer:
-# after imputation there is no NaN left to mark. Named as a set because the interpreter uses it
-# to place a default imputer when a spec declares none.
+# 대체하는 대신 덧붙이는 두 단계. 따라서 어떤 imputer보다 앞에 와야 한다 — 대치 뒤에는 표시할 NaN이
+# 남아 있지 않다. 집합으로 이름을 갖는 이유는 해석기가 명세가 imputer를 선언하지 않았을 때 기본
+# imputer를 놓을 자리를 이것으로 정하기 때문이다.
 APPENDING_STEPS = frozenset({STEP_MISSING_INDICATOR, STEP_MISSING_COUNT})
 
-# Suffixes for the columns a step creates. Read by nothing but a human and the tracker's own
-# test — the point of naming them is that two steps in sequence can be told apart in the log.
+# 단계가 만드는 열의 접미사. 사람과 tracker 자신의 테스트 말고는 아무도 읽지 않는다 — 이름을 두는
+# 요점은 연달아 오는 두 단계를 로그에서 가를 수 있다는 것이다.
 INDICATOR_SUFFIX = "__missing"
 COUNT_COLUMN = "missing_count"
-# A space, which is ``PolynomialFeatures``' own spelling of a product and not the ``*`` that
-# reads better. Agreeing with sklearn is what lets the tracker's test be exact equality against
-# ``get_feature_names_out`` with nothing normalised away — and a join this module invented would
-# be a second spelling of the same column for no one's benefit.
+# 공백. ``PolynomialFeatures`` 자신이 곱을 적는 방식이고, 읽기 더 좋은 ``*``가 아니다. sklearn의
+# 철자에 맞추는 이유는 ``docs/rationale.md``.
 INTERACTION_JOIN = " "
 
 IMPUTE_STRATEGIES = ("median", "mean", "most_frequent", "constant")
-# Not a SimpleImputer strategy — it leaves the columns alone so a NaN-splitting family can use
-# them. Honoured as the *remainder* strategy and inside a group, which is the combination the
-# flag version could not express: keep the NaN where missingness is informative and put an
-# explicit 0 plus an indicator where it is not.
+# SimpleImputer의 전략이 아니다 — 열을 그대로 두어서 NaN으로 분기하는 계열이 쓸 수 있게 한다.
+# *remainder* 전략으로서, 그리고 그룹 안에서 인정된다 (``docs/rationale.md``).
 IMPUTE_NONE = "none"
 DEFAULT_IMPUTE = "median"
 
-# Only degree 2. Degree 3 on 14 encoded columns is 470 columns and on 60 it is 37,880, and no
-# measurement here justifies either; the parameter exists so a plan that names the degree it
-# means is told which one ran rather than silently getting a different one.
+# 차수 2뿐이다 (``docs/rationale.md``). 파라미터가 있는 이유는 자기가 뜻하는 차수를 대는 계획이
+# 조용히 다른 것을 받는 대신 어느 것이 돌았는지 듣게 하려고.
 INTERACTION_DEGREE = 2
-# Above this many input columns the interaction step is declined. ``guard_memory`` prices the
-# matrix that arrives, not the one a step creates, so this is the only thing standing between a
-# wide encoding and an out-of-memory kill *after* the guard passed: 50 columns expand to 1,275,
-# which at 30,000 rows is 306 MB of float64 — the same order as the matrices the guard already
-# admits. 200 columns would be 20,100 and 4.8 GB.
+# 입력 열이 이보다 많으면 interaction 단계를 거절한다. ``guard_memory``가 통과한 *뒤* 넓은 인코딩과
+# out-of-memory kill 사이에 서 있는 것은 이것뿐이다 (``docs/rationale.md``).
 INTERACTION_MAX_COLUMNS = 50
 
 
 def encoded_positions(
     columns: list[str], names: Any
 ) -> tuple[list[int], list[str]]:
-    """``(positions, unknown)`` for source column ``names`` inside the encoded layout.
+    """인코딩된 배치 안에서 원본 열 ``names``에 대한 ``(positions, unknown)``.
 
-    A name matches an encoded column outright, or matches every encoded column a one-hot source
-    produced — ``city`` selects ``city=seoul``, ``city=busan`` and ``city=<missing>``, because a
-    plan asking to impute ``city`` means the column it saw in the card and not one of its levels.
-    Level names are still accepted individually, since they are what the log prints back.
+    이름은 인코딩된 열과 그대로 맞거나, one-hot 원본이 낸 인코딩된 열 전부와 맞는다 — ``city``는
+    ``city=seoul``·``city=busan``·``city=<missing>``을 고른다. ``city``를 대치하라는 계획은 카드에서
+    본 그 열을 뜻하고 그 수준 하나를 뜻하지 않기 때문이다. 수준 이름도 개별로 받는다 — 로그가
+    되돌려 찍는 것이 그것이므로.
 
-    ``unknown`` is returned rather than raised. A plan naming a column the file does not have is
-    a mistake worth reporting in ``applied_pipeline``, not worth an iteration: the rest of the
-    step still describes something the executor can do.
+    ``unknown``은 raise하지 않고 돌려준다. 파일에 없는 열을 대는 계획은 ``applied_pipeline``에
+    보고할 값이 있는 실수이고, 반복 하나를 쓸 값은 없다 — 단계의 나머지는 여전히 실행기가 할 수
+    있는 무엇을 서술한다.
 
-    Positions are sorted and de-duplicated, so ``["city", "city=seoul"]`` is one selection and
-    not a column listed twice — which in a ``ColumnTransformer`` would be a fitted duplicate.
+    위치는 정렬되고 중복이 걷힌다. 그래서 ``["city", "city=seoul"]``은 한 선택이고 같은 열을 두 번
+    적은 것이 아니다 — 후자는 ``ColumnTransformer``에서 적합된 중복이 된다.
     """
     index = {name: position for position, name in enumerate(columns)}
     positions: set[int] = set()
@@ -117,12 +98,36 @@ def encoded_positions(
     return sorted(positions), unknown
 
 
-def _selection(spec: dict[str, Any], columns: list[str], log: Any) -> tuple[list[int], str]:
-    """``(positions, label)`` for a step's ``columns`` key. Absent means every column.
+def _rest(columns: list[str], taken: Any) -> list[int]:
+    """``taken``에 없는 위치들, 원래 순서대로 — ``ColumnTransformer``의 remainder가 나오는 순서."""
+    return [position for position in range(len(columns)) if position not in taken]
 
-    The label is what the echo and the log print, and ``all`` is a distinct answer from a list
-    that happens to name everything: a spec written as ``all`` keeps meaning all when the next
-    file has a column more.
+
+def _partial(
+    name: str, transformer: Any, positions: list[int], columns: list[str], appended: Any = ()
+) -> tuple[Any, list[str]]:
+    """일부 열에만 도는 변환을 ``ColumnTransformer``로 싸고, 그 출력 열 이름을 함께 낸다.
+
+    ``ColumnTransformer``는 변환기의 열을 먼저, 그다음 remainder를 원래 순서로 낸다. ``appended``는
+    변환기가 *덧붙인* 열의 이름이고, 그 둘 사이에 들어간다.
+
+    ``sparse_threshold=0.0``: 이 모듈이 출력 이름을 직접 추적하므로 sparse 출력은 추적할 이름이
+    없고, 여기 estimator들은 어차피 dense 입력을 받는다.
+    """
+    from sklearn.compose import ColumnTransformer
+
+    step = ColumnTransformer([(name, transformer, positions)], remainder="passthrough", sparse_threshold=0.0)
+    names = [columns[position] for position in positions]
+    names += list(appended)
+    names += [columns[position] for position in _rest(columns, positions)]
+    return step, names
+
+
+def _selection(spec: dict[str, Any], columns: list[str], log: Any) -> tuple[list[int], str]:
+    """단계의 ``columns`` 키에 대한 ``(positions, label)``. 없으면 모든 열이다.
+
+    label은 echo와 로그가 찍는 것이고, ``all``은 우연히 전부를 대는 목록과는 다른 답이다 —
+    ``all``로 쓰인 명세는 다음 파일에 열이 하나 더 있어도 계속 전부를 뜻한다.
     """
     raw = spec.get("columns")
     if raw is None:
@@ -136,17 +141,15 @@ def _selection(spec: dict[str, Any], columns: list[str], log: Any) -> tuple[list
 def _impute_step(
     spec: dict[str, Any], columns: list[str], native_nan: bool, log: Any
 ) -> tuple[Any, list[str], str] | None:
-    """One ``impute`` step: a default strategy plus any number of named column groups.
+    """``impute`` 단계 하나: 기본 전략 하나에 이름 붙은 열 그룹 몇 개.
 
-    With no groups this is a plain ``SimpleImputer`` and the column names are unchanged, which is
-    the flag version's behaviour exactly. With groups it is a ``ColumnTransformer``, and then the
-    output order is the transformer order followed by the remainder — so the names are tracked
-    rather than assumed, and :func:`build_steps`' caller has a test pinning the tracking against
-    sklearn's own ``get_feature_names_out``.
+    그룹이 없으면 맨 ``SimpleImputer``이고 열 이름은 그대로다 — 플래그 버전의 동작 그대로. 그룹이
+    있으면 ``ColumnTransformer``이고, 그러면 출력 순서는 변환기 순서 뒤에 remainder다. 그래서 이름은
+    가정되지 않고 추적되며, :func:`build_steps`의 호출자가 그 추적을 sklearn 자신의
+    ``get_feature_names_out``에 대고 묶는 테스트를 갖고 있다.
 
-    ``strategy: none`` on a family that cannot take a NaN is downgraded rather than fatal, on the
-    same terms the flag version used: a plan guessing wrong about a family should cost a log
-    line, not an iteration.
+    NaN을 받을 수 없는 계열에 온 ``strategy: none``은 치명적이 아니라 강등된다. 플래그 버전과 같은
+    조건이다 — 계열에 대해 잘못 짐작한 계획은 로그 한 줄을 물어야 하고 반복 하나가 아니다.
     """
     from sklearn.compose import ColumnTransformer
     from sklearn.impute import SimpleImputer
@@ -201,32 +204,30 @@ def _impute_step(
 
     if not transformers:
         if remainder_strategy == IMPUTE_NONE:
-            # Nothing built and nothing covered: every column keeps whatever NaN it had.
+            # 세운 것도 없고 덮은 것도 없다: 모든 열이 갖고 있던 NaN을 그대로 지킨다.
             return None
         return make(remainder_strategy, 0.0), list(columns), remainder_strategy
 
-    rest = [position for position in range(len(columns)) if position not in taken]
     step = ColumnTransformer(
         transformers,
         remainder="passthrough" if remainder_strategy == IMPUTE_NONE else make(remainder_strategy, 0.0),
-        # Off, because this module tracks the output names itself: sparse output has no names to
-        # track and the estimators here take dense input anyway.
+        # :func:`_partial`과 같은 이유로 끈다.
         sparse_threshold=0.0,
     )
-    # ColumnTransformer emits each transformer's columns in transformer order, then the
-    # remainder in the original order. Tracked, not assumed — see this module's docstring.
+    # ColumnTransformer는 각 변환기의 열을 변환기 순서로, 그다음 remainder를 원래 순서로 낸다.
+    # 가정하지 않고 추적한다 — 이 모듈의 docstring을 보라.
     names = [columns[position] for _name, _transformer, group in transformers for position in group]
-    names += [columns[position] for position in rest]
+    names += [columns[position] for position in _rest(columns, taken)]
     return step, names, f"{remainder_strategy} ({'; '.join(labels)})"
 
 
 def _leaves_nan(spec: dict[str, Any], native_nan: bool) -> bool:
-    """Whether this ``impute`` step deliberately leaves a NaN somewhere.
+    """이 ``impute`` 단계가 일부러 어딘가에 NaN을 남기는지.
 
-    Read off the *spec* rather than the built ``ColumnTransformer``, because the question is about
-    what was asked for and the answer is needed before the next step is built. Two ways to leave
-    one: a ``none`` remainder, or a group with ``strategy: none``. Both are only honoured on a
-    family that splits on NaN natively — off it they are downgraded, and then nothing is left.
+    세워진 ``ColumnTransformer``가 아니라 *명세*에서 읽는다. 질문이 무엇을 청했는가에 대한 것이고,
+    답은 다음 단계를 세우기 전에 필요하기 때문이다. 남기는 방법은 둘 — ``none`` remainder, 또는
+    ``strategy: none``인 그룹. 둘 다 NaN으로 기본적으로 분기하는 계열에서만 인정된다. 그 밖에서는
+    강등되고, 그러면 남는 것이 없다.
     """
     if not native_nan:
         return False
@@ -243,21 +244,15 @@ def _leaves_nan(spec: dict[str, Any], native_nan: bool) -> bool:
 def _interactions_step(
     spec: dict[str, Any], columns: list[str], log: Any, nan_possible: bool = False
 ) -> tuple[Any, list[str], str] | None:
-    """Degree-2 pairwise products of the named columns, appended to them.
+    """이름 붙은 열들의 차수 2 쌍별 곱, 그 열들 뒤에 덧붙여서.
 
-    Declined above :data:`INTERACTION_MAX_COLUMNS` inputs rather than allowed to expand into an
-    out-of-memory kill the pre-flight guard cannot see — the guard prices the matrix that
-    arrives, and this step is what makes a different one.
+    입력이 :data:`INTERACTION_MAX_COLUMNS`를 넘으면 거절한다 — preflight 가드가 볼 수 없는
+    out-of-memory kill로 펼쳐지게 두는 대신. 가드는 도착하는 행렬의 값을 매기고, 이 단계는 다른
+    행렬을 만드는 쪽이다.
 
-    Also declined while a NaN may still be in the matrix, and that one cost a real iteration to
-    find. ``PolynomialFeatures`` is the one step in this registry that refuses a NaN — a
-    ``StandardScaler`` disregards them in fit and maintains them in transform — so a plan that
-    asked for ``strategy: none`` to let the tree split on missingness and *then* for interactions
-    built a pipeline that raised inside ``fit``. That is the one thing this executor is not
-    allowed to do with a request it cannot honour: narrowing costs a log line, dying costs the
-    attempt.
+    행렬에 NaN이 아직 있을 수 있는 동안에도 거절한다. 그것은 반복 하나를 치르고 찾았다
+    (``docs/rationale.md``).
     """
-    from sklearn.compose import ColumnTransformer
     from sklearn.preprocessing import PolynomialFeatures
 
     if nan_possible:
@@ -286,22 +281,16 @@ def _interactions_step(
         )
         return None
     poly = PolynomialFeatures(degree=INTERACTION_DEGREE, interaction_only=True, include_bias=False)
+    pairs = [f"{columns[a]}{INTERACTION_JOIN}{columns[b]}" for a, b in combinations(positions, 2)]
     if len(positions) == len(columns):
-        # Every column, so no ColumnTransformer and no remainder to place. PolynomialFeatures
-        # emits the inputs in order, then the pairs in ``combinations`` order.
-        names = list(columns) + [
-            f"{columns[a]}{INTERACTION_JOIN}{columns[b]}" for a, b in combinations(positions, 2)
-        ]
-        return poly, names, label
-    step = ColumnTransformer([("interact", poly, positions)], remainder="passthrough", sparse_threshold=0.0)
-    names = [columns[position] for position in positions]
-    names += [f"{columns[a]}{INTERACTION_JOIN}{columns[b]}" for a, b in combinations(positions, 2)]
-    names += [columns[position] for position in range(len(columns)) if position not in positions]
+        # 모든 열이므로 ColumnTransformer도, 놓을 remainder도 없다. PolynomialFeatures는 입력을
+        # 순서대로, 그다음 쌍들을 ``combinations`` 순서로 낸다.
+        return poly, list(columns) + pairs, label
+    step, names = _partial("interact", poly, positions, columns, pairs)
     return step, names, label
 
 
 def _scale_step(spec: dict[str, Any], columns: list[str], log: Any) -> tuple[Any, list[str], str] | None:
-    from sklearn.compose import ColumnTransformer
     from sklearn.preprocessing import StandardScaler
 
     positions, label = _selection(spec, columns, log)
@@ -309,24 +298,20 @@ def _scale_step(spec: dict[str, Any], columns: list[str], log: Any) -> tuple[Any
         return None
     if len(positions) == len(columns):
         return StandardScaler(), list(columns), label
-    step = ColumnTransformer(
-        [("scale", StandardScaler(), positions)], remainder="passthrough", sparse_threshold=0.0
-    )
-    names = [columns[position] for position in positions]
-    names += [columns[position] for position in range(len(columns)) if position not in positions]
+    step, names = _partial("scale", StandardScaler(), positions, columns)
     return step, names, label
 
 
 def _appender_step(
     name: str, spec: dict[str, Any], columns: list[str], log: Any
 ) -> tuple[Any, list[str], str] | None:
-    """``missing_indicator`` or ``missing_count`` — the two steps that append columns.
+    """``missing_indicator`` 또는 ``missing_count`` — 열을 덧붙이는 두 단계.
 
-    Both are ``FunctionTransformer`` over a function in
-    :mod:`automl_agent.dataset.features`, which is where they have to live: that module is
-    importable under a stable name, and ``scripts/train.py`` runs as ``__main__``, so a function
-    defined there pickles as ``__main__.append_missing_indicator`` and resolves in no other
-    process. ``positions`` rides along in ``kw_args``, which is pickled as data.
+    둘 다 :mod:`automl_agent.dataset.features`의 함수 위에 놓인 ``FunctionTransformer``다. 그 함수가
+    거기 살아야 하는 이유: 그 모듈은 안정된 이름으로 import되는데, ``scripts/train.py``는
+    ``__main__``으로 돌기 때문에 거기 정의된 함수는 ``__main__.append_missing_indicator``로 pickle되고
+    다른 어떤 프로세스에서도 해석되지 않는다. ``positions``는 ``kw_args``에 실려 가고, 그것은
+    데이터로 pickle된다.
     """
     from sklearn.preprocessing import FunctionTransformer
 
@@ -343,8 +328,8 @@ def _appender_step(
         return None
     every = len(positions) == len(columns)
     return (
-        # ``None`` rather than the full list when it is every column, so a spec that says
-        # ``all`` pickles the same way the flag version did and keeps meaning all.
+        # 모든 열일 때는 전체 목록이 아니라 ``None``. 그래야 ``all``이라고 쓴 명세가 플래그 버전과
+        # 같은 방식으로 pickle되고 계속 전부를 뜻한다.
         FunctionTransformer(append_missing_indicator, kw_args=None if every else {"positions": positions}),
         [*columns, *(f"{columns[position]}{INDICATOR_SUFFIX}" for position in positions)],
         label,
@@ -354,33 +339,28 @@ def _appender_step(
 def build_steps(
     spec: Any, columns: list[str], log: Any, *, native_nan: bool = False
 ) -> tuple[list[tuple[str, Any]], list[str], list[str]]:
-    """``(steps, names, applied)`` for a declared spec. ``steps`` goes straight into a Pipeline.
+    """선언된 명세에 대한 ``(steps, names, applied)``. ``steps``는 그대로 Pipeline에 들어간다.
 
-    ``applied`` is the echo: one rendered line per step that really ran, in the order it ran, so
-    a report quotes what happened rather than what was asked for. A step that was dropped is
-    absent from it and its reason is in the log — the same contract ``dropped_hyperparams`` has.
+    ``applied``는 echo다: 실제로 돈 단계마다 렌더된 한 줄, 돈 순서대로. 그래서 보고서는 청한 것이
+    아니라 일어난 것을 인용한다. 떨어진 단계는 거기 없고 그 이유는 로그에 있다 —
+    ``dropped_hyperparams``와 같은 계약이다.
 
-    ``names`` is the encoded column names after the last step. Returned because the caller has a
-    check that pins it against sklearn's own ``get_feature_names_out`` on a fitted pipeline: this
-    module computes the layout ahead of the fit, and a tracker that silently disagreed with
-    sklearn would send a later step's ``columns`` at the wrong columns.
+    ``names``는 마지막 단계 뒤의 인코딩된 열 이름이다. 돌려주는 이유는 호출자가 그것을 적합된
+    파이프라인에서 sklearn 자신의 ``get_feature_names_out``에 대고 묶는 검사를 갖고 있기 때문이다.
+    이 모듈은 배치를 적합 전에 계산하고, sklearn과 조용히 어긋난 tracker는 뒤 단계의 ``columns``를
+    엉뚱한 열로 보낸다.
     """
     steps: list[tuple[str, Any]] = []
     applied: list[str] = []
     names = list(columns)
     seen: dict[str, int] = {}
-    # Whether a NaN may still be anywhere in the matrix. ``interactions`` is the one step that
-    # cannot take one, and it reads this rather than finding out inside ``fit``.
+    # 행렬 어딘가에 NaN이 아직 있을 수 있는지. ``interactions``가 그것을 받을 수 없는 유일한 단계이고,
+    # ``fit`` 안에서 알아내는 대신 이것을 읽는다.
     #
-    # The start value is ``native_nan`` and not ``True``, which is the whole subtlety. Off a
-    # NaN-splitting family an imputer is *guaranteed* to precede everything: either the spec
-    # declared one, or :func:`automl_agent.scripts.train._wrap_declared` inserts one, and it
-    # inserts it after the appenders — which is before any interactions step. On a NaN-splitting
-    # family nothing is inserted, because the NaN is the point, so a spec that never covers the
-    # columns leaves one for ``PolynomialFeatures`` to refuse.
+    # 시작값이 ``True``가 아니라 ``native_nan``인 것이 미묘한 지점 전부다 (``docs/rationale.md``).
     #
-    # Only an ``impute`` step that covers *every* column with a real strategy clears it: one with
-    # a passthrough group, or a ``none`` remainder, is asking to keep the NaN.
+    # 이것을 지우는 것은 실제 전략으로 *모든* 열을 덮는 ``impute`` 단계뿐이다. passthrough 그룹이
+    # 있거나 remainder가 ``none``인 것은 NaN을 지키자고 청하는 것이다.
     nan_possible = native_nan
     for entry in spec if isinstance(spec, list) else []:
         if not isinstance(entry, dict):
@@ -404,10 +384,7 @@ def build_steps(
         transformer, names, label = built
         count = seen.get(name, 0)
         seen[name] = count + 1
-        # The first occurrence keeps the bare name, so ``describe_preprocessing`` still finds
-        # ``impute`` and ``scale`` and ``applied_preprocessing`` keeps its shape for every reader
-        # written before this module. Repeats are numbered, because a Pipeline needs unique
-        # step names and a spec is allowed to impute twice.
+        # 첫 등장은 맨 이름을 지키고 되풀이는 번호가 붙는다 (``docs/rationale.md``).
         steps.append((name if not count else f"{name}_{count + 1}", transformer))
         applied.append(f"{name}({label})")
     return steps, names, applied

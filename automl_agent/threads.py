@@ -1,16 +1,9 @@
-"""Which BLAS/OpenMP thread state a fit ran in, recorded because it moves the score.
+"""적합이 어떤 BLAS/OpenMP 스레드 상태에서 돌았는지 — 점수를 움직이므로 기록한다.
 
-**"Same seed, same config" is not "same numbers".** Histogram summation over a different number of
-partial buffers adds in a different order, and floating-point addition is not associative — so the
-same config across thread counts moves the score by about as much as a paired verdict's half-width,
-while two runs in the *same* shell agree to the last bit (``FINDINGS-mimic.md``). Without this, a run
-directory could hold two attempts fitted under different thread counts and the ledger would publish
-the difference as the plan's doing.
+**"같은 seed, 같은 설정"은 "같은 숫자"가 아니다.** 스레드 수가 다르면 부동소수점 덧셈의 순서가
+달라지고 점수가 움직인다 (``docs/rationale.md``).
 
-**This module only records.** It does not set the variables and does not warn about a value — pinning
-a fit to one thread is reproducible and several times slower, and that trade belongs to whoever is
-running it. What is not theirs is leaving the number out of the record: a measurement whose
-environment is unstated cannot be compared against another one.
+**이 모듈은 기록만 한다.** 변수를 설정하지 않고, 어떤 값을 두고 경고하지도 않는다.
 """
 
 from __future__ import annotations
@@ -19,24 +12,18 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-# These three and not more. They are the ones the estimators in this repository actually
-# read — OpenMP for xgboost and sklearn's histogram trees, OpenBLAS and MKL for the linear
-# algebra under logreg and the MLP. ``NUMEXPR_NUM_THREADS`` is pandas' and touches loading,
-# not fitting. Same tuple as ``bench/paired.py`` records, so a bench adjudication and a run's
-# own artifacts can be read against each other.
+# 이 셋이고 더는 아니다 — 저장소의 estimator가 실제로 읽는 것, 그리고 ``bench/paired.py``가
+# 기록하는 것과 같은 tuple.
 THREAD_ENV: tuple[str, ...] = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 
 CPU_COUNT_KEY = "cpu_count"
 
 
 def thread_state() -> dict[str, Any]:
-    """The thread environment of this process, in the shape it is recorded in.
+    """이 프로세스의 스레드 환경, 기록되는 모양 그대로.
 
-    ``None`` for an unset variable rather than a default, because unset does not mean one: it
-    means the library chooses, and what it chooses is derived from the core count of the
-    machine. Both facts go in the block, so a reader holding two records can tell "unset in
-    both, and the same number of cores" from "unset on 4 cores, unset on 64" — which are the
-    same three ``None``\\ s and different arithmetic.
+    설정되지 않은 변수는 기본값이 아니라 ``None``이고, 코어 수가 함께 담긴다 — unset이 무엇으로
+    풀리는지는 코어 수에 달려 있다.
     """
     state: dict[str, Any] = {key: os.environ.get(key) for key in THREAD_ENV}
     state[CPU_COUNT_KEY] = os.cpu_count()
@@ -44,14 +31,13 @@ def thread_state() -> dict[str, Any]:
 
 
 def describe_thread_state(state: Mapping[str, Any] | None) -> str:
-    """One log line: ``OMP_NUM_THREADS=1 ... MKL_NUM_THREADS=unset cpu_count=20``.
+    """로그 한 줄: ``OMP_NUM_THREADS=1 ... MKL_NUM_THREADS=unset cpu_count=20``.
 
-    ``unset`` spelled out rather than left blank, because a blank reads as a value of zero
-    or as a truncated line, and this string is written into ``log_tail``, which is where a
-    human looks first.
+    없는 값은 빈칸이 아니라 ``unset``으로 적는다.
     """
     if not isinstance(state, Mapping):
         return "unrecorded"
+
     def shown(key: str, absent: str) -> str:
         value = state.get(key)
         return f"{key}={absent if value is None else value}"
@@ -62,12 +48,9 @@ def describe_thread_state(state: Mapping[str, Any] | None) -> str:
 
 
 def _effective(state: Mapping[str, Any]) -> tuple[str, ...]:
-    """What each variable resolves to for the fit, unset folded into the core count.
+    """각 변수가 적합에 대해 실제로 무엇으로 풀리는지. unset은 코어 수로 접는다.
 
-    Comparing the raw values would call two records different when they are not and the same
-    when they are not. ``OMP_NUM_THREADS=1`` on a 4-core box and on a 64-core box run the same
-    arithmetic; all three unset on those two boxes do not. So the core count enters the
-    comparison only where a variable is unset — which is exactly where the library reads it.
+    날값을 비교하면 두 기록을 거꾸로 판정한다 (``docs/rationale.md``).
     """
     cores = state.get(CPU_COUNT_KEY)
     return tuple(
@@ -79,13 +62,10 @@ def _effective(state: Mapping[str, Any]) -> tuple[str, ...]:
 def thread_state_changed(
     before: Mapping[str, Any] | None, after: Mapping[str, Any] | None
 ) -> bool | None:
-    """Whether two records describe thread states that fit differently. ``None`` if unknowable.
+    """두 기록이 다르게 적합되는 스레드 상태를 말하는지. 알 수 없으면 ``None``.
 
-    ``None`` — not ``False`` — for a record made before this module existed, or one missing a
-    variable. "We did not check" and "we checked and they match" are different facts, and the
-    absent field would be read as the second one, which is the failure this whole module is
-    about. Consumers publish the ``None`` as silence and the ``True`` as a warning
-    (:func:`automl_agent.scoring.intervals.describe_paired`).
+    ``None``은 ``False``가 아니다: 이 모듈이 생기기 전의 기록이거나 변수가 빠진 기록이라는 뜻이고,
+    소비자는 그것을 침묵으로, ``True``를 경고로 발표한다.
     """
     if not isinstance(before, Mapping) or not isinstance(after, Mapping):
         return None

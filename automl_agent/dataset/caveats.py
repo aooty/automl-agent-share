@@ -1,52 +1,41 @@
-"""The card's channel for "things about this data the aggregates do not show".
+"""카드의 "집계가 보여 주지 않는, 이 데이터에 대한 것들" 채널.
 
-The card's ``missing`` block is three numbers and the per-column profiles are buckets, so everything
-else a human learns from the file has nowhere to go — and :data:`CARD_KEYS` is a strict allowlist,
-leaving no slot even by hand. What that costs: missingness can be the strongest signal in a table
-*and* entangled with row order, so a plan that leans on it partly learns where in the file a row sat,
-and nothing in the card could say so (``FINDINGS-mimic.md``).
+왜 이 채널이 필요한지는 ``docs/rationale.md``. 출처는 둘이고, 같은 목록에 얹힌다:
 
-Two sources, both landing in the same list:
+- **프로파일러 자신의 검사.** 지금은 센티넬 코드 (:mod:`automl_agent.dataset.sentinels`).
+- **운영자.** ``--caveat "..."``, 반복 가능. 시스템에서 *사람*의 원본 데이터 지식을 프롬프트로
+  나르는 유일한 채널이다.
 
-- **The profiler's own checks.** Sentinel codes today (:mod:`automl_agent.dataset.sentinels`).
-  These are worth putting in the LLM's field of view precisely because the profiler cannot
-  act on them: it will not convert a code, so the aggregates below it are measured with the
-  code counted as a measurement, and a plan that leans on that column is leaning on a
-  number nobody should trust.
-- **The operator.** ``--caveat "..."``, repeatable. This is the only channel in the system
-  that carries a *human's* knowledge of the raw data into the prompts.
-
-**The operator's text reaches a prompt as written, so it is the one place a cell value can get there
-by hand.** Deliberate, and the same shape as ``--name``: what this repo enforces mechanically is that
-no *code path* carries rows into a prompt. **The bound below is on length and count, not content** —
-it protects the prompt budget, not privacy.
+**운영자의 텍스트는 적힌 그대로 프롬프트에 닿는다 — 셀 값이 손으로 거기 갈 수 있는 유일한 자리다.**
+의도한 것이다 (``docs/rationale.md``). **아래 상한은 내용이 아니라 길이와 개수에 걸린다** — 지키는
+것은 프롬프트 예산이고 비공개가 아니다.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-# The card key. Named here rather than spelled in five places, since the allowlist in
-# :mod:`automl_agent.privacy`, the profiler, the nodes and the prompts all reference it.
+from .sentinels import KIND_NUMERIC_CODE
+
+# 카드 키. :mod:`automl_agent.privacy`의 allowlist, 프로파일러, 노드, 프롬프트가 모두 이것을
+# 참조하므로 다섯 군데에 적는 대신 여기서 이름을 갖는다.
 CAVEATS_KEY = "caveats"
 
-# Bounds, because this text is rendered into every reasoning prompt of every iteration. A
-# caveat that does not fit in a couple of sentences is a document, and belongs next to the
-# card rather than inside it.
+# 이 텍스트는 매 반복의 모든 추론 프롬프트에 렌더되므로 상한이 있다 (``docs/rationale.md``).
 MAX_CAVEATS = 20
 MAX_CAVEAT_CHARS = 400
 
 
 def sentinel_caveats(by_column: dict[str, list[dict[str, Any]]]) -> list[str]:
-    """One caveat per suspected missing-code, phrased for a reader who plans with it.
+    """의심되는 결측 코드마다 주의사항 하나. 그것으로 계획하는 독자를 향해 쓴다.
 
-    Says both halves: which value is suspect, and that the column's own statistics — the
-    ones the card publishes two blocks up — were measured with it left in place.
+    양쪽 절반을 다 말한다: 어느 값이 의심스러운지, 그리고 그 열의 통계 — 카드가 두 블록 위에
+    발표하는 그것 — 가 그 값을 그대로 둔 채 측정됐다는 사실.
     """
     lines: list[str] = []
     for name, findings in by_column.items():
         for item in findings:
-            if item.get("kind") == "numeric_code":
+            if item.get("kind") == KIND_NUMERIC_CODE:
                 shown = f"{float(item['value']):g}"
                 what = "결측 코드로 의심되는 값"
             else:
@@ -62,14 +51,10 @@ def sentinel_caveats(by_column: dict[str, list[dict[str, Any]]]) -> list[str]:
 
 
 def grouping_caveats(group_column: str | None, n_groups: int | None = None) -> list[str]:
-    """The one caveat about the *split* rather than about a column.
+    """열이 아니라 *분할*에 대한 유일한 주의사항.
 
-    Grouping is published in ``baseline.protocol.grouped_by``, but a card built with
-    ``--no-baseline`` has no protocol block at all, and even when it does the fact is buried
-    in a nested dict a reasoning prompt may not read closely. It changes what every score in
-    the run means — the numbers are out-of-group, so they are lower than a row-level split
-    would report and they are the honest ones — so it says that in the section the prompts
-    are told to treat as constraints.
+    그룹 분할은 ``baseline.protocol.grouped_by``에도 발표되는데 여기 한 번 더 적는 이유는
+    ``docs/rationale.md``.
     """
     if not group_column:
         return []
@@ -84,10 +69,10 @@ def grouping_caveats(group_column: str | None, n_groups: int | None = None) -> l
 
 
 def merge_caveats(*groups: list[str] | tuple[str, ...] | None) -> list[str]:
-    """Flatten, trim, de-duplicate and bound. Order is preserved: machine first, then human.
+    """평평하게, 다듬고, 중복을 걷고, 상한을 건다. 순서는 유지된다: 기계 먼저, 사람 나중.
 
-    De-duplication is by exact text, which is enough for the case it exists for — the same
-    ``--caveat`` passed twice, or an operator repeating what the profiler already found.
+    중복 판정은 글자 그대로의 일치다. 있는 이유가 되는 경우 — 같은 ``--caveat``을 두 번 주거나,
+    운영자가 프로파일러가 이미 찾은 것을 되풀이하는 것 — 에는 그것으로 충분하다.
     """
     merged: list[str] = []
     for group in groups:
@@ -99,7 +84,7 @@ def merge_caveats(*groups: list[str] | tuple[str, ...] | None) -> list[str]:
 
 
 def card_caveats(card: dict[str, Any] | None) -> list[str]:
-    """The caveat list of a card, tolerant of a hand-written one that used a bare string."""
+    """카드의 주의사항 목록. 손으로 쓴 카드가 맨 문자열을 쓴 경우도 받아 준다."""
     raw = (card or {}).get(CAVEATS_KEY)
     if isinstance(raw, str):
         return merge_caveats([raw])
@@ -109,7 +94,7 @@ def card_caveats(card: dict[str, Any] | None) -> list[str]:
 
 
 def describe_caveats(card: dict[str, Any] | None) -> str:
-    """The prompt block. Never empty, so a missing section cannot read as "none known"."""
+    """프롬프트 블록. 결코 비지 않는다 — 빈 절이 "알려진 것 없음"으로 읽히지 않게."""
     items = card_caveats(card)
     if not items:
         return "(없음 — 이 데이터에 대해 별도로 기록된 주의사항이 없습니다)"

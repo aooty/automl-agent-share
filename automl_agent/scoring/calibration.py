@@ -1,37 +1,31 @@
-"""How much a predicted probability is worth as a probability.
+"""예측된 확률이 확률로서 얼마나 값이 있는지.
 
-Every other metric here is about *ranking* or *labels*, and **a model can rank perfectly, be
-systematically overconfident, and leave all of them happy.** Neither answers what an operator asks of
-the output CSV: "it says 0.7 for this row; does 70% of anything happen?"
+여기 다른 모든 지표는 *랭킹*이나 *라벨*에 대한 것이고, **모델은 완벽하게 순위를 매기면서 체계적으로
+과신할 수 있고 그러면 그 전부가 만족한다.** 어느 것도 운영자가 출력 CSV에 묻는 것에 답하지 않는다:
+"이 행에 0.7이라고 적혀 있는데, 무엇의 70%가 실제로 일어나는가?"
 
-**Measure, report, leave the model alone.** A caller applying the model to their own rows brings their
-own cut, so the probabilities are what they act on. **No ``CalibratedClassifierCV``, no shifted cut** —
-recalibration is a model change fitted on labelled rows, and the only labelled rows here are the
-holdout (scored once, gating nothing) and a caller's backtest file, which this process may not fit
-anything on.
+**재고, 보고하고, 모델은 건드리지 않는다.** 모델을 자기 행에 적용하는 호출자는 자기 컷을 갖고 오므로
+그들이 행동의 근거로 삼는 것은 확률이다. **``CalibratedClassifierCV``도, 옮긴 컷도 없다** — 이유는
+``docs/rationale.md``.
 
-Two numbers, and they are not interchangeable:
+두 수이고, 교환 가능하지 않다:
 
 ``brier``
-    Mean squared error of the positive-class probability, ``mean((p - y)**2)``. A proper
-    scoring rule: it is minimised only by the true probabilities, so it prices calibration and
-    discrimination together. Unbiased at any sample size, which is why it is reported on a
-    40-row batch and the other one is not.
+    양성 클래스 확률의 평균제곱오차, ``mean((p - y)**2)``. proper scoring rule이다: 참 확률에서만
+    최소화되므로 calibration과 discrimination을 함께 값 매긴다. 어느 표본 크기에서도 불편이고, 그래서
+    40행 배치에서도 보고되고 다른 하나는 안 된다.
 
 ``calibration_error``
-    Expected calibration error — bin the rows by predicted probability, and take the
-    count-weighted mean distance between each bin's mean prediction and its observed rate.
-    This is the one that answers the operator's question directly, and it is *biased upward on
-    few rows*: with ten bins and forty rows, a bin holds four rows and its observed rate can
-    only be 0, 0.25, 0.5, 0.75 or 1. So it is only reported above
-    :data:`MIN_CALIBRATION_ROWS`, and its absence is disclosed rather than silent.
+    Expected calibration error — 행을 예측 확률로 구간에 넣고, 각 구간의 평균 예측과 관측된 발생률
+    사이 거리를 개수 가중 평균한다. 운영자의 질문에 직접 답하는 쪽이고, *적은 행에서 위로 편향된다*:
+    열 구간에 마흔 행이면 한 구간이 네 행이고 그 관측률은 0, 0.25, 0.5, 0.75, 1 중 하나밖에 될 수
+    없다. 그래서 :data:`MIN_CALIBRATION_ROWS` 위에서만 보고되고, 그 부재는 조용하지 않고 밝혀진다.
 
-**Both are diagnostics and neither is in the registry**, so no goal can be set against them and no
-attempt selected for them — a run that optimised ``brier`` would be a different run than the operator
-asked for. Same terms as ``specificity`` and ``balanced_accuracy_cut_headroom``.
+**둘 다 진단이고 어느 것도 registry에 없다.** 그래서 이들에 대고 목표를 세울 수도, 이들로 시도를 고를
+수도 없다 — ``brier``를 최적화한 실행은 운영자가 청한 것과 다른 실행이다. ``specificity``와
+``balanced_accuracy_cut_headroom``과 같은 조건이다.
 
-Only the measuring functions touch numpy, so the orchestrator can import this to *describe* a number.
-Rationale: ``docs/rationale.md``.
+측정 함수만 numpy를 건드리므로 오케스트레이터는 숫자를 *서술*하려고 이것을 import할 수 있다.
 """
 
 from __future__ import annotations
@@ -39,28 +33,25 @@ from __future__ import annotations
 import math
 from typing import Any
 
-# The two keys this module contributes to a metrics dict. Named here so the script that writes
-# them and the node that reads them back cannot disagree by a typo.
+# 이 모듈이 metrics dict에 넣는 두 키. 여기서 이름 붙이는 이유는 그것을 쓰는 스크립트와 되읽는 노드가
+# 오타로 어긋날 수 없게 하려고.
 BRIER_KEY = "brier"
 CALIBRATION_KEY = "calibration_error"
 
-# Equal-width bins over [0, 1]. Ten is the convention and it is also the most a 50-row split can
-# fill without most bins holding one row.
+# [0, 1] 위의 등폭 구간. 열은 관례이고, 50행 분할이 대부분의 구간에 한 행만 두지 않고 채울 수 있는
+# 최대이기도 하다.
 N_BINS = 10
 
-# Below this, ``calibration_error`` is not reported. See the module docstring: the estimator is
-# biased upward when a bin holds a handful of rows, and a number that reads as "4% miscalibrated"
-# when it is measuring bin granularity is worse than no number. 50 rows is five per bin at the
-# mean, which is the point where the observed rate stops being a coarse fraction.
+# 이 아래에서는 ``calibration_error``를 보고하지 않는다. 50행은 평균적으로 구간당 다섯 행이고, 관측된
+# 발생률이 거친 분수이기를 그치는 지점이 거기다.
 MIN_CALIBRATION_ROWS = 50
 
 
 def brier_score(y_true: Any, proba: Any) -> float | None:
-    """``mean((p - y)**2)`` over the positive-class probability. ``None`` when unavailable.
+    """양성 클래스 확률에 대한 ``mean((p - y)**2)``. 쓸 수 없으면 ``None``.
 
-    ``None`` rather than an exception for a regression target, a model without
-    ``predict_proba``, or an empty split — every caller treats a missing value as "not
-    measured", so a degenerate split costs a disclosure rather than a run.
+    회귀 타깃, ``predict_proba`` 없는 모델, 빈 분할에 예외가 아니라 ``None``인 이유: 모든 호출자가
+    없는 값을 "측정되지 않음"으로 다루므로, 퇴화한 분할은 실행이 아니라 공개 한 줄을 문다.
     """
     import numpy as np
 
@@ -78,11 +69,11 @@ def brier_score(y_true: Any, proba: Any) -> float | None:
 
 
 def reliability(y_true: Any, proba: Any, bins: int = N_BINS) -> list[dict[str, Any]]:
-    """One entry per non-empty probability bin: ``{low, high, rows, predicted, observed}``.
+    """비지 않은 확률 구간마다 한 항목: ``{low, high, rows, predicted, observed}``.
 
-    Empty bins are dropped rather than reported as zeros — a bin no row landed in is not a bin
-    where the model was wrong. Aggregates only: a row count, a mean prediction and an observed
-    rate, which is the same shape of fact a dataset card publishes about a column.
+    빈 구간은 0으로 보고하는 대신 버린다 — 아무 행도 떨어지지 않은 구간은 모델이 틀린 구간이 아니다.
+    집계뿐이다: 행 수, 평균 예측, 관측된 발생률. 데이터셋 카드가 열에 대해 공개하는 것과 같은 모양의
+    사실이다.
     """
     import numpy as np
 
@@ -96,8 +87,8 @@ def reliability(y_true: Any, proba: Any, bins: int = N_BINS) -> list[dict[str, A
     if len(p) == 0 or len(p) != len(y):
         return []
     edges = np.linspace(0.0, 1.0, int(bins) + 1)
-    # ``right=True`` with the first edge folded in, so 0.0 lands in the first bin and 1.0 in the
-    # last rather than in bins of their own.
+    # 첫 경계를 접어 넣은 ``right=True``. 그래서 0.0은 첫 구간에, 1.0은 마지막 구간에 떨어지고 각자
+    # 자기 구간을 갖지 않는다.
     index = np.clip(np.digitize(p, edges[1:-1], right=True), 0, int(bins) - 1)
     table: list[dict[str, Any]] = []
     for position in range(int(bins)):
@@ -118,8 +109,8 @@ def reliability(y_true: Any, proba: Any, bins: int = N_BINS) -> list[dict[str, A
 
 
 def calibration_error(y_true: Any, proba: Any, bins: int = N_BINS) -> float | None:
-    """Count-weighted mean distance between predicted and observed rate. ``None`` under
-    :data:`MIN_CALIBRATION_ROWS` rows, because below that it measures the binning."""
+    """예측과 관측 발생률 사이 거리의 개수 가중 평균. :data:`MIN_CALIBRATION_ROWS` 미만에서는
+    ``None`` — 그 아래에서는 구간 나누기를 재는 것이 되므로."""
     table = reliability(y_true, proba, bins)
     total = sum(int(item["rows"]) for item in table)
     if total < MIN_CALIBRATION_ROWS:
@@ -133,11 +124,11 @@ def calibration_error(y_true: Any, proba: Any, bins: int = N_BINS) -> float | No
 
 
 def measure(y_true: Any, proba: Any, bins: int = N_BINS) -> dict[str, float]:
-    """The two diagnostic keys, omitting whichever could not be measured.
+    """두 진단 키, 측정할 수 없었던 쪽은 빼고.
 
-    Omitted rather than ``None``: these ride in a metrics dict whose consumers assume every
-    value is a number (``privacy.public_result`` keeps numeric values and drops the rest), so a
-    key that is sometimes null would read as a metric that sometimes failed.
+    ``None``이 아니라 빼는 이유: 이들은 모든 값이 숫자라고 가정하는 소비자를 가진 metrics dict에 실려
+    간다(``privacy.public_result``는 숫자 값을 지키고 나머지를 버린다). 그래서 때때로 null인 키는
+    때때로 실패하는 지표로 읽힐 것이다.
     """
     found: dict[str, float] = {}
     score = brier_score(y_true, proba)
@@ -150,12 +141,12 @@ def measure(y_true: Any, proba: Any, bins: int = N_BINS) -> dict[str, float]:
 
 
 def describe(metrics: Any, rows: int | None = None) -> str:
-    """One Korean line, or "" when there is nothing measured to say.
+    """한글 한 줄, 또는 말할 만큼 측정된 것이 없으면 "".
 
-    Deliberately not a verdict. There is no bar at which a Brier score is "good" — it depends
-    on the base rate, so 0.09 is poor on a 2%-positive target and excellent on a balanced one —
-    and inventing one would be the harness making the operator's decision for it. What the line
-    does say is what the number *is about*, and that a probability is not the label.
+    일부러 판정이 아니다. Brier 점수가 "좋다"고 할 바는 없다 — 기저율에 달려 있어서 0.09는 양성 2%
+    타깃에서 나쁘고 균형 잡힌 타깃에서 훌륭하다 — 그리고 하나를 발명하는 것은 harness가 운영자의
+    결정을 대신 하는 일이 된다. 이 줄이 말하는 것은 그 숫자가 *무엇에 대한* 것인지, 그리고 확률이
+    라벨이 아니라는 것이다.
     """
     values = dict(metrics or {})
     score = values.get(BRIER_KEY)
@@ -182,10 +173,10 @@ def describe(metrics: Any, rows: int | None = None) -> str:
 
 
 def describe_table(table: list[dict[str, Any]]) -> list[str]:
-    """The reliability table as lines, for a console that stays on the operator's machine.
+    """reliability 표를 줄로, 운영자의 기계에 머무는 콘솔을 위해.
 
-    Per-bin counts, so this is not printed anywhere a prompt can reach — the two callers are
-    ``scripts/predict.py``'s stdout and a local report file.
+    구간별 개수이므로 프롬프트가 닿을 수 있는 어디에도 찍히지 않는다 — 호출자는 둘,
+    ``scripts/predict.py``의 stdout과 로컬 보고서 파일이다.
     """
     if not table:
         return []

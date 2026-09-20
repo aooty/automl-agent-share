@@ -1,18 +1,14 @@
-"""CLI entry point: ``profile`` / ``run`` / ``resume`` / ``show`` / ``predict`` / ``graph``.
+"""CLI 진입점: ``profile`` / ``run`` / ``resume`` / ``show`` / ``predict`` / ``graph``.
 
-All console output is Korean; identifiers, metric names and error types stay in
-English so they match the artifacts and the code.
+콘솔 출력은 전부 한글이고, 식별자·지표 이름·오류 타입은 영어로 남는다 — 그래야 산출물과 코드와
+맞는다.
 
-``profile`` is the card-building step run on its own, for when a human wants to read
-(and edit) the card before spending a run on it. ``run --data`` does the same work
-inside the graph, via the ``profiling`` node. Either way the split is the same: the
-path goes into the private ``data_ref`` channel, the aggregates into
-``dataset_card``.
+``profile``은 카드를 만드는 단계를 따로 돌리는 것이다. 사람이 실행을 쓰기 전에 카드를 읽고 고칠
+수 있게 한다. ``run --data``는 같은 일을 ``profiling`` 노드를 통해 그래프 안에서 한다. 어느
+쪽이든 나뉘는 방식은 같다: 경로는 비공개 ``data_ref`` 채널로, 집계는 ``dataset_card``로.
 
-``predict`` is the step after the loop: the model the run selected, applied to rows nobody
-has labels for. It is a command rather than a node because it is not part of choosing a
-model — and because it is the only path here whose *output* is per-row, so it never enters
-the graph's state at all.
+``predict``는 루프 뒤의 단계다. 노드가 아니라 명령인 것은 모델을 고르는 일의 일부가 아니기
+때문이고, 여기서 *출력*이 행 단위인 유일한 경로여서 그래프의 state에 아예 들어가지 않는다.
 """
 
 from __future__ import annotations
@@ -49,7 +45,7 @@ from .dataset.caveats import CAVEATS_KEY, card_caveats, merge_caveats
 from .dataset.targets import DEFAULT_TARGET_MISSING_POLICY, TARGET_MISSING_POLICIES
 from .graph import build_graph, build_state_graph, make_checkpointer
 
-# Costs nothing extra: ``.graph`` above already imports every node module.
+# 추가 비용 없음: 위의 ``.graph``가 이미 모든 노드 모듈을 import한다.
 from .nodes.holdout import describe as describe_holdout
 from .nodes.profiling import ProfilingFailed, assert_goal_is_usable
 from .privacy import CardSchemaError, data_ref, public_card, register_private, validate_card
@@ -70,12 +66,23 @@ RUN_CONFIG_FILE = "run_config.json"
 
 
 # --------------------------------------------------------------------------- #
-# Console reporting
+# 콘솔 보고
 # --------------------------------------------------------------------------- #
 
 
+def outcome_text(metric: str, score: Any, error_type: Any) -> str:
+    """``f1=0.7231``, 점수가 숫자가 아니면 ``실패(oom)``.
+
+    한 시도의 결말을 한 조각으로 적는 유일한 자리 — 반복 요약 줄과 ``show``의 시도 이력이 같은
+    문장을 써야 한다.
+    """
+    if isinstance(score, (int, float)):
+        return f"{metric}={float(score):.4f}"
+    return f"실패({error_type or 'unknown'})"
+
+
 class ConsoleReporter:
-    """Prints one summary line per iteration, completed by the critic's verdict."""
+    """반복마다 요약 한 줄을 찍고, critic의 판정으로 그 줄을 마무리한다."""
 
     def __init__(self, goal: dict[str, Any]) -> None:
         self.goal = goal
@@ -84,8 +91,8 @@ class ConsoleReporter:
 
     def on_update(self, node: str, update: dict[str, Any]) -> None:
         if node == "profiling":
-            # The profiler measures the reference baseline, so the bar it reports
-            # supersedes whatever could be derived before the card existed.
+            # 프로파일러가 기준선을 측정하므로, 그것이 보고하는 바가 카드가 있기 전에 유도할 수
+            # 있었던 무엇보다 우선한다.
             goal = update.get("goal")
             if isinstance(goal, dict) and goal:
                 self.goal = goal
@@ -104,8 +111,8 @@ class ConsoleReporter:
             if direction:
                 print(f"          방향: {direction}")
         elif node == "holdout":
-            # Flush first: the pending line is the iteration this model came from, and the
-            # final measurement only makes sense read after it.
+            # 먼저 flush한다: 밀려 있는 줄은 이 모델이 나온 반복이고, 마지막 측정은 그 뒤에 읽어야
+            # 뜻이 된다.
             self._flush("")
             print(f"  [holdout] {describe_holdout(dict(update.get('holdout') or {}))}")
         elif node == "report":
@@ -116,10 +123,8 @@ class ConsoleReporter:
         metric = str(evaluation.get("metric") or self.goal.get("metric", "metric"))
         threshold = self.goal.get("threshold")
         iteration = evaluation.get("iteration")
-        if evaluation.get("status") == "ok" and isinstance(evaluation.get("score"), (int, float)):
-            outcome = f"{metric}={float(evaluation['score']):.4f}"
-        else:
-            outcome = f"실패({evaluation.get('error_type') or 'unknown'})"
+        score = evaluation.get("score") if evaluation.get("status") == "ok" else None
+        outcome = outcome_text(metric, score, evaluation.get("error_type"))
         marker = " [목표 달성]" if evaluation.get("goal_met") else ""
         return f"[iter {iteration}] model={self._model} {outcome} (goal {threshold}){marker}"
 
@@ -133,8 +138,18 @@ class ConsoleReporter:
 
 
 # --------------------------------------------------------------------------- #
-# Config persistence (so ``resume`` needs only --thread-id)
+# 설정 저장 (그래서 ``resume``은 --thread-id 하나로 된다)
 # --------------------------------------------------------------------------- #
+
+
+def artifacts_root_arg(args: argparse.Namespace) -> Path | None:
+    """``--artifacts-root``를 ``Path``로, 주지 않았으면 ``None``."""
+    return Path(args.artifacts_root) if args.artifacts_root else None
+
+
+def load_config(args: argparse.Namespace) -> RunConfig:
+    """``--thread-id``로 실행 설정을 다시 세우는 명령들(resume·show·predict)의 공통 입구."""
+    return load_run_config(args.thread_id, artifacts_root_arg(args))
 
 
 def save_run_config(config: RunConfig) -> None:
@@ -143,44 +158,24 @@ def save_run_config(config: RunConfig) -> None:
         key: (str(value) if isinstance(value, Path) else value)
         for key, value in dataclasses.asdict(config).items()
     }
-    # Not a ``RunConfig`` field, and written here anyway: it is the environment the run
-    # happened in rather than a setting the run was given, and ``load_run_config`` keeps only
-    # declared fields, so a resumed run never reads it back as one. It is here because this is
-    # the one file per run directory that says what the run *was*, and thread count moves the
-    # scores in it by more than some of the differences they are used to argue
-    # (:mod:`automl_agent.threads`). A resume overwrites this file, so it describes the shell
-    # of the most recent leg — the per-attempt copies in ``result.json`` are the ones that stay
-    # matched to their own numbers.
+    # ``RunConfig`` 필드가 아닌데도 여기 쓴다: 실행이 받은 설정이 아니라 실행이 일어난 환경이고,
+    # ``load_run_config``는 선언된 필드만 남기므로 재개된 실행이 이것을 설정으로 읽는 일은 없다
+    # (``docs/rationale.md``).
     payload["threads"] = thread_state()
     path = config.run_dir / RUN_CONFIG_FILE
-    # Written to a sibling and renamed, because ``os.replace`` is atomic on both platforms:
-    # every command except ``run`` rebuilds its settings from this file, so a write cut off
-    # halfway — Ctrl-C, a full disk — used to leave truncated JSON, and truncated JSON is
-    # the one state where the run is intact on disk but nothing can read it back. The
-    # rename either happened or did not; there is no half-file to load.
+    # 형제 파일에 쓰고 rename한다 — ``os.replace``가 양쪽 플랫폼에서 atomic이다. 반쯤 끊긴 쓰기가
+    # 남기는 잘린 JSON은 실행이 디스크에 온전한데 아무것도 읽어 들일 수 없는 유일한 상태다.
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     temporary.replace(path)
 
 
 def load_run_config(thread_id: str, artifacts_root: Path | None = None) -> RunConfig:
-    """Rebuild the config of a finished or interrupted run from its own directory.
+    """끝났거나 중단된 실행의 설정을 그 실행의 디렉터리에서 다시 세운다.
 
-    ``artifacts_root`` is re-anchored to where this file was actually found, and the saved
-    value is discarded. It is an absolute path written on the machine that ran the run, and
-    every command that loads a config then derives the things it needs from it — the
-    checkpoint database, ``history.json``, ``model.joblib``. Copy the run directory to
-    another machine (or just move the repository) and the saved root points at nothing, so
-    the derived paths do too, and what the operator gets is not an error about a moved
-    directory: ``show`` and ``resume`` report "저장된 체크포인트가 없습니다" and ``predict``
-    reports "선택된 최고 시도가 없습니다" — three messages that describe a run that failed,
-    for a run that succeeded. The file is *in* the root, so the root is a fact this function
-    already has and does not need to be told.
-
-    ``data_path`` and ``dataset_card_path`` are left exactly as saved: they point outside
-    ``artifacts/``, so there is nothing here to re-anchor them against, and inventing a
-    location for the raw data would be worse than a clear failure. ``command_resume``
-    checks the one that a resumed run actually reads.
+    ``artifacts_root``는 이 파일이 실제로 발견된 자리로 다시 고정되고 저장된 값은 버려진다.
+    ``data_path``와 ``dataset_card_path``는 저장된 그대로 둔다 — ``artifacts/`` 밖을 가리키므로
+    다시 고정할 기준이 없다. 둘을 왜 다르게 다루는지는 ``docs/rationale.md``.
     """
     base = artifacts_root or ARTIFACTS_ROOT
     path = base / thread_id / RUN_CONFIG_FILE
@@ -194,10 +189,8 @@ def load_run_config(thread_id: str, artifacts_root: Path | None = None) -> RunCo
     except OSError as exc:
         raise SystemExit(f"오류: 실행 설정을 읽을 수 없습니다 ({path}) — {exc}") from exc
     except json.JSONDecodeError as exc:
-        # ``save_run_config`` renames into place, so this is a file from before that change,
-        # a hand edit, or a damaged disk. The traceback it used to raise pointed at json's
-        # internals; what the operator needs is the path and the fact that the rest of the
-        # run directory is untouched.
+        # 운영자에게 필요한 것은 json 내부를 가리키는 traceback이 아니라 경로와, 실행 디렉터리의
+        # 나머지는 그대로라는 사실이다.
         raise SystemExit(
             f"오류: 실행 설정이 올바른 JSON이 아닙니다 ({path}) — {exc}\n"
             "  쓰는 중에 중단된 파일일 수 있습니다. 같은 --thread-id로 `run`을 다시 실행하면 "
@@ -206,8 +199,7 @@ def load_run_config(thread_id: str, artifacts_root: Path | None = None) -> RunCo
         ) from exc
     if not isinstance(raw, dict):
         raise SystemExit(
-            f"오류: 실행 설정이 JSON 객체가 아닙니다 ({path}, 최상위가 "
-            f"{type(raw).__name__}입니다)"
+            f"오류: 실행 설정이 JSON 객체가 아닙니다 ({path}, 최상위가 {type(raw).__name__}입니다)"
         )
     fields = {field.name for field in dataclasses.fields(RunConfig)}
     kwargs: dict[str, Any] = {key: value for key, value in raw.items() if key in fields}
@@ -218,7 +210,7 @@ def load_run_config(thread_id: str, artifacts_root: Path | None = None) -> RunCo
 
 
 # --------------------------------------------------------------------------- #
-# Commands
+# 명령
 # --------------------------------------------------------------------------- #
 
 
@@ -230,22 +222,18 @@ def load_dataset_card(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise SystemExit(f"오류: 데이터셋 카드가 올바른 JSON이 아닙니다 — {exc}") from exc
     try:
-        # Before anything else touches it: a card that cannot be published stops the run
-        # here, where the message is about the file the user just named.
+        # 다른 무엇이 손대기 전에: 발표할 수 없는 카드는 여기서 실행을 멈춘다. 메시지가 사용자가
+        # 방금 이름을 댄 파일에 대한 것인 자리가 여기다.
         return validate_card(card)
     except CardSchemaError as exc:
         raise SystemExit(f"{exc}\n  - 카드 경로: {path}") from exc
 
 
-def config_goal(
-    config: RunConfig, card: dict[str, Any] | None = None
-) -> tuple[dict[str, Any], str | None]:
-    """The ``goal`` channel for this config and card, and the substitution note if there is one.
+def config_goal(config: RunConfig, card: dict[str, Any] | None = None) -> tuple[dict[str, Any], str | None]:
+    """이 설정과 카드에 대한 ``goal`` 채널, 그리고 지표가 바뀌었다면 그 안내문.
 
-    Same call the profiling node makes, including the metric substitution — which is why it
-    returns a pair. A caller that has a card in hand can find out here that the run will be
-    judged by a different metric than the flags asked for, and the display-only callers pass
-    no card, so for them the note is always ``None``.
+    profiling 노드가 하는 것과 같은 호출이고 지표 치환까지 포함한다 — 그래서 짝을 돌려준다.
+    보여주기만 하는 호출자는 카드를 주지 않으므로 그쪽에서 안내문은 늘 ``None``이다.
     """
     return resolve_goal(
         card or {},
@@ -258,13 +246,12 @@ def config_goal(
 
 
 def initial_state(card: dict[str, Any], config: RunConfig) -> dict[str, Any]:
-    """Seed the blackboard, splitting the card into its public and private halves.
+    """칠판을 씨 뿌린다. 카드를 공개·비공개 절반으로 나누는 자리.
 
-    This is where the boundary is drawn for the whole run: ``public_card`` drops the
-    ``data`` block (and any example rows a hand-written card smuggled in), while
-    ``data_ref`` keeps the path in a channel only the execution nodes read. The path is
-    also registered with the prompt guard, so a regression that puts it back into the
-    card stops the run instead of shipping it to the API.
+    실행 전체의 경계가 여기서 그어진다: ``public_card``는 ``data`` 블록(과 손으로 쓴 카드가 몰래
+    넣은 예시 행)을 떨어뜨리고, ``data_ref``는 경로를 실행 노드만 읽는 채널에 둔다. 경로는
+    프롬프트 가드에도 등록되므로, 그것을 카드에 되돌려 놓는 회귀는 API로 보내지는 대신 실행을
+    멈춘다.
     """
     reference = data_ref(card, config.data_path, config.target_column, config.group_column)
     if reference.get("path"):
@@ -272,9 +259,8 @@ def initial_state(card: dict[str, Any], config: RunConfig) -> dict[str, Any]:
     return {
         "dataset_card": public_card(card),
         "data_ref": reference,
-        # Derived from whatever card we have now; on the ``--data`` path there is no
-        # card yet, so this is the per-metric fallback and the profiling node
-        # overwrites it with a baseline-derived bar on the first tick.
+        # 지금 있는 카드에서 유도한다. ``--data`` 경로에는 아직 카드가 없으므로 이것은 지표별
+        # 기본값이고, profiling 노드가 첫 tick에 기준선에서 유도한 바로 덮어쓴다.
         "goal": config_goal(config, card)[0],
         "plan": {},
         "model": "",
@@ -293,19 +279,19 @@ def initial_state(card: dict[str, Any], config: RunConfig) -> dict[str, Any]:
 
 
 def check_credentials(config: RunConfig) -> None:
-    """Fail before spending time when a live run cannot possibly call the LLM."""
+    """실제 실행이 LLM을 부를 수 없는 것이 확실하면 시간을 쓰기 전에 실패한다."""
     if not config.use_llm:
         return
-    # A run whose every LLM-calling node is served locally needs no Anthropic credentials, and
-    # the split matters: ``--proposer-model ollama:...`` alone still leaves the Critic and the
-    # report on the API, so only the fully local case is exempt.
+    # LLM을 부르는 모든 노드가 로컬에서 서비스되는 실행은 Anthropic 자격 증명이 필요 없다.
+    # ``--proposer-model ollama:...`` 만으로는 Critic과 보고서가 여전히 API에 남으므로, 완전히
+    # 로컬인 경우만 면제된다.
     from .llm.client import needs_anthropic
 
     if not needs_anthropic(config):
         return
     if use_bedrock() and not bedrock_signing_available():
-        # The SDK imports botocore lazily, when it signs the first request — without
-        # this check the failure surfaces as a traceback from inside the planning node.
+        # SDK는 첫 요청에 서명할 때 botocore를 lazy하게 import한다 — 이 검사가 없으면 실패가
+        # planning 노드 안에서 나온 traceback으로 드러난다.
         raise SystemExit(
             "오류: Bedrock 경로는 요청 서명(SigV4)에 botocore가 필요하지만 설치되어 있지 않습니다.\n"
             '  - 설치: python -m pip install "anthropic[bedrock]"\n'
@@ -325,12 +311,12 @@ def check_credentials(config: RunConfig) -> None:
 
 
 def open_app(config: RunConfig) -> tuple[Any, BaseCheckpointSaver, dict[str, Any]]:
-    """Compile the graph over this run's checkpoint file and build its runtime config."""
+    """이 실행의 체크포인트 파일 위로 그래프를 컴파일하고 런타임 설정을 만든다."""
     saver = make_checkpointer(config.checkpoint_db)
     app = build_graph(config, checkpointer=saver)
     runtime = {
         "configurable": {"thread_id": config.thread_id},
-        # Ample headroom for max_iterations * 4 nodes plus the report.
+        # max_iterations * 4 노드에 보고서까지, 넉넉한 여유.
         "recursion_limit": config.max_iterations * 6 + 12,
     }
     return app, saver, runtime
@@ -342,10 +328,9 @@ def run_goal(
     config: RunConfig,
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The goal the run is working against: seeded state, else checkpoint, else config.
+    """실행이 대고 있는 목표: 씨 뿌린 state, 없으면 체크포인트, 없으면 설정.
 
-    Only for display. The nodes read ``state["goal"]`` directly, and on the ``--data``
-    path the profiling node replaces it once the baseline has been measured.
+    보여주기만 위한 것이다. 노드는 ``state["goal"]``을 직접 읽는다.
     """
     goal = dict((payload or {}).get("goal") or {})
     if not goal:
@@ -361,7 +346,7 @@ def stream_graph(
     config: RunConfig,
     payload: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Run (or resume) the graph, printing progress as nodes report."""
+    """그래프를 돌리거나(재개하고) 노드가 보고할 때마다 진행을 찍는다."""
     reporter = ConsoleReporter(run_goal(app, runtime, config, payload))
     try:
         for chunk in app.stream(payload, config=runtime, stream_mode="updates"):
@@ -369,9 +354,9 @@ def stream_graph(
                 if isinstance(update, dict):
                     reporter.on_update(node, update)
     except ProfilingFailed as exc:
-        # A setup error, not an experimental outcome (see nodes/profiling.py): the operator
-        # has to change something before any run of this data can work. Printed as a
-        # message rather than a traceback, because the message *is* the fix.
+        # 실험 결과가 아니라 설정 오류다 (``nodes/profiling.py``): 이 데이터의 어떤 실행도 돌기
+        # 전에 운영자가 무언가를 바꿔야 한다. traceback이 아니라 메시지로 찍는다 — 메시지가
+        # 곧 고치는 방법이다.
         reporter.finish()
         raise SystemExit(f"오류: {exc}") from exc
     reporter.finish()
@@ -395,15 +380,12 @@ def print_outcome(state: dict[str, Any], config: RunConfig) -> None:
         )
     else:
         print("최고 성능: 성공한 시도가 없습니다.")
-    # Printed right under the best validation score, because that is the number a reader
-    # would otherwise walk away with, and it was selected on.
+    # 최고 검증 점수 바로 아래에 찍는다. 그것이 아니면 읽는 사람이 들고 가는 숫자가 그 검증
+    # 점수인데, 그것은 고를 때 쓴 숫자다.
     print(describe_holdout(dict(state.get("holdout") or {})))
     goal = dict(state.get("goal") or {}) or config_goal(config)[0]
     print(f"목표: {describe(goal)}")
     print(f"총 반복: {state.get('iteration')} / {state.get('max_iterations')}")
-    # Next to the iteration count, because they are the same kind of fact and one of them used
-    # to be unenforced: --time-budget-sec was a per-fit timeout, so the seconds a run spent were
-    # nowhere on this screen and nowhere in its artifacts.
     print(f"시간 예산: {describe_budget(dict(state.get('budget') or {}))}")
     print(f"아티팩트: {config.run_dir}")
     report_path = config.run_dir / "report.md"
@@ -413,11 +395,11 @@ def print_outcome(state: dict[str, Any], config: RunConfig) -> None:
 
 
 def command_profile(args: argparse.Namespace) -> int:
-    """Build a dataset card from raw data, as a standalone step.
+    """원본 데이터에서 데이터셋 카드를 만든다. 따로 도는 단계로.
 
-    Runs the same fixed script the ``profiling`` node runs, in the same kind of
-    subprocess. The point of exposing it separately is review: a human can read the
-    card, correct a mislabelled column, and only then spend a run on it.
+    ``profiling`` 노드가 돌리는 것과 같은 고정 스크립트를 같은 종류의 subprocess에서 돌린다.
+    따로 노출하는 요점은 검토다: 사람이 카드를 읽고, 잘못 붙은 열을 고치고, 그 다음에야 실행을
+    쓴다.
     """
     from .scripts.profile import main as profile_main
 
@@ -444,20 +426,18 @@ def command_profile(args: argparse.Namespace) -> int:
         raise SystemExit("오류: 데이터셋 카드 생성에 실패했습니다 (위 stderr 참고).")
     print("")
     print(f"카드를 저장했습니다: {out_path}")
-    # Both bars this card implies, before a run is spent on it — the point of the
-    # standalone command is choosing. Same derivation the profiling node performs.
+    # 이 카드가 뜻하는 바 둘 다, 실행을 쓰기 전에 — 따로 있는 명령의 요점이 고르는 것이다.
+    # profiling 노드가 하는 것과 같은 유도.
     card = load_dataset_card(out_path)
     print(f"이 카드로 {args.metric} 를 목표로 실행하면:")
     for mode in GOAL_MODES:
-        # ``resolve_goal``, not ``derive_goal``: the point of this preview is to show the bar
-        # a real run would be judged against, and a run against this card would substitute
-        # the metric if it belongs to the other task. Previewing ``rmse`` bars for a
-        # classification card would preview a run that cannot happen.
+        # ``derive_goal``이 아니라 ``resolve_goal``: 미리보기의 요점은 실제 실행이 대고 채점될 바를
+        # 보여주는 것이고, 실제 실행은 지표가 다른 task 것이면 치환한다.
         goal, substitution = resolve_goal(card, metric=args.metric, mode=mode, margin=args.margin)
         print(f"  {describe(goal)}")
         if substitution and mode == GOAL_MODES[0]:
-            # Once, not per mode: the substitution is a property of the card and the metric,
-            # and the same sentence under both bars would read as two different findings.
+            # 모드마다가 아니라 한 번: 치환은 카드와 지표의 성질이고, 같은 문장이 두 바 아래에
+            # 있으면 서로 다른 발견 둘로 읽힌다.
             print(f"  경고: {substitution}")
     print("이 카드의 'data' 블록만 원본 경로를 담고 있고, 실행 시 프롬프트에서 제외됩니다.")
     print(f"실행: python -m automl_agent.main run --dataset-card {out_path} --thread-id <id> ...")
@@ -465,14 +445,11 @@ def command_profile(args: argparse.Namespace) -> int:
 
 
 def resolve_goal_mode(args: argparse.Namespace) -> str:
-    """Settle the goal mode from the flags, refusing combinations that contradict.
+    """플래그에서 목표 모드를 정하고, 서로 모순되는 조합은 거절한다.
 
-    A silently ignored ``--threshold`` (or ``--margin``) is the worst outcome here: the
-    run would report against a bar the caller did not ask for and never be told.
+    조용히 무시된 ``--threshold``(또는 ``--margin``)가 여기서 가장 나쁜 결말이다
+    (``docs/rationale.md``).
     """
-    # ``--goal-mode`` defaults to None rather than "auto" so that "not specified" stays
-    # distinguishable from "explicitly auto": naming a threshold and nothing else is
-    # choosing fixed, but naming both is a contradiction worth stopping for.
     mode = args.goal_mode or (MODE_FIXED if args.threshold is not None else MODE_AUTO)
     if mode == MODE_AUTO and args.threshold is not None:
         raise SystemExit(
@@ -522,29 +499,27 @@ def command_run(args: argparse.Namespace) -> int:
         on_missing_target=args.on_missing_target,
         caveats=tuple(args.caveats or ()),
         group_column=args.group_column,
-        artifacts_root=Path(args.artifacts_root) if args.artifacts_root else None,
+        artifacts_root=artifacts_root_arg(args),
         keep_models=args.keep_models,
     )
     check_credentials(config)
-    # No card means the profiling node builds one from data_ref on the first tick.
+    # 카드가 없으면 profiling 노드가 첫 tick에 data_ref에서 하나 만든다.
     card = load_dataset_card(config.dataset_card_path) if config.dataset_card_path else {}
     if card and config.caveats:
-        # Appended in memory only: the card file on disk is the profiler's artifact, and a
-        # run that edited it would change what a later run of a different thread reads.
-        # On the ``--data`` path the profiling node passes these to the script instead.
+        # 메모리에서만 덧붙인다: 디스크의 카드 파일은 프로파일러의 산출물이고, 그것을 고친 실행은
+        # 다른 thread의 나중 실행이 읽는 것을 바꾸게 된다. ``--data`` 경로에서는 profiling 노드가
+        # 이것을 스크립트로 넘긴다.
         card[CAVEATS_KEY] = merge_caveats(card_caveats(card), config.caveats)
     if card:
-        # A metric that cannot score this card's target, or a bar that could not be derived
-        # from it: with the card already in hand there is nothing left to measure, so the
-        # answer will not change by starting. Refused before a checkpoint, an artifact
-        # directory or a run_config.json exists. The ``--data`` path has no card yet, so
-        # there the same check runs in the profiling node.
+        # 이 카드의 목표 열을 채점할 수 없는 지표이거나, 그것에서 유도할 수 없었던 바: 카드가 이미
+        # 손에 있으면 더 측정할 것이 없으므로 시작한다고 답이 달라지지 않는다. 체크포인트도 산출물
+        # 디렉터리도 run_config.json도 생기기 전에 거절한다. ``--data`` 경로에는 아직 카드가 없어서
+        # 같은 검사가 profiling 노드에서 돈다.
         goal, substitution = config_goal(config, card)
         if substitution:
-            # Before the run header rather than inside it: the operator is being told the run
-            # will be judged by a metric they did not name, and the moment to read that is
-            # before waiting for an iteration. ``initial_state`` recomputes the same goal, so
-            # this only prints — it does not decide anything.
+            # 실행 헤더 안이 아니라 그 앞에: 운영자는 실행이 자기가 대지 않은 지표로 채점된다는
+            # 말을 듣고 있고, 그것을 읽을 순간은 반복을 기다리기 전이다. ``initial_state``가 같은
+            # 목표를 다시 계산하므로 이것은 찍기만 하고 아무것도 정하지 않는다.
             print(f"경고: {substitution}")
         try:
             assert_goal_is_usable(card, goal, config)
@@ -554,8 +529,8 @@ def command_run(args: argparse.Namespace) -> int:
     app, saver, runtime = open_app(config)
     existing = app.get_state(runtime)
     if existing and existing.values:
-        # Seeding a fresh state onto a used thread_id would *append* to the old
-        # history through the reducer, silently mixing two runs together.
+        # 이미 쓴 thread_id에 새 state를 씨 뿌리면 reducer를 타고 옛 history에 *덧붙어*, 두 실행이
+        # 조용히 섞인다.
         if not args.force:
             raise SystemExit(
                 f"오류: thread_id '{config.thread_id}'에 이미 체크포인트가 있습니다 "
@@ -568,10 +543,9 @@ def command_run(args: argparse.Namespace) -> int:
         print(f"--force: thread_id '{config.thread_id}'의 기존 체크포인트를 삭제하고 새로 시작합니다")
         saver.delete_thread(config.thread_id)
 
-    # Written only once this run is actually going to happen. Saving before the
-    # checkpoint check overwrote the *previous* run's run_config.json even when this
-    # invocation was rejected — and a later ``resume`` then read the new settings against
-    # the old checkpoint, reporting a goal and a metric the recorded iterations never used.
+    # 이 실행이 실제로 일어난다고 정해진 뒤에만 쓴다. 체크포인트 검사 앞에서 저장하면 이 호출이
+    # 거절될 때도 *앞선* 실행의 run_config.json을 덮어썼고, 나중 ``resume``이 옛 체크포인트에
+    # 새 설정을 대고 읽어 기록된 반복들이 쓴 적 없는 목표와 지표를 보고했다.
     save_run_config(config)
 
     if config.dry_run:
@@ -590,8 +564,8 @@ def command_run(args: argparse.Namespace) -> int:
     goal = dict(seed_state["goal"])
     print(f"목표: {describe(goal)}")
     if config.goal_mode == MODE_AUTO and goal["source"] == "fallback":
-        # An auto-mode bar that had no baseline to derive from. Say which way it will go
-        # instead of leaving a per-metric default looking like a measured number.
+        # 유도할 기준선이 없었던 auto 모드의 바. 지표별 기본값이 측정된 숫자처럼 보이게 두는 대신
+        # 어느 쪽으로 갈지 말한다.
         if card:
             print(
                 "  경고: 이 카드에는 기준선(baseline)이 없어 auto 모드가 데이터셋에 맞출 수 "
@@ -608,16 +582,10 @@ def command_run(args: argparse.Namespace) -> int:
 
 
 def assert_resumable_data(reference: dict[str, Any], thread_id: str) -> None:
-    """Refuse to resume a run whose data file is not where the checkpoint says it is.
+    """데이터 파일이 체크포인트가 말하는 자리에 없는 실행의 재개를 거절한다.
 
-    Checked here rather than left to the training subprocess, and only for a run that is going
-    to train again. The path in the checkpoint is absolute and was written on the machine that
-    started the run, so a copied artifacts directory resumes into a file that is not there —
-    and the way *that* surfaces is one recorded attempt failure per remaining iteration, a
-    critic reasoning about the failures as if they were about the models, and a report
-    concluding the run could not reach its goal. Refusing costs one message.
-
-    A run with no data reference at all is the synthetic path, which has nothing to check.
+    학습 subprocess에 맡기지 않고 여기서 검사하는 이유는 ``docs/rationale.md``. 데이터 참조가 아예
+    없는 실행은 합성 경로이고 검사할 것이 없다.
     """
     path = str(reference.get("path") or "")
     if not path or Path(path).exists():
@@ -632,16 +600,14 @@ def assert_resumable_data(reference: dict[str, Any], thread_id: str) -> None:
 
 
 def command_resume(args: argparse.Namespace) -> int:
-    config = load_run_config(
-        args.thread_id, Path(args.artifacts_root) if args.artifacts_root else None
-    )
+    config = load_config(args)
     check_credentials(config)
     app, _saver, runtime = open_app(config)
     snapshot = app.get_state(runtime)
     if not snapshot or not snapshot.values:
         raise SystemExit(f"오류: thread_id '{config.thread_id}'에 저장된 체크포인트가 없습니다.")
-    # Arm the prompt guard before the first resumed node runs: on this path the data
-    # reference comes from the checkpoint, not from the CLI arguments.
+    # 재개된 첫 노드가 돌기 전에 프롬프트 가드를 장전한다: 이 경로에서 데이터 참조는 CLI 인자가
+    # 아니라 체크포인트에서 온다.
     resumed_reference = dict(snapshot.values.get("data_ref") or {})
     if resumed_reference.get("path"):
         register_private(resumed_reference["path"])
@@ -654,16 +620,14 @@ def command_resume(args: argparse.Namespace) -> int:
     print(f"체크포인트에서 재개 — thread_id={config.thread_id}, 다음 노드={snapshot.next}")
     print(f"저장된 진행 상황: iteration {snapshot.values.get('iteration')}")
     print("-" * 70)
-    # Passing None resumes from the checkpoint instead of seeding a new state.
+    # None을 넘기면 새 state를 씨 뿌리는 대신 체크포인트에서 재개한다.
     state = stream_graph(app, runtime, config, None)
     print_outcome(state, config)
     return 0
 
 
 def command_show(args: argparse.Namespace) -> int:
-    config = load_run_config(
-        args.thread_id, Path(args.artifacts_root) if args.artifacts_root else None
-    )
+    config = load_config(args)
     app, _saver, _runtime = open_app(config)
     snapshot = app.get_state({"configurable": {"thread_id": config.thread_id}})
     if not snapshot or not snapshot.values:
@@ -679,12 +643,7 @@ def command_show(args: argparse.Namespace) -> int:
     for attempt in state.get("history") or []:
         result = attempt.get("result") or {}
         metrics = result.get("metrics") or {}
-        score = metrics.get(config.metric)
-        outcome = (
-            f"{config.metric}={float(score):.4f}"
-            if isinstance(score, (int, float))
-            else f"실패({result.get('error_type') or 'unknown'})"
-        )
+        outcome = outcome_text(config.metric, metrics.get(config.metric), result.get("error_type"))
         verdict = attempt.get("critic") or {}
         suffix = f" → critic: {verdict.get('failure_type')}" if verdict else ""
         print(f"  [iter {attempt.get('iteration')}] model={attempt.get('model')} {outcome}{suffix}")
@@ -700,11 +659,9 @@ def command_show(args: argparse.Namespace) -> int:
 
 
 def display_width(text: str) -> int:
-    """How many terminal columns ``text`` occupies. Korean glyphs take two, not one.
+    """``text``가 터미널에서 차지하는 칸 수. 한글 글자는 하나가 아니라 둘이다.
 
-    Without this every column after a Korean one is offset by the number of Korean characters
-    before it, which is exactly the case this listing is for: a screen of runs read by scanning
-    down one column.
+    왜 따로 세는지는 ``docs/rationale.md``.
     """
     return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
 
@@ -714,18 +671,15 @@ def pad(text: str, width: int, *, right: bool = False) -> str:
     return fill + text if right else text + fill
 
 
-# thread_id, 방식, 지표, 최고(val), test, 반복 — the ``종료`` column is last and unpadded, so a
-# long Korean reason cannot push anything out of line.
+# thread_id, 방식, 지표, 최고(val), test, 반복 — ``종료`` 열은 마지막이고 패딩이 없다. 그래서 긴
+# 한글 사유가 무엇도 줄 밖으로 밀어낼 수 없다.
 LIST_COLUMNS = (24, 8, 6, 10, 9, 8)
 
 
 def run_row(directory: Path) -> tuple[str, ...]:
-    """One run's line in ``list``, read from its files alone.
+    """``list``에서 한 실행의 줄. 그 실행의 파일만 읽어서 만든다.
 
-    Files and not the checkpoint: ``show`` opens the checkpoint because it answers "where is
-    this run now", while this answers "which runs exist". One sqlite connection per thread
-    would make listing slower than some of the runs it lists, and would contend for the write
-    lock with a run that is still going.
+    체크포인트가 아니라 파일에서 읽는 이유는 ``docs/rationale.md``.
     """
     from .nodes.report import STOP_REASON_LABELS
 
@@ -750,20 +704,19 @@ def run_row(directory: Path) -> tuple[str, ...]:
         metric or "—",
         f"{float(best_score):.4f}" if isinstance(best_score, (int, float)) else "—",
         score_of(holdout) if holdout.get("status") == "ok" else "—",
-        # A run with no history.json has not reported yet: it is going, or it died before the
-        # report node. Either way the count is unknown rather than zero.
+        # history.json이 없는 실행은 아직 보고하지 않았다 — 돌고 있거나 report 노드 앞에서 죽었다.
+        # 어느 쪽이든 개수는 0이 아니라 알 수 없는 것이다.
         f"{digest.get('iterations', '?')}/{config.get('max_iterations', '?')}",
         STOP_REASON_LABELS.get(str(digest.get("stop_reason")), "미완료" if not digest else "?"),
     )
 
 
 def command_list(args: argparse.Namespace) -> int:
-    """Every run under the artifacts root, newest first.
+    """아티팩트 루트 아래의 모든 실행, 최근 순으로.
 
-    The one thing ``show`` cannot answer, because it takes a ``--thread-id``: an operator who
-    ran ten experiments last week has no way to recall what they were called.
+    ``show``는 ``--thread-id``를 받으므로 답할 수 없는 질문에 답한다 (``docs/rationale.md``).
     """
-    base = Path(args.artifacts_root) if args.artifacts_root else ARTIFACTS_ROOT
+    base = artifacts_root_arg(args) or ARTIFACTS_ROOT
     directories = (
         sorted(
             (item for item in base.iterdir() if item.is_dir()),
@@ -799,18 +752,15 @@ def command_list(args: argparse.Namespace) -> int:
 
 
 def best_iteration(config: RunConfig) -> int | None:
-    """Which iteration this run selected, from the checkpoint or from ``history.json``.
+    """이 실행이 고른 반복. 체크포인트에서, 없으면 ``history.json``에서.
 
-    Two sources because they fail differently. The checkpoint is authoritative and is what
-    ``show`` reads, but it is a SQLite file that a half-finished run may not have flushed a
-    ``best`` into; ``history.json`` is written by the report node at the end and survives the
-    checkpoint being deleted. ``None`` when neither names one, which means no attempt
-    succeeded — there is no model to predict with.
+    출처가 둘인 이유는 ``docs/rationale.md``. 둘 다 이름을 대지 않으면 ``None``이고, 성공한 시도가
+    없다는 뜻이다 — 예측할 모델이 없다.
     """
     try:
         app, _saver, _runtime = open_app(config)
         snapshot = app.get_state({"configurable": {"thread_id": config.thread_id}})
-    except Exception:  # noqa: BLE001 - a missing or unreadable checkpoint is not fatal here
+    except Exception:  # noqa: BLE001 - 체크포인트가 없거나 읽을 수 없는 것은 여기서 치명적이 아니다
         snapshot = None
     if snapshot and snapshot.values:
         iteration = (dict(snapshot.values).get("best") or {}).get("iteration")
@@ -826,23 +776,14 @@ def best_iteration(config: RunConfig) -> int | None:
 
 
 def command_predict(args: argparse.Namespace) -> int:
-    """Apply a finished run's chosen model to a new CSV.
+    """끝난 실행이 고른 모델을 새 CSV에 적용한다.
 
-    The iteration is resolved rather than asked for, because "the model this run produced"
-    is the thing a caller has in mind and picking the wrong directory out of ``train/`` is
-    silent: every iteration has a ``model.joblib`` and the worst of them loads just as well.
-    ``--iteration`` is still there for scoring a specific attempt on purpose.
-
-    Both halves of the artifact are checked here, before the script starts, so a run that
-    cannot be applied says so in terms of what the operator did — a ``--dry-run`` or
-    synthetic run never fits an encoding, and one from before schemas were written has a
-    model but no way to replay it.
+    반복을 묻지 않고 풀어내는 이유, 그리고 산출물의 양쪽 절반을 스크립트가 시작하기 전에 검사하는
+    이유는 ``docs/rationale.md``. ``--iteration``은 특정 시도를 일부러 채점할 때를 위해 남아 있다.
     """
     from .scripts.predict import main as predict_main
 
-    config = load_run_config(
-        args.thread_id, Path(args.artifacts_root) if args.artifacts_root else None
-    )
+    config = load_config(args)
     iteration = args.iteration
     if iteration is None:
         iteration = best_iteration(config)
@@ -878,9 +819,7 @@ def command_predict(args: argparse.Namespace) -> int:
         )
 
     out_path = (
-        Path(args.out)
-        if args.out
-        else config.run_dir / "predict" / f"{Path(args.data).stem}_predictions.csv"
+        Path(args.out) if args.out else config.run_dir / "predict" / f"{Path(args.data).stem}_predictions.csv"
     )
     report_path = Path(args.report) if args.report else out_path.with_suffix(".report.json")
     code = predict_main(
@@ -910,7 +849,7 @@ def command_predict(args: argparse.Namespace) -> int:
 
 
 def command_graph(args: argparse.Namespace) -> int:
-    # Drawing needs no checkpointer, and shouldn't create an artifacts directory.
+    # 그리는 데는 checkpointer가 필요 없고, 산출물 디렉터리를 만들어서도 안 된다.
     config = RunConfig(thread_id="graph-render", dry_run=True)
     graph = build_state_graph(config).compile().get_graph()
     out_path = Path(args.out)
@@ -921,7 +860,7 @@ def command_graph(args: argparse.Namespace) -> int:
             out_path.write_bytes(graph.draw_mermaid_png())
             print(f"그래프 이미지를 저장했습니다: {out_path}")
             return 0
-        except Exception as exc:  # noqa: BLE001 - PNG rendering needs network access
+        except Exception as exc:  # noqa: BLE001 - PNG 렌더링은 네트워크 접근이 필요하다
             fallback = out_path.with_suffix(".mmd")
             fallback.write_text(graph.draw_mermaid(), encoding="utf-8")
             print(f"PNG 렌더링 실패({exc}) — Mermaid 소스로 저장했습니다: {fallback}")
@@ -932,7 +871,7 @@ def command_graph(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Argument parsing
+# 인자 파싱
 # --------------------------------------------------------------------------- #
 
 
@@ -985,13 +924,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         dest="caveats",
         metavar="문장",
-        # ``%%`` and not ``%``: argparse runs every help string through ``%``-formatting, so a
-        # bare percent sign followed by anything that is not a format character raises
-        # ValueError — from inside ``--help``, which is where nobody has a workaround.
+        # ``%``가 아니라 ``%%``: argparse는 모든 help 문자열을 ``%`` 서식으로 통과시키므로, 맨
+        # 퍼센트 뒤에 서식 문자가 아닌 것이 오면 ValueError가 난다 — ``--help`` 안에서, 즉 아무도
+        # 우회할 수 없는 자리에서.
         help="집계만으로는 드러나지 않는 이 데이터의 주의사항. 카드에 기록되고 실행 시 모든 추론 "
         "프롬프트에 실립니다. 여러 번 쓸 수 있습니다. 원본을 직접 본 사람의 지식이 들어오는 "
-        "유일한 통로입니다 — 예: \"결측이 0%%인 플래그인데도 뜻이 행 순서에 따라 바뀌니(앞 2%%, "
-        "뒤 43%%), 모델이 중증도가 아니라 차팅 체계를 학습할 수 있습니다\"",
+        '유일한 통로입니다 — 예: "결측이 0%%인 플래그인데도 뜻이 행 순서에 따라 바뀌니(앞 2%%, '
+        '뒤 43%%), 모델이 중증도가 아니라 차팅 체계를 학습할 수 있습니다"',
     )
     profile_parser.add_argument(
         "--group-column",
@@ -1020,11 +959,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="원본 CSV 경로. 카드 없이 주면 profiling 노드가 카드를 만듭니다. "
         "이 경로는 data_ref 채널에만 들어가고 프롬프트에는 포함되지 않습니다.",
     )
-    run_parser.add_argument(
-        "--target", default=None, help="정답 컬럼 이름 (--data 를 쓸 때 필수)"
-    )
-    # choices, not a free string: a metric the trainer cannot emit would leave goal_met
-    # False for the whole run with nothing in the output explaining why.
+    run_parser.add_argument("--target", default=None, help="정답 컬럼 이름 (--data 를 쓸 때 필수)")
+    # 자유 문자열이 아니라 choices: 학습기가 낼 수 없는 지표는 실행 내내 goal_met을 False로 두고,
+    # 출력 어디에도 그 이유가 없다.
     run_parser.add_argument(
         "--metric",
         choices=list(GOAL_METRICS),
@@ -1163,9 +1100,7 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser.add_argument("--report", action="store_true", help="최종 보고서 전문까지 출력합니다")
     show_parser.set_defaults(func=command_show)
 
-    predict_parser = subparsers.add_parser(
-        "predict", help="끝난 실행이 선택한 모델을 새 CSV에 적용합니다"
-    )
+    predict_parser = subparsers.add_parser("predict", help="끝난 실행이 선택한 모델을 새 CSV에 적용합니다")
     predict_parser.add_argument("--thread-id", required=True, help="어느 실행의 모델을 쓸지")
     predict_parser.add_argument("--data", required=True, help="예측할 CSV 경로")
     predict_parser.add_argument(
@@ -1221,11 +1156,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\n중단되었습니다. 동일한 --thread-id로 `resume` 하면 이어서 실행됩니다.")
         return 130
     except sqlite3.OperationalError as exc:
-        # The checkpoint database, always: it is the only sqlite file here. Caught at the
-        # top because the failure surfaces from inside LangGraph's writer, so the traceback
-        # blames a library the operator did not call, and the actual cause is another
-        # process on the same machine. ``graph.make_checkpointer`` already waits
-        # CHECKPOINT_TIMEOUT_SEC before this can happen.
+        # 늘 체크포인트 데이터베이스다 — 여기 sqlite 파일은 그것뿐이다. 맨 위에서 잡는 이유는
+        # ``docs/rationale.md``.
         print(f"\n오류: 체크포인트 데이터베이스를 쓸 수 없습니다 — {exc}")
         if "locked" in str(exc).lower():
             print(

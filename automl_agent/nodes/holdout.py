@@ -1,57 +1,45 @@
-"""Holdout node: score the best model once, on rows the loop never saw. No LLM.
+"""Holdout 노드: 최고 모델을 루프가 한 번도 못 본 행에서 한 번 채점한다. LLM 없음.
 
-Runs after ``route`` has decided to stop, between ``evaluate`` and ``report``. Everything
-before it — every plan, every hyperparameter, and the choice of ``best`` itself — was
-decided against validation scores. This node is the one measurement that was not: it
-loads the model file the winning iteration saved and scores it on the test slice
-:mod:`automl_agent.scoring.splits` carved off before the first fit.
+``route``가 멈추기로 정한 뒤, ``evaluate``와 ``report`` 사이에 돈다. 그 전의 모든 것 — 모든 계획, 모든
+하이퍼파라미터, ``best``의 선택 자체 — 은 검증 점수에 대고 결정되었다. 이 노드는 그렇지 않은 하나뿐인
+측정이다: 이긴 iteration이 저장한 모델 파일을 읽어, :mod:`automl_agent.scoring.splits`가 첫 적합 전에
+떼어 둔 test 슬라이스에서 채점한다.
 
-``best`` is the maximum of several noisy validation numbers, so quoting it overstates the model; the
-test score can be quoted without that caveat, and **the gap between the two *is* the caveat**. The
-score arrives with its own interval, and this node reports whether the validation score falls inside
-it — a gap smaller than the interval is one this measurement cannot distinguish from zero.
+``best``는 잡음 있는 검증 수 여럿의 최대이므로 그것을 인용하면 모델을 과장한다. test 점수는 그 유보 없이
+인용할 수 있고, **둘 사이의 격차가 곧 그 유보다**. 점수는 자기 구간과 함께 오고, 이 노드는 검증 점수가
+그 안에 드는지 보고한다 — 구간보다 작은 격차는 이 측정이 0과 구분하지 못하는 격차다.
 
-**This is the acceptance channel and it has to stay one.** Steering is decided inside the loop on the
-paired interval, tuned for sensitivity. Acceptance is decided here, once, on rows no plan and no
-diagnosis ever saw.
+**승인 채널이고 하나로 남아야 한다**, 그리고 **이 수는 어느 반복이 이기는지에 대한 게이트가 되면 안
+된다**. 두 이유는 ``docs/rationale.md``. 게이트가 필요하면 네 번째 분할이나 반복 CV가 필요하다.
 
-**So this number must never gate which iteration wins.** The moment ``best`` is chosen, confirmed or
-overruled by a test score, the test slice joins the selection set — and the promise
-``capabilities._CLASSIFICATION_SCORING`` makes to every plan is false from that instant, with nothing
-left able to measure what it cost. A gate needs a fourth split or repeated CV.
+``selection_gap``은 :mod:`automl_agent.scoring.intervals`의 **다중성 논거를 대신하지 않는다**: 하나는
+*크기*, 다른 하나는 *비율*이다.
 
-``selection_gap`` is **no substitute for the multiplicity argument** in
-:mod:`automl_agent.scoring.intervals`: one is a *size*, the other a *rate*.
+**치명적이지 않고, route 결정도 아니다.** 저장된 모델이 없으면 그렇게 기록하고 보고서에서 말한다 —
+최종 측정을 할 수 없었다고 보고서 쓰기를 거부하면 실행이 모은 증거를 버리는 일이 된다.
 
-**Never fatal, never a route decision.** No saved model is recorded as such and said in the report —
-refusing to write one because the final measurement was unavailable would throw away the evidence the
-run did accumulate.
-
-Third member of the raw-data boundary, same terms as ``training``: path from the private ``data_ref``
-channel, work in a subprocess, return through :func:`automl_agent.privacy.public_result`. Nothing here
-prints — ``main.ConsoleReporter`` calls :func:`describe` *after* flushing the buffered iteration
-summary, since the console only sees a node's update once it has returned.
-
-Rationale: ``docs/rationale.md``.
+원본 데이터 경계의 세 번째 구성원, ``training``과 같은 조건이다: 경로는 비공개 ``data_ref`` 채널에서,
+작업은 서브프로세스에서, 복귀는 :func:`automl_agent.privacy.public_result`를 통해. 여기서는 아무것도
+찍지 않는다 — ``main.ConsoleReporter``가 버퍼된 반복 요약을 비운 *뒤* :func:`describe`를 부른다.
+콘솔은 노드가 반환한 다음에야 그 갱신을 보기 때문이다.
 """
 
 from __future__ import annotations
 
 import contextlib
-import subprocess
 import sys
 import time
 from typing import Any
 
-from ..config import TRAIN_SCRIPT, RunConfig, decode_output, read_json_object, utf8_env
+from ..config import TRAIN_SCRIPT, RunConfig, read_json_object, run_fixed_script
 from ..privacy import public_result
 from ..scoring.intervals import CI_LEVEL, contains, interval_of
 from ..scoring.metrics import MINIMIZE, direction_of
 from ..scoring.splits import TEST_FRACTION
 from ..state import AutoMLState, holdout_share_sec
 
-# What the report prints when there is nothing to measure. Keys, not sentences, so the
-# report can phrase them and the CLI can branch on them.
+# 잴 것이 없을 때 보고서가 찍는 것. 문장이 아니라 키인 이유는 보고서가 표현을 정하고 CLI가 여기에 대고
+# 분기할 수 있게 하려고.
 SKIP_REASONS = {
     "dry_run": "--dry-run이므로 저장된 모델이 없습니다",
     "no_best": "성공한 시도가 없어 채점할 모델이 없습니다",
@@ -61,7 +49,7 @@ SKIP_REASONS = {
 
 
 def holdout(state: AutoMLState, *, config: RunConfig) -> dict:
-    """Return ``{"holdout": {...}}`` — the test-split score, or why there is none."""
+    """``{"holdout": {...}}`` — test 분할 점수, 또는 그것이 없는 이유."""
     best = dict(state.get("best") or {})
     iteration = best.get("iteration")
 
@@ -81,9 +69,8 @@ def holdout(state: AutoMLState, *, config: RunConfig) -> dict:
         sys.executable,
         str(TRAIN_SCRIPT),
         "--config",
-        # The winning iteration's own config, not a rebuilt one: the split is a function
-        # of the data path, the target-missing policy, the group column and the seed, so
-        # reusing the file the fit ran from is what guarantees the same rows are held back.
+        # 다시 조립한 것이 아니라 이긴 iteration 자신의 config. 분할은 데이터 경로, 정답 결측 정책, group
+        # 열, 시드의 함수이므로, 적합이 돌았던 파일을 그대로 쓰는 것이 같은 행이 떼어져 있음을 보장한다.
         str(config_path),
         "--out",
         str(out_path),
@@ -92,32 +79,16 @@ def holdout(state: AutoMLState, *, config: RunConfig) -> dict:
     ]
 
     started = time.perf_counter()
-    console = ""
-    returncode = -1
-    try:
-        completed = subprocess.run(  # noqa: S603 - fixed script, no shell
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=utf8_env(),
-            # One pass over 20% of the rows with an already-fitted model, so the share held
-            # back for it is generous rather than tight — and it is held back on purpose. The
-            # loop is stopped before it can spend this, because a run whose budget deleted its
-            # own held-out score would report the numbers it selected on and nothing else.
-            timeout=holdout_share_sec(state) or config.train_timeout_sec,
-            check=False,
-        )
-        console = (completed.stdout or "") + (completed.stderr or "")
-        returncode = completed.returncode
-    except subprocess.TimeoutExpired as exc:
-        console = decode_output(exc.stdout) + decode_output(exc.stderr)
-        returncode = -9
-    except OSError as exc:
-        console = f"failed to spawn the holdout subprocess: {exc}"
+    returncode, console = run_fixed_script(
+        command,
+        # 이미 적합된 모델로 행 20%를 한 번 지나는 것이므로, 여기 떼어 둔 몫은 빡빡하기보다 넉넉하다 —
+        # 그리고 일부러 떼어 둔다. 루프는 이것을 쓸 수 있기 전에 멈춰지는데, 예산이 자기 holdout 점수를
+        # 지워 버린 실행은 자기가 선택에 쓴 수만 보고하고 그 밖에는 아무것도 보고하지 못하기 때문이다.
+        timeout=holdout_share_sec(state) or config.train_timeout_sec,
+        label="holdout",
+    )
 
-    # The log is a convenience for a human, not the result.
+    # 로그는 사람을 위한 편의이고 결과가 아니다.
     with contextlib.suppress(OSError):
         log_path.write_text(console, encoding="utf-8")
 
@@ -135,30 +106,27 @@ def holdout(state: AutoMLState, *, config: RunConfig) -> dict:
         "status": "ok",
         "split": "test",
         "test_fraction": TEST_FRACTION,
-        # Which model was scored, so the report can say "iteration 3's hist_gbdt", and so
-        # a reader can tell the number was not produced by a fresh fit.
+        # 어느 모델을 채점했는지. 보고서가 "iteration 3의 hist_gbdt"라고 말할 수 있고, 독자가 이 수가
+        # 새 적합에서 나온 것이 아님을 알 수 있게.
         "iteration": iteration,
         "model": best.get("model", ""),
         "metric": metric,
         "score": result["metrics"].get(metric),
-        # The validation score of the same model, for the one comparison this node exists
-        # to make: how much of ``best`` was selection.
+        # 같은 모델의 검증 점수. 이 노드가 존재하는 이유인 그 하나의 비교를 위해: ``best``의 얼마가
+        # 선택이었는지.
         "val_score": best.get("score"),
         "metrics": result["metrics"],
         "wall_time_sec": round(time.perf_counter() - started, 3),
     }
     score = holdout_block["score"]
     if isinstance(score, (int, float)) and isinstance(best.get("score"), (int, float)):
-        # Signed so that positive always means "validation was optimistic", whichever way the
-        # metric runs. ``best`` is the *minimum* of the noisy validation numbers on an error
-        # metric, so ``best - test`` there is negative exactly when the selection effect is
-        # present — and ``describe`` calls this number the size of that effect.
+        # 지표가 어느 쪽으로 가든 양수가 언제나 "검증이 낙관적이었다"를 뜻하도록 부호를 맞춘다. 오류
+        # 지표에서 ``best``는 잡음 있는 검증 수들의 *최소*이므로, 거기서 ``best - test``는 선택 효과가
+        # 있을 때 정확히 음수다 — 그리고 ``describe``는 이 수를 그 효과의 크기라고 부른다.
         gap = float(best["score"]) - float(score)
         holdout_block["selection_gap"] = round(-gap if direction_of(metric) == MINIMIZE else gap, 6)
-        # Whether the gap is bigger than what these rows can resolve. The test split is
-        # ~20% of the file, so its own interval is the widest in the run, and a gap inside
-        # it is a gap this measurement cannot tell from zero — reporting "선택 편향
-        # 0.004" off a slice with a ±0.03 interval was the number this fixes.
+        # 격차가 이 행들이 분해할 수 있는 것보다 큰지. test 분할은 파일의 ~20%이므로 그 구간이 실행에서
+        # 가장 넓고, 그 안에 든 격차는 이 측정이 0과 구분하지 못하는 격차다.
         bounds = interval_of(result["metrics"], metric)
         if bounds is not None:
             holdout_block["score_ci"] = [bounds[0], bounds[1]]
@@ -174,7 +142,7 @@ def _skipped(reason: str, iteration: int | None = None) -> dict[str, Any]:
 
 
 def describe(block: dict[str, Any]) -> str:
-    """One Korean line about the final measurement, for a console or a report."""
+    """최종 측정에 대한 한글 한 줄, 콘솔이나 보고서용."""
     if not block:
         return "최종 테스트 채점: 수행되지 않았습니다"
     if block.get("status") != "ok":
@@ -200,8 +168,8 @@ def describe(block: dict[str, Any]) -> str:
             else f" (검증 대비 {gap:+.4f}"
         )
         line += " — 이 차이가 선택 편향의 크기입니다"
-        # Said out loud, because the gap is the headline number of this node and a reader
-        # who is not told will read any nonzero value as a measured amount of bias.
+        # 소리 내어 말한다. 격차가 이 노드의 대표 숫자이고, 듣지 못한 독자는 0이 아닌 값을 모두 측정된
+        # 편향의 양으로 읽기 때문이다.
         if block.get("val_inside_ci"):
             line += ", 다만 검증 점수가 위 CI 안에 있어 이 행들로는 0과 구분되지 않습니다"
         line += ")"

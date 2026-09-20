@@ -1,30 +1,18 @@
-"""Sentinel codes: values that mean "missing" but arrive looking like measurements.
+"""센티넬 코드: "결측"을 뜻하지만 측정치처럼 생겨서 도착하는 값들.
 
-**Nothing fails when this goes wrong; the numbers are simply wrong.** An extract with zero NaN and
-tens of thousands of ``-9999`` cells makes every aggregate the card publishes — magnitude, skew,
-outlier rate, target correlation — and the baseline the bar is *derived from* count that code as a
-measurement. The run then chases a bar built on it (``FINDINGS-mimic.md``).
+**이것이 틀렸을 때 실패하는 것은 없다. 숫자가 그냥 틀린다** (``docs/rationale.md``).
 
-**Detect, warn, never convert.** Conversion is the caller's (``pd.read_csv(na_values=[...])``): it is
-not reliably inferable — ``-1`` is a code in "days since discharge" and data in "temperature delta" —
-and **a silent rewrite would mean the card describes rows the file does not contain**, which is the
-one property the card→executor contract rests on.
+**탐지하고, 경고하고, 결코 변환하지 않는다.** 변환은 호출자의 일이다
+(``pd.read_csv(na_values=[...])``). **조용히 고쳐 쓰면 카드가 파일에 없는 행을 설명하게 되고**,
+카드→실행기 계약이 서 있는 성질이 바로 그것이다 (``docs/rationale.md``).
 
-Emission policy
----------------
-A card may not carry cell values, and a sentinel *is* one. **What keeps this in policy: detection only
-ever recognises codes from the constant lists below**, so the published value came out of *this file*,
-not out of the data. The data contributes only "present, at this rate" — a column aggregate like
-``missing_rate``. A repeated extreme **not** on the list is not reported at all.
+**발표 정책.** 카드는 셀 값을 실을 수 없고 센티넬은 셀 값*이다*. **탐지는 아래 상수 목록에 있는
+코드만 알아본다** — 그래서 발표된 값은 데이터가 아니라 *이 파일*에서 나온 것이다. 데이터가 기여하는
+것은 "있다, 이 비율로"뿐이다. 목록에 **없는** 반복된 극단값은 아예 보고되지 않는다.
 
-Gates
------
-``-1`` and ``99`` are on the numeric list, which alone would flag half the columns in a normal table.
-**A code is reported only when it is the column's own min or max *and* isolated from the nearest other
-value** — by :data:`GAP_MULTIPLE` IQRs, or by :data:`SIGN_GAP_MULTIPLE` when its sign is one no other
-row has. So ``-1`` among ``-3 … 5`` stays silent and ``-1`` among ages ``40 … 69`` is a code. Ages
-``0 … 99`` with ``99`` meaning "unknown" is **not catchable and that is correct** — ``98`` sits right
-next to it, so nothing in the distribution distinguishes the two readings.
+**게이트.** 코드는 그것이 열 자신의 min 또는 max이고 *동시에* 가장 가까운 다른 값에서 떨어져 있을
+때만 보고된다 — :data:`GAP_MULTIPLE` IQR만큼, 또는 그 부호를 다른 어떤 행도 갖지 않을 때는
+:data:`SIGN_GAP_MULTIPLE`만큼. 잡히지 않는 경우와 그것이 맞는 이유는 ``docs/rationale.md``.
 """
 
 from __future__ import annotations
@@ -33,11 +21,17 @@ from typing import TYPE_CHECKING, Any
 
 from automl_agent.dataset.features import is_numeric_column, is_text_like_column
 
-if TYPE_CHECKING:  # pragma: no cover - import-time cost only, and pandas is subprocess-only
+if TYPE_CHECKING:  # pragma: no cover - import 비용만이고, pandas는 subprocess 전용이다
     import pandas as pd
 
-# Conventional numeric missing codes, widest first so a ``-9999``/``-999`` pair is reported
-# in the order a reader expects. Only values on this list can ever reach a card.
+# 발견의 ``kind``. 소비자가 셋(:mod:`automl_agent.dataset.caveats`,
+# :mod:`automl_agent.dataset.features`, 아래의 콘솔 경고)이고, 오타는 실패하는 대신 발견 0개로
+# 조용히 읽힌다 — 이 모듈이 경고하는 바로 그 실패 양식이다.
+KIND_NUMERIC_CODE = "numeric_code"
+KIND_TEXT_MARKER = "text_marker"
+
+# 관례적인 숫자 결측 코드. 넓은 것부터 — 그래야 ``-9999``/``-999`` 짝이 읽는 사람이 기대하는
+# 순서로 보고된다. 이 목록에 있는 값만이 카드에 닿을 수 있다.
 NUMERIC_CODES: tuple[float, ...] = (
     -9999999.0,
     -999999.0,
@@ -55,12 +49,8 @@ NUMERIC_CODES: tuple[float, ...] = (
     99.0,
 )
 
-# Strings that a categorical column uses for the same purpose. Less destructive than a
-# numeric code — the encoder gives them their own one-hot level rather than folding them
-# into a mean — but they still split what is one fact ("absent") across two
-# representations, and they are invisible in ``missing_rate``. Compared casefolded and
-# stripped, so ``" N/A "`` matches. ``none`` is deliberately included even though it is a
-# legitimate category on, say, a medication column: the point is to ask, not to decide.
+# 범주 열이 같은 목적으로 쓰는 문자열. casefold하고 strip해서 비교하므로 ``" N/A "``도 걸린다.
+# ``none``을 일부러 넣은 이유와 숫자 코드보다 덜 파괴적인데도 묻는 이유는 ``docs/rationale.md``.
 TEXT_MARKERS: tuple[str, ...] = (
     "na",
     "n/a",
@@ -78,31 +68,32 @@ TEXT_MARKERS: tuple[str, ...] = (
     ".",
 )
 
-# Below this many rows the gap test is measuring noise, not a distribution.
+# 이보다 행이 적으면 간격 검사가 분포가 아니라 잡음을 재고 있다.
 MIN_ROWS = 20
-# A flag or a two-level code has no "isolated extreme" to speak of, and its low value is
-# routinely -1 or 99 as a genuine level.
+# 플래그나 두 수준 코드에는 말할 만한 "고립된 극단"이 없고, 그 낮은 값이 으레 진짜 수준으로서의
+# -1이나 99다.
 MIN_DISTINCT = 5
-# One occurrence of an extreme value is more likely to be one unusual record than a code —
-# and reporting it would be reporting that record.
+# 극단값이 한 번 나온 것은 코드보다 특이한 레코드 하나일 가능성이 높다 — 그리고 그것을 보고하는
+# 것은 그 레코드를 보고하는 것이다.
 MIN_COUNT = 2
-# How far outside the interquartile range a code has to sit. 3.0 is deliberately well past
-# the 1.5 the outlier rate already uses: a heavy tail should not read as a sentinel.
+# 코드가 사분위 범위 밖으로 얼마나 떨어져 앉아야 하는지. 3.0인 이유는 ``docs/rationale.md``.
 GAP_MULTIPLE = 3.0
-# The relaxed bar for a code whose *sign* no other row in the column has. ``-1`` among ages
-# ``40 … 69`` is 2.7 IQRs below the nearest age — under the bar above, and obviously a code.
-# What licenses the relaxation is not the distance but the impossibility: a column where
-# every other value is non-negative has no room for a negative measurement. The gap is still
-# required, and it is what keeps a genuine ``-1 … 5`` rating scale quiet, since there ``-1``
-# is one step from the rest rather than an interquartile range away.
+# 열의 다른 어떤 행도 갖지 않은 *부호*를 가진 코드에 적용되는 완화된 바. 완화를 정당화하는 것은
+# 거리가 아니라 불가능성이다 (``docs/rationale.md``). 간격은 여전히 요구된다 — 그것이 진짜
+# ``-1 … 5`` 평가 척도를 조용하게 둔다.
 SIGN_GAP_MULTIPLE = 1.0
 
 
-def detect_sentinels(series: pd.Series) -> list[dict[str, Any]]:
-    """Codes in ``series`` that look like they mean "missing". Never converts anything.
+def _finding(kind: str, value: Any, count: int, n_rows: int) -> dict[str, Any]:
+    """발견 하나. ``rate``는 NaN 셀까지 포함한 열 전체에 대한 비율이라는 계약이 여기 한 곳에 산다."""
+    return {"kind": kind, "value": value, "rate": round(count / n_rows, 4)}
 
-    Each finding is ``{"kind", "value", "rate"}``, where ``rate`` is over the whole column
-    including its NaN cells, so it reads next to ``missing_rate`` without conversion.
+
+def detect_sentinels(series: pd.Series) -> list[dict[str, Any]]:
+    """``series``에서 "결측"을 뜻하는 것처럼 보이는 코드들. 아무것도 변환하지 않는다.
+
+    각 발견은 ``{"kind", "value", "rate"}``이고, ``rate``가 열 전체에 대한 비율이므로 변환 없이도
+    ``missing_rate`` 옆에서 읽힌다.
     """
     import pandas as pd
 
@@ -122,9 +113,7 @@ def _text_findings(series: pd.Series, n_rows: int) -> list[dict[str, Any]]:
     for marker in TEXT_MARKERS:
         count = int(counts.get(marker, 0))
         if count >= MIN_COUNT:
-            findings.append(
-                {"kind": "text_marker", "value": marker, "rate": round(count / n_rows, 4)}
-            )
+            findings.append(_finding(KIND_TEXT_MARKER, marker, count, n_rows))
     return findings
 
 
@@ -141,23 +130,17 @@ def _numeric_findings(series: pd.Series, n_rows: int) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     excluded: list[float] = []
     working = uniques
-    # Loop rather than a single pass so a ``-9999`` sitting next to a ``-999`` does not hide
-    # it: once the outer code is accounted for, the next one becomes the column's extreme.
+    # 한 번 훑는 대신 반복한다 — ``-999`` 옆에 앉은 ``-9999``가 그것을 가리지 않게. 바깥 코드가
+    # 셈에 들어가면 다음 것이 열의 극단이 된다.
     while len(working) >= MIN_DISTINCT:
         position = _next_code(working, values, frequency, excluded)
         if position is None:
             break
         code = float(working[position])
-        findings.append(
-            {
-                "kind": "numeric_code",
-                "value": code,
-                "rate": round(frequency[code] / n_rows, 4),
-            }
-        )
+        findings.append(_finding(KIND_NUMERIC_CODE, code, frequency[code], n_rows))
         excluded.append(code)
         working = np.delete(working, position)
-    # Widest code first, and the two ends of the column grouped predictably.
+    # 넓은 코드부터, 그리고 열의 양쪽 끝이 예측 가능하게 묶이도록.
     findings.sort(key=lambda item: NUMERIC_CODES.index(item["value"]))
     return findings
 
@@ -165,7 +148,7 @@ def _numeric_findings(series: pd.Series, n_rows: int) -> list[dict[str, Any]]:
 def _next_code(
     working: Any, values: Any, frequency: dict[float, int], excluded: list[float]
 ) -> int | None:
-    """Index in ``working`` of the next extreme that qualifies as a code, or None."""
+    """코드 자격이 되는 다음 극단의 ``working`` 안 인덱스, 없으면 None."""
     import numpy as np
 
     for position in (0, len(working) - 1):
@@ -176,8 +159,8 @@ def _next_code(
         if len(rest) < MIN_ROWS:
             continue
         q1, q3 = (float(x) for x in np.percentile(rest, [25, 75]))
-        # Falls back to the full range when the middle half is a single value, which is a
-        # concentrated-but-not-constant column rather than a reason to give up.
+        # 가운데 절반이 한 값일 때는 전체 범위로 물러난다. 그것은 포기할 이유가 아니라
+        # 몰려 있지만 상수는 아닌 열이다.
         scale = q3 - q1 or float(rest.max() - rest.min())
         if scale <= 0:
             continue
@@ -185,7 +168,7 @@ def _next_code(
         gap = abs(neighbour - code)
         if gap >= GAP_MULTIPLE * scale:
             return position
-        # A sign the rest of the column does not have: not merely far, but impossible.
+        # 열의 나머지가 갖지 않은 부호: 그저 먼 것이 아니라 불가능하다.
         one_sided = code < 0 <= float(rest.min()) or code > 0 >= float(rest.max())
         if one_sided and gap >= SIGN_GAP_MULTIPLE * scale:
             return position
@@ -193,16 +176,13 @@ def _next_code(
 
 
 def describe_sentinels(by_column: dict[str, list[dict[str, Any]]]) -> str:
-    """The console warning. Korean, because the person who has to decide reads it.
-
-    Empty string when there is nothing to say, so the caller can print unconditionally.
-    """
+    """콘솔 경고. 할 말이 없으면 빈 문자열이라, 호출자가 조건 없이 print해도 된다."""
     if not by_column:
         return ""
     lines = ["경고: 결측 코드로 의심되는 값이 있습니다 — 자동 변환하지 않습니다."]
     for name, findings in by_column.items():
         for item in findings:
-            if item["kind"] == "numeric_code":
+            if item["kind"] == KIND_NUMERIC_CODE:
                 why = f"분포에서 {GAP_MULTIPLE:g}×IQR 이상 떨어진 관례적 결측 코드"
                 shown = f"{item['value']:g}"
             else:
