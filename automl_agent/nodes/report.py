@@ -408,8 +408,8 @@ def _write_artifacts(
             "goal": state.get("goal"),
             "iterations": state.get("iteration"),
             "stop_reason": stop_reason(state, config),
-            # Critic이 몇 번의 시도를 진단했는지. 문장이 아니라 수인 이유는 이 파일을 ``bench/``와
-            # 실행을 집계하는 다른 것들이 읽기 때문이고, 그것이 빠져 있던 칸이었다: 다섯 데이터셋
+            # Critic이 몇 번의 시도를 진단했는지. 문장이 아니라 수인 이유는 이 파일을 읽어 실행을
+            # 집계하는 것들 때문이고, 그것이 빠져 있던 칸이었다: 다섯 데이터셋
             # 비교는 모든 시도의 ``critic``에서 다시 유도하지 않고는 그중 넷이 루프에 들어간 적조차
             # 없다는 것을 말할 수 없었다.
             "critic_runs": sum(1 for item in history if item.get("critic")),

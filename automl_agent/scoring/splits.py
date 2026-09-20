@@ -122,7 +122,7 @@ def row_counts(n_rows: int) -> dict[str, int]:
     ``early_stopping='auto'``를 ``n_samples > 10_000``에서 결정하고, 그 크기 근처의 파일에서는 두 행
     오차가 임계값의 반대편에 떨어진다.
 
-    행 단위 경로에서는 정확하고 (``bench/``에 기록된 train 크기들을 재현한다), 그룹 경로에서는
+    행 단위 경로에서는 정확하고, 그룹 경로에서는
     근사다 — 몫을 딱 맞추자고 그룹을 가를 수는 없다. 이 수를 공개하는 호출자는 어느 쪽인지 말해야
     한다. :func:`automl_agent.capabilities.describe_row_budget`가 그렇게 한다.
 

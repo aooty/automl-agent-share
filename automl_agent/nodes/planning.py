@@ -132,8 +132,8 @@ def planning(state: AutoMLState, *, config: RunConfig) -> dict:
         # 카드의 행 수를 분할에 통과시킨 것, 그리고 그 곱이 무엇을 정하는지 —
         # automl_agent.capabilities.describe_row_budget. 이것을 받는 것은 planning 프롬프트뿐이다:
         # iteration 2부터는 executor가 실제 개수를 결과의 ``internal_validation``에 보고했고 Critic이
-        # 그 결과를 읽는다. iteration 1에는 결과가 없는데, bench/의 모든 시도가 early-stopping 설정을
-        # 고른 곳이 거기다.
+        # 그 결과를 읽는다. iteration 1에는 결과가 없는데, 모든 시도가 early-stopping 설정을 고른
+        # 곳이 거기다.
         "row_budget": describe_row_budget(
             (state.get("dataset_card") or {}).get("n_rows"),
             grouped=bool(_grouped_by(state)),
