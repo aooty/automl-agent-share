@@ -2,8 +2,6 @@
 
 그 위의 바는 어떤 컷으로도 닿을 수 없으므로 *랭킹*이 나아져야 한다 — 권고이고 거부가 아니다.
 import이 가볍다: 측정 함수만, 그것도 지연해서 sklearn을 건드린다.
-
-이유는 ``docs/rationale.md``.
 """
 
 from __future__ import annotations
@@ -14,7 +12,7 @@ from typing import Any
 from .intervals import as_number
 
 # 동일 가중 오류율만이므로 ``f1``과 ``accuracy``는 빠진다. ``critic.SYMMETRIC_METRICS``와 합치지 않는다:
-# 같은 이름, 다른 주장. 이유는 ``docs/rationale.md``.
+# 같은 이름, 다른 주장.
 SYMMETRIC_METRICS = frozenset({"balanced_accuracy"})
 
 
@@ -50,7 +48,6 @@ def required_ks(threshold: float | None) -> float | None:
     """``2 * threshold - 1`` — 같은 항등식을 거꾸로 읽어 바를 손잡이의 축에 올린 것.
 
     1.0을 넘으면 ``None``: 그런 바는 이미 :data:`automl_agent.scoring.goal.CEILING` 초과로 공개된다.
-    이유는 ``docs/rationale.md``.
     """
     number = as_number(threshold)
     if number is None:

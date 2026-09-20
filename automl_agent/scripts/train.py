@@ -255,7 +255,7 @@ def load_data(
 
     **``schema``를 넣으면 방향이 뒤집힌다**: 파일이 자기 혼자 함축하는 배치가 아니라 *그* 배치로
     인코딩된다. 저장된 모델을 ``--score-model`` 경로에서 채점할 수 있게 만드는 것이 이것이다 —
-    대안은 오류를 내지 않고 조용히 어긋난다. 논증: ``docs/rationale.md``.
+    대안은 오류를 내지 않고 조용히 어긋난다.
     """
     import numpy as np
 
@@ -457,7 +457,7 @@ NATIVE_NAN = {"hist_gbdt", "xgboost"}
 # ``early_stopping_rounds``가 한때 이 목록에 있었다. Pipeline이 ``eval_set``을 전달할 수 없기
 # 때문이다. 버리면 크래시는 멈췄지만 더 나쁜 문제가 남았다: xgboost가 늘 ``n_estimators`` 끝까지만
 # 돌 수 있었고, 그렇게 생긴 손실이 ``overfitting``으로 보고됐다 — harness의 성질이 아니라 계열의
-# 성질인 것처럼 (FINDINGS-mimic.md, 그리고 ``test-1`` 반복 2에서 또). 지금은
+# 성질인 것처럼 (``test-1`` 반복 2에서 또). 지금은
 # :func:`fit_estimator`가 eval set을 대신 공급하니 파라미터가 존중되고, 만들 수 없는 두 객체만
 # 거절로 남는다: 이 스크립트가 분할하지 않은 행을 지목하는 eval set, 그리고 도착할 JSON 형태가 없는
 # 콜백 목록.
@@ -688,7 +688,7 @@ def build_estimator(
 
     **``declared``가 있으면 ``preprocessing``을 아예 무시한다** — 한 파이프라인을 기술하는 면이 둘이면
     어느 쪽이 돌았는지 말할 수 있는 것이 없어진다. 안전망 둘은 그래도 적용된다. 명세를 쓰는 것은 잊을
-    수 있는 것이기 때문이다 (:func:`_wrap_declared`). 논증: ``docs/rationale.md``.
+    수 있는 것이기 때문이다 (:func:`_wrap_declared`).
     """
     key = resolve_model_key(name, task)
     model = _regressor(key, seed) if task == TASK_REGRESSION else _classifier(key, seed)
@@ -1050,7 +1050,7 @@ def fit_estimator(
         if isinstance(rounds, int) and not isinstance(rounds, bool):
             # 아래의 행이-너무-적음 분기와 같은 말투로 소리 내어 말한다. 0인 라운드 수는
             # "early stopping 없음"을 뜻한 계획에서 여기 닿고, 음수는 ``sanitise_hyperparams``를
-            # 건너뛴 config에서 닿는다 — 손으로 고친 파일이거나 ``bench/random_search.py``. 둘 다
+            # 건너뛴 config에서 닿는다 — 손으로 고친 파일이거나 무작위 탐색 스크립트다. 둘 다
             # train의 모든 행에 적합하는데, ``applied_hyperparams``가 여전히 요청받은 수를 보이므로
             # 기록이 이 사실을 실어야 한다.
             log.write(
@@ -1160,7 +1160,7 @@ def describe_internal_validation(estimator: Any, n_train: int) -> dict[str, Any]
     경로다(적합이 존재하기 전에 예측한다). 테스트가 둘을 묶어 둔다.
 
     ``xgboost``는 이것을 건너뛴다 — 그 ``eval_set`` 분할은 :func:`fit_estimator`의 것이고, 같은 모양을
-    돌려준다. 어느 쪽이든 필드 하나. 떼어 둔 것이 없으면 ``{}``. 논증: ``docs/rationale.md``.
+    돌려준다. 어느 쪽이든 필드 하나. 떼어 둔 것이 없으면 ``{}``.
     """
     from sklearn.model_selection import train_test_split
 
@@ -1367,7 +1367,6 @@ def _proba(model: Any, x_arr: Any, n_classes: int, log: LogBuffer) -> Any:
 # * **모델 옆 디스크에 적는다.** 그래야 홀드아웃과 ``predict``가 검증 점수를 얻은 그 규칙으로 행에
 #   라벨을 붙인다. 이 프로세스 안에만 사는 컷은 이후 모든 패스가 조용히 다른 규칙을 채점하게 만든다.
 #
-# 논증: ``docs/rationale.md``.
 
 # ``decision.threshold``가 수 말고 받는 것: 떼어 둔 행에서 컷을 고르라.
 DECISION_TUNED = "tuned"
@@ -1446,7 +1445,6 @@ def tune_threshold(
     고를 것이 없으면 ``None``이고, 어느 경우인지는 로그가 말한다: 확률 없음, 받아들일 후보 없음, 또는
     **컷이 움직일 수 없는 지표** — ``roc_auc``와 ``pr_auc``는 ``proba``만으로 나오니 모든 후보가
     동점이고, 하나를 돌려주면 바꿀 수 없는 수를 위해 고른 컷을 기록하게 된다.
-    논증: ``docs/rationale.md``.
     """
     if proba is None:
         log.write("threshold tuning skipped: this model gives no positive-class probabilities")
@@ -1918,7 +1916,7 @@ class TrainingRun:
     (:func:`describe_internal_validation`, :func:`fit_estimator`), 떼어 둔 것이 없으면 비어 있다.
 
     한때 9-튜플이었던 것을 dataclass로 바꿨다. 위치 기반 해체는 하나를 읽으려고 모든 호출자가 아홉을
-    다 이름 짓게 만들었고 — ``tests/test_threshold.py``는 ``metrics``와 ``internal_validation``에
+    다 이름 짓게 만들었고 — 한 테스트는 ``metrics``와 ``internal_validation``에
     닿으려고 버리는 이름 일곱을 썼다 — 그만큼 긴 튜플은 조용한 순서 바뀜의 위험이기도 하다. 인접한
     ``dict[str, Any]`` 필드 둘은 타입 오류 없이 자리를 바꾼다.
     """

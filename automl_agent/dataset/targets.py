@@ -1,13 +1,13 @@
 """목표 열 인코딩, 그것이 함의하는 task, 그리고 결측 라벨을 어떻게 할지.
 
-**두 고정 스크립트가 공유하고, 둘은 같은 답을 내야 한다** (``docs/rationale.md``). 결측 라벨
+**두 고정 스크립트가 공유하고, 둘은 같은 답을 내야 한다**. 결측 라벨
 정책은 둘:
 
 ``reject``  기본값 — 멈추고 몇 개가 비었는지 말한다.
 ``drop``    떨어뜨리고 몇 개였는지 기록한다. 두 스크립트가 똑같이 적용한다.
 
 **task도 이 열에서 나오고, 호출자가 고를 것이 아니다** — :func:`detect_task`가 판정하고 답은
-카드에 적힌다 (``docs/rationale.md``).
+카드에 적힌다.
 
 pandas는 함수 안에서 import한다. 그래야 프롬프트를 렌더하는 프로세스가 그것을 결코 올리지 않는다.
 """
@@ -24,7 +24,7 @@ TARGET_MISSING_POLICIES: tuple[str, ...] = (POLICY_REJECT, POLICY_DROP)
 DEFAULT_TARGET_MISSING_POLICY = POLICY_REJECT
 
 # 정수값 목표가 여전히 클래스로 읽히면서 담을 수 있는 서로 다른 값의 수. 이 위는 개수나 나이이고
-# 라벨 집합이 아니다 (``docs/rationale.md``).
+# 라벨 집합이 아니다.
 CLASSIFICATION_MAX_DISTINCT = 20
 
 
@@ -39,7 +39,7 @@ class TargetUnusableError(ValueError):
 def detect_task(series: Any) -> str:
     """``series``가 분류 목표인지 회귀 목표인지.
 
-    규칙은 라벨이 *있는* 행에 대해, 이 순서로 (순서가 왜 중요한지는 ``docs/rationale.md``):
+    규칙은 라벨이 *있는* 행에 대해, 이 순서로 — 순서가 중요하다:
 
     * 숫자가 아닌 열(문자열, 범주)은 분류;
     * boolean은 분류 — 숫자 규칙이 0/1 정수로 보기 전에;
@@ -107,7 +107,6 @@ def target_classes(series: Any, task: str | None = None) -> list[Any] | None:
 
     구성상 그 코드들과 인덱스가 맞는다 (둘 다 ``astype("category")``를 지나고, 그 categories는
     정렬된 서로 다른 라벨이다). ``test_the_class_labels_line_up_with_the_codes``가 그 결합을 묶는다.
-    이 함수가 왜 필요한지는 ``docs/rationale.md``.
 
     값은 JSON 스칼라로 정규화한다 — 디스크에 쓰여 다른 프로세스가 읽기 때문이다. 별난 라벨 타입에는
     단방향이다 (Timestamp는 그 문자열 형태가 된다). 그래서 *출력에 라벨을 붙이는* 용도이고, 입력을

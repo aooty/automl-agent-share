@@ -41,7 +41,7 @@ CHECKPOINT_TIMEOUT_SEC = 60.0
 
 # 학습 한 번이 자기 디렉터리에 남기는 것. 셋 다 데이터와 동등하므로 셋 다 ``artifacts/`` 안에
 # 머문다 — ``.gitignore``가 막고, 경로가 ``privacy.PUBLIC_RESULT_FIELDS``에 없고, 어떤 추론
-# 노드도 내용을 읽지 않는다. 각각이 왜 그런지, 예측이 왜 경로인지: ``docs/rationale.md``.
+# 노드도 내용을 읽지 않는다.
 MODEL_FILENAME = "model.joblib"
 PREDICTIONS_FILENAME = "val_predictions.npz"
 SCHEMA_FILENAME = "feature_schema.json"
@@ -66,11 +66,11 @@ STALL_LIMIT = 2  # 개선 없는 반복이 이만큼 연속되면 포기한다
 
 # ``--time-budget-sec``에서 떼어 두는 몫. 실행이 보고하는 숫자가 자기 예산보다 오래 살아남게
 # 한다. 10분의 1인 것은 ``holdout``이 이미 적합된 모델 하나를 채점하고 탐색은 하지 않기
-# 때문이고, 상수가 아니라 비율인 것은 규모를 호출자가 정하기 때문이다. 둘 다: ``docs/rationale.md``.
+# 때문이고, 상수가 아니라 비율인 것은 규모를 호출자가 정하기 때문이다.
 HOLDOUT_RESERVE_FRACTION = 0.1
 # 적합 한 번이 남은 시간에서 받는 몫의 하한. 그 몫이 subprocess timeout이 받을 수 있는 숫자로
 # 남게 한다 — 1초 아래면 spawn이 대부분이다. 몫이 없어진 적합은 ``nodes/training.py``가
-# 거절하므로 이것이 예산을 넘겨 쓸 수는 없다. 1초인 이유: ``docs/rationale.md``.
+# 거절하므로 이것이 예산을 넘겨 쓸 수는 없다.
 MIN_FIT_TIMEOUT_SEC = 1.0
 
 # 프로파일링은 파일을 한 번 읽고 열 단위 집계를 낸다. 루프의 시간 예산이 적용되기 전에
@@ -78,7 +78,7 @@ MIN_FIT_TIMEOUT_SEC = 1.0
 PROFILE_TIMEOUT_SEC = 900.0
 
 # 실행이 끝날 때 ``model.joblib``을 무엇만 남길지. 긴 실행의 진짜 한계는 디스크다 — 루프 안에
-# 적합된 estimator의 크기를 제한하는 것이 없다 (``docs/rationale.md``). 기본값은 ``predict``가
+# 적합된 estimator의 크기를 제한하는 것이 없다. 기본값은 ``predict``가
 # 찾아가는 모델 하나를 남긴다. "all"은 ``predict --iteration <다른 번호>``가 필요로 하는
 # 것이라, 정리 메시지가 그 플래그를 알려 준다.
 KEEP_MODELS_MODES = ("best", "all")
@@ -130,7 +130,7 @@ class RunConfig:
     time_budget_sec: int = DEFAULT_TIME_BUDGET_SEC
     stall_limit: int = STALL_LIMIT
     # 기준선을 넘은 것이 실행을 끝내는지 (automl_agent.graph.stop_condition). 기본은 꺼져
-    # 있다: 켜면 실행이 반복 예산을 얼마나 쓰는지가 달라진다 (`docs/rationale.md`).
+    # 있다: 켜면 실행이 반복 예산을 얼마나 쓰는지가 달라진다.
     search_past_goal: bool = False
     dry_run: bool = False
     # --dry-run에서 모사된 trainer가 어떤 경로를 따를지.
@@ -143,8 +143,7 @@ class RunConfig:
     # 계획하고 선택하는 모델, 그것이 위의 것과 다를 때. 빈 문자열은 "같은 것"을 뜻한다.
     # 움직일 수 있는 것은 제안하는 쪽 절반뿐이다: ``planning``과 ``model_selection`` 뒤에는
     # 코드 관문이 있어서(``validate_plan``, 모델 registry, 하이퍼파라미터 clamp) 약한 모델은
-    # 조용히가 아니라 요란하게 실패한다. Critic과 보고에 그런 관문이 없는 이유, 그리고 이것의
-    # 값어치: ``docs/rationale.md``.
+    # 조용히가 아니라 요란하게 실패한다.
     proposer_model: str = ""
     llm_max_tokens: int = DEFAULT_LLM_MAX_TOKENS
     llm_timeout_sec: float = DEFAULT_LLM_TIMEOUT_SEC
@@ -171,7 +170,6 @@ class RunConfig:
 
     def __post_init__(self) -> None:
         # 여기 있는 검사는 모두, 정상으로 *보이면서* 헛소리를 보고하는 실행을 만들던 값이다.
-        # 가드가 값을 읽는 노드가 아니라 설정 객체에 있는 이유: ``docs/rationale.md``.
         _one_of("goal_mode는", self.goal_mode, GOAL_MODES)
         metric = canonical(self.metric)
         if metric not in GOAL_METRICS:
@@ -191,7 +189,7 @@ class RunConfig:
             _one_of("direction은", self.direction, DIRECTIONS)
             if self.direction != implied:
                 # 지표가 이미 뜻하는 바를 확인하는 용도로만 받는다. 반대 조합은 실행 전체를
-                # 뒤집는다 (`docs/rationale.md`).
+                # 뒤집는다.
                 raise ValueError(
                     f"{metric}은 {implied} 지표라서 direction={self.direction!r}로 실행할 수 없습니다. "
                     "방향은 지표에서 나오므로 --direction 은 생략하거나 지표와 같은 값을 주십시오"
@@ -284,7 +282,6 @@ class RunConfig:
         예산 전체라서, 어떤 적합도 자기 실행보다 오래 갈 수 없다는 말만 한다. 루프가 실제로
         적합에 주는 것은 남은 시간의 몫인 :func:`automl_agent.state.fit_share_sec`이고, 이것은
         state에 예산 계산이 없을 때(단위 테스트, 손으로 고친 체크포인트)의 fallback이다.
-        fallback이 몫이 아니라 예산 전체인 이유: ``docs/rationale.md``.
         """
         return float(self.time_budget_sec)
 
@@ -293,7 +290,7 @@ def file_size_text(size: float) -> str:
     """``509234754``를 ``485.6 MB``로. 1 KB 아래는 바이트, 그 위로 KB, MB, GB.
 
     바이트 경우는 장식이 아니다: 없으면 1 KB 아래 모든 파일이 ``0 KB``로 읽히는데, 그것은
-    쓰기가 *실패한* 모습이다. 단위를 무조건 하나로 두지 않은 이유: ``docs/rationale.md``.
+    쓰기가 *실패한* 모습이다.
 
     여기 있는 이유: subprocess 경계 양쪽이 모두 artifact 크기를 출력하는데 노드에서
     ``scripts/train.py``를 import할 수 없다 — sklearn을 끌어오고, orchestrator 프로세스에는

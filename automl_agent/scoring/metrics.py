@@ -1,7 +1,7 @@
 """지표 registry: 실행이 겨냥할 수 있는 모든 지표의 선언 한 벌.
 
 **목록은 여기 하나뿐이고 나머지는 여기서 읽는다.** 세 군데가 각자 목록을 갖고 있었고 어긋남이
-조용히 실패했다 (``docs/rationale.md``).
+조용히 실패했다.
 
 **일부러 의존성이 없다** — 이름과 성질뿐이고, sklearn도 없고 패키지의 나머지에서 오는 import도 없다.
 오케스트레이터는 pandas나 sklearn을 결코 import해선 안 되고, 고정된 스크립트들은 import되는 대신
@@ -10,7 +10,7 @@
 
 지표마다 자기 ``task``를 선언한다. 실행의 과제는 호출자의 성질이 아니라 *타깃 열*의 성질이기
 때문이다. ``direction``이 여기 있는 것도 같은 이유다: ``f1``을 최소화하는 것은 선호가 아니라
-실수다 (``docs/rationale.md``).
+실수다.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ class MetricSpec:
     bounded: bool
     # 호출자가 숫자를 대지 않았을 때 ``fixed`` 모드가 쓰는 바, 그리고 유도할 기준선을 카드가 싣지
     # 않았을 때 ``auto``의 마지막 수단. 타깃 자신의 단위를 쓰는 지표에는 ``None``이고, 그 지표들은
-    # ``--threshold``나 측정된 기준선을 요구한다 (``docs/rationale.md``).
+    # ``--threshold``나 측정된 기준선을 요구한다.
     fallback: float | None
     task: str = TASK_CLASSIFICATION
     # 어느 쪽이 더 좋은가. 지표의 성질이고 결코 호출자의 성질이 아니다.
@@ -122,7 +122,7 @@ GOAL_METRICS: tuple[str, ...] = tuple(METRICS)
 # 쓰고, 답이 거절이 아니라 대체인 이유는 거기 있다.
 #
 # 회귀에 ``rmse``가 아니라 ``r2``인 것은 일부러다: 들고 다닐 수 있는 바(``fallback=0.80``)를 가진
-# 유일한 회귀 지표이므로, 대체된 실행에는 판단받을 목표가 있다 (``docs/rationale.md``).
+# 유일한 회귀 지표이므로, 대체된 실행에는 판단받을 목표가 있다.
 DEFAULT_METRICS: dict[str, str] = {
     TASK_CLASSIFICATION: "f1",
     TASK_REGRESSION: "r2",
@@ -136,7 +136,7 @@ def substitute_metric(task: str, metric: str) -> str | None:
     이 빌드가 모르거나, 이름이 registry 지표가 아니다(``RunConfig``가 그것들을 거절한다). 대체에는
     두 사실이 모두 알려지고 서로 어긋나는 것이 필요하다.
 
-    거절이 아니라 대체인 이유, 그리고 그 어긋남에 닿는 두 경로는 ``docs/rationale.md``. 대체가
+    대체가
     안전한 것은 **결코 조용하지 않기 때문뿐이다**: 호출자가 그것을 말한다
     (:mod:`automl_agent.nodes.profiling`). 아무도 청하지 않은 지표로 판단된 실행은 바뀐 것이 화면에
     있을 때만 정직하다.
@@ -191,7 +191,7 @@ def task_of(name: str) -> str | None:
 def direction_of(name: str, default: str = MAXIMIZE) -> str:
     """``name``에 대해 어느 쪽이 더 좋은가. 모르는 지표는 ``default``를 지킨다.
 
-    묻는 대신 읽는다. 왜 물어선 안 되는지는 ``docs/rationale.md``.
+    묻는 대신 읽는다.
     """
     found = spec(name)
     return default if found is None else found.direction

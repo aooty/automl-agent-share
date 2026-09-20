@@ -6,13 +6,12 @@
 
 열 규칙 셋, 각각이 가드다:
 
-- **one-hot이고 결코 ordinal이 아니다** (``docs/rationale.md``).
+- **one-hot이고 결코 ordinal이 아니다**.
 - :data:`MAX_ONEHOT_CARDINALITY` 위는 **떨어지고, 떨어질 때 이름이 불린다.** 자유 텍스트 열은 수천
   열로 one-hot된다. 떨어뜨리는 것은 되돌릴 수 있고 발표되지만, 침묵은 그렇지 않다.
-- **결측은 자기 level이다** (``docs/rationale.md``).
+- **결측은 자기 level이다**.
 
-**level 집합은 일부러 모든 행에서 적합된다** — 특성 값만, 타깃은 결코. 그것이 누출이 아닌 이유는
-``docs/rationale.md``.
+**level 집합은 일부러 모든 행에서 적합된다** — 특성 값만, 타깃은 결코.
 
 **적합과 변환이 갈라진 이유는 "파일의 순수 함수"가 바로 적합된 모델을 두 번째 파일에서 쓸 수 없게
 만드는 성질이기 때문이다.** 새 행을 다시 인코딩하면 level 하나가 없을 때 너비가 달라지고, 더 나쁘게는
@@ -34,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # pragma: no cover - import 비용만이고, pandas는 subprocess 전용이다
     import pandas as pd
 
-# 이보다 서로 다른 값이 많은 열은 one-hot되는 대신 떨어진다. 50인 이유는 ``docs/rationale.md``.
+# 이보다 서로 다른 값이 많은 열은 one-hot되는 대신 떨어진다.
 MAX_ONEHOT_CARDINALITY = 50
 
 # 생성된 열 이름에서 원본 열과 그 level을 가르는 글자. 명시적으로 두는 이유는
@@ -48,7 +47,7 @@ MISSING_LEVEL = "<missing>"
 
 # 스키마가 읽는 사람이 검사할 수 있는 무언가를 얻을 때 올린다. :func:`encode_with_schema`가 읽고,
 # 거기 규칙은 일부러 비대칭이다: 이 상수보다 *새* 버전은 거절되고, *옛* 버전은 받아들여지되 그것이
-# 지원할 수 없는 검사의 이름이 불린다. 비대칭인 이유는 ``docs/rationale.md``.
+# 지원할 수 없는 검사의 이름이 불린다.
 SCHEMA_VERSION = 2
 
 # 이 빌드가 아직 읽을 수 있는 가장 오래된 버전. 옛 스키마를 그저 얇게가 아니라 *틀리게* 만드는
@@ -68,8 +67,7 @@ SCHEMA_CHECKS_ADDED: dict[int, tuple[str, ...]] = {
 # 건너뛰는 대신 짧은 배치에서도 비교가 돌게 한다 — 조용히 건너뛰는 것이 여기서의 실패 양식이고,
 # 배치가 짧아질수록 넓어지는 바는 규칙 하나로 같은 말을 한다.
 #
-# 두 바닥값이 다른 이유, 그리고 결측 코드 쪽이 명목값이고 잡음 항이 일을 하는 이유는
-# ``docs/rationale.md``.
+# 두 바닥값은 다르다 — 결측 코드 쪽이 명목값이고, 잡음 항이 일을 한다.
 MISSING_RATE_SHIFT = 0.05
 SENTINEL_RATE_SHIFT = 0.01
 
@@ -77,7 +75,7 @@ SENTINEL_RATE_SHIFT = 0.01
 class FeatureSchemaMismatch(ValueError):
     """적합된 모델이 요구하는 방식으로 새 행을 인코딩할 수 없다.
 
-    우회하는 대신 raise한다. 대안이 모두 조용하기 때문이다 (``docs/rationale.md``).
+    우회하는 대신 raise한다. 대안이 모두 조용하기 때문이다.
     """
 
 
@@ -89,7 +87,7 @@ class FeatureSchemaMismatch(ValueError):
 # 코드도 디스크에 있다: ``model.joblib``은 sklearn 객체의 pickle이고, 열릴 때 설치돼 있는 sklearn이
 # 복원한다. sklearn 자신은 경고만 하고(``InconsistentVersionWarning``, stderr로, subprocess 로그에서
 # 쉽게 묻힌다), 그 경고가 말하는 실패는 크래시가 아니다 — 버전 사이에 옮겨진 속성이 기본값으로
-# 복원되고, 모델은 조용히, 다르게 예측한다 (``docs/rationale.md``).
+# 복원되고, 모델은 조용히, 다르게 예측한다.
 #
 # 그래서 버전은 적합 때 기록되고 재생 때 비교된다. 패키지를 import하는 대신
 # ``importlib.metadata``로 이름으로 기록하는 이유는 이것이 pandas를 import해선 안 되는 오케스트레이터
@@ -133,7 +131,7 @@ def _same_version(package: str, fit: str, now: str) -> bool:
 def environment_drift(recorded: Mapping[str, Any] | None) -> list[dict[str, str]]:
     """기록된 버전 중 지금 도는 것과 다른 것들. 맞으면 빈 목록.
 
-    보고하고 결코 거절하지 않는다 (``docs/rationale.md``).
+    보고하고 결코 거절하지 않는다.
     """
     if not recorded:
         return []
@@ -204,7 +202,7 @@ def is_encodable_column(series: pd.Series, distinct: int) -> bool:
 # 배치는 *모양*이 바뀐 열을 잡는다. 모양을 지킨 채 뜻이 바뀐 열은 잡을 수 없고, 그렇게 되는 가장 흔한
 # 방식은 결측 관례다: 학습 추출본은 측정이 없는 자리에 ``-9999``를 적었는데 다음 달 추출본은 빈 칸을
 # 적는다. 둘 다 같은 이름의 수치 열이고, 둘 다 같은 자리로 인코딩되고, 여기까지 아무것도 보고하지
-# 않는다 (``docs/rationale.md``, ``docs/FINDINGS-mimic.md``).
+# 않는다.
 #
 # 그래서 적합은 열마다 얼마나 자주 결측이었는지와 어떤 관례적 결측 코드를 실었는지를 기록하고, 재생은
 # 비교한다. 탐지하고, 보고하고, 결코 변환하지 않는다 — :mod:`automl_agent.dataset.sentinels`가 말하는
@@ -217,7 +215,7 @@ def column_stats(features: pd.DataFrame, columns: list[str]) -> dict[str, Any]:
 
     셈이 아니라 비율이라 900행 적합과 40행 배치가 비교되기라도 한다. 여기 나타날 수 있는 값은
     :data:`automl_agent.dataset.sentinels.NUMERIC_CODES`에 있는 것뿐이고, 그것이 "스키마가 이제 임의의
-    셀 값을 싣는다"는 반론 밖에 이것을 두게 한다 (``docs/rationale.md``).
+    셀 값을 싣는다"는 반론 밖에 이것을 두게 한다.
     """
     stats: dict[str, Any] = {}
     for name in columns:
@@ -248,7 +246,7 @@ def _sentinel_rates(series: pd.Series, recorded: list[dict[str, Any]]) -> dict[f
     """코드마다 이 배치의 비율. 다시 탐지하는 대신 값으로 센다.
 
     fit이 이미 이름 부른 코드에 ``detect_sentinels``를 쓰지 않는 것은 일부러다
-    (``docs/rationale.md``). fit이 값을 이름 부른 뒤로는 세는 것이 정확하다.
+    . fit이 값을 이름 부른 뒤로는 세는 것이 정확하다.
     """
     if not recorded:
         return {}
@@ -719,8 +717,7 @@ def append_missing_indicator(x: Any, positions: Any = None) -> Any:
     ``positions``는 인코딩된 행렬 안 인덱스로 어느 열이 표시를 받는지 이름 부른다. ``None``은 모든
     열이고, :mod:`automl_agent.dataset.pipeline`이 있기 전의 동작이며 이미 pickle된
     ``FunctionTransformer``가 재생하는 것이다. 두 번째 함수가 아니라 기본값 있는 키워드인 이유는 있는
-    ``model.joblib``(이 이름과 ``kw_args=None``을 기록한)이 그대로 로드되고 불리게 하려고. 부분 선택이
-    왜 요점인지는 ``docs/rationale.md``.
+    ``model.joblib``(이 이름과 ``kw_args=None``을 기록한)이 그대로 로드되고 불리게 하려고.
 
     상태가 없다는 것이 분할 어느 쪽에서도 안전하게 지킨다: 출력 너비는 입력 너비와 이 인수의 순수
     함수이고, 본 행에서 어느 열이 마침 NaN을 가졌는지의 함수가 결코 아니다. 그래서
@@ -728,7 +725,7 @@ def append_missing_indicator(x: Any, positions: Any = None) -> Any:
 
     손을 뻗기 전에: NaN으로 기본 분기하는 계열(``hist_gbdt``나 ``xgboost``의 ``impute: none``)에 대고는
     *정확히* 중복이다 — 표시가 만드는 분할은 트리가 이미 가진 NaN 가지뿐이다. 이것이 *대치하는* 경로에서
-    무엇을 사는지는 ``capabilities._MISSINGNESS``와 ``docs/FINDINGS-mimic.md``를 먼저 읽으라.
+    무엇을 사는지는 ``capabilities._MISSINGNESS``를 먼저 읽으라.
     """
     import numpy as np
 
@@ -743,7 +740,7 @@ def append_missing_count(x: Any) -> Any:
 
     NaN을 기본으로 다루는 계열이 이미 만드는 NaN 분할로는 표현되지 않는다 — 그쪽은 열별이고 이것은 열을
     건너 집계한다. 임상 행에서는 환자가 얼마나 검사를 받았는지를 대신하고, 그래서 자기 열로 *쓸 수
-    있다*. 그것이 한 열의 값을 한다는 것과 같지는 않다 (``docs/FINDINGS-mimic.md``).
+    있다*. 그것이 한 열의 값을 한다는 것과 같지는 않다.
     """
     import numpy as np
 

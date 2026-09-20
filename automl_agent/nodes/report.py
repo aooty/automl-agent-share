@@ -34,7 +34,7 @@ STOP_REASON_LABELS = {
 }
 
 # 보고서는 실행의 유일한 장문 출력이고 딱 한 번 생성되므로, 추론 노드의 구조화된 응답보다 몫을
-# 넉넉히 받는다. 적응적 사고와 산문이 같은 몫에서 나오기 때문이다. 올린 경위: ``docs/rationale.md``.
+# 넉넉히 받는다. 적응적 사고와 산문이 같은 몫에서 나오기 때문이다.
 REPORT_MAX_TOKENS = 24000
 
 # 모델이 끊겼을 때 덧붙인다. 콘솔만이 아니라 보고서 자체에 넣는 이유는 나중에 읽히고 전달되는
@@ -114,8 +114,6 @@ def report(state: AutoMLState, *, config: RunConfig) -> dict:
 
 def describe_replanning(history: list[dict[str, Any]]) -> str:
     """루프가 실제로 얼마나 돌았는지, 한 문장으로.
-
-    빈 칸에서 추론하게 두지 않고 세어서 적는 경위: ``docs/rationale.md``.
 
     마지막 시도에 ``critic``이 없는 것은 구조적이다(루프가 그것을 평가한 뒤 멈추므로 그 판정은 일어나지
     않는 재계획을 먹일 것이다) — 그래서 문장이 그 시도를 지목한다. 독자가 빈 행을 스스로 설명하게 두지

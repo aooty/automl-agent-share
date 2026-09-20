@@ -59,7 +59,7 @@ GOAL_METRIC_DROP = 0.05
 RANKING_TOLERANCE = 0.005
 
 # 과적합 격차의 두 형태 — 유계 지표는 절대값, 타깃 자기 단위의 지표는 학습 점수에 대한 비율.
-# 후자에서 절대 격차는 임의의 달러 수나 날짜 수다. 논증: ``docs/rationale.md``.
+# 후자에서 절대 격차는 임의의 달러 수나 날짜 수다.
 OVERFIT_GAP = 0.15
 OVERFIT_GAP_RATIO = 0.25
 
@@ -70,7 +70,7 @@ UNDERFIT_MARGIN_RATIO = 0.05
 
 # 정해진 방향 문구들로는 표현할 수 없던 진단: `balanced_accuracy`는 떨어졌는데 `roc_auc`는
 # *유지되거나 올라간* 경우. 순위는 그대로이고 판정 규칙만 움직였으므로 용량은 임계값 의존
-# 지표를 되돌리지 못한다. 논증: ``docs/rationale.md``.
+# 지표를 되돌리지 못한다.
 OPERATING_POINT_DIRECTION = (
     "랭킹 품질(roc_auc)은 유지됐으므로 용량이 아니라 운영점 문제다: 불균형 레버를 되살린다 — "
     'class_weight=\'balanced\' 또는 클래스별 가중치 맵({"0": 1, "1": 10}), xgboost면 '
@@ -84,12 +84,11 @@ SYMMETRIC_METRICS = frozenset({"balanced_accuracy"})
 
 # 이 아래면 두 쪽이 충분히 가까워서 남은 미달은 운영점의 문제가 아니다. 분기가 발동해야 하는
 # 실행들의 skew *위*에 둔다 — 그 범위 안에 있으면 그것들을 가르지 못한다.
-# 논증: ``docs/rationale.md``.
 OPERATING_POINT_SKEW = 0.08
 
 # **``balanced_accuracy_cut_headroom``이 skew 분기를 이긴다** — 그 분기가 논거로 삼는 전제의
 # 정확한 형태이고, 둘은 비대칭 ROC 곡선에서 갈린다. 이 바닥 아래에서는 근사가 이동을 처방하지
-# 못한다. 논증: ``docs/rationale.md``.
+# 못한다.
 CUT_HEADROOM_FLOOR = 0.005
 
 # 컷이 이미 최적인데 최고 컷으로도 바에 못 닿을 때 남는 말. 추측이 아니다 — 임계값 아래의
@@ -153,7 +152,7 @@ def critic(state: AutoMLState, *, config: RunConfig) -> dict:
         "history": _history_digest(state),
         "best": state.get("best") or "(no successful attempt yet)",
         # 각 판정과 그것이 낳은 시도를 잇는 것. ``history`` 위의 산수이고 지시 4로 모델에게
-        # 시키는 것으로는 부족했으므로 여기서 계산한다. 논증: ``docs/rationale.md``.
+        # 시키는 것으로는 부족했으므로 여기서 계산한다.
         "ledger": _ledger(state, config),
         "failure_types": ", ".join(FAILURE_TYPES),
         # caveat이 점수가 그 자리에 있는 이유일 수 있고, 그것이 무효화하는 것에 의존하는
@@ -208,7 +207,6 @@ def describe_verdict_frame(state: AutoMLState, config: RunConfig) -> str:
     """프롬프트의 첫 부분: Critic이 *이* 시도에 대해 무엇을 묻고 있는지.
 
     **첫 문장은 미달을 무조건 단정할 수 없다.** 뒤의 모든 것이 그 빛으로 읽힌다.
-    논증: ``docs/rationale.md``.
     """
     if not cleared_the_bar(state, config):
         return (
@@ -384,7 +382,7 @@ def _overfits(metric: str, gap: float, train_score: Any) -> bool:
 
     ``gap``은 "validation이 학습보다 얼마나 더 나쁜지"로 정규화되어 오므로 남은 것은 스케일뿐이다.
     유계 지표는 스케일을 자기가 갖고 있고, ``mae``와 ``rmse``는 학습 점수에 대한 비율로 판정하며,
-    점수가 없거나 0이면 **단위를 추측하는 대신 판정을 포기한다**. 논증: ``docs/rationale.md``.
+    점수가 없거나 0이면 **단위를 추측하는 대신 판정을 포기한다**.
     """
     found = spec(metric)
     if found is None or found.bounded:
@@ -437,7 +435,7 @@ def _ledger(state: AutoMLState, config: RunConfig) -> str:
     문장이 말하는 것과 다른 iteration에 대해 Δ가 계산된 행은 모든 수가 참인데 주장은 거짓인 줄이다.
 
     조종 전용. 여기 어느 행도 테스트 분할을 보지 않고, 어느 반복이 이기는지에 대한 게이트가
-    되어서도 안 된다(:mod:`automl_agent.nodes.holdout`). 논증: ``docs/rationale.md``.
+    되어서도 안 된다(:mod:`automl_agent.nodes.holdout`).
     """
     goal = dict(state.get("goal") or {})
     metric = str(goal.get("metric", config.metric))
@@ -554,7 +552,7 @@ def _ledger(state: AutoMLState, config: RunConfig) -> str:
     if two_levers:
         # **금지가 아니라 표시** — ``logreg``는 ``impute: none``을 받지 못하므로 그것을
         # 시도하는 것이 같은 전이에서 파이프라인 변경을 *요구*한다. 일어나서는 안 되는 것은 그
-        # 행의 뺄셈이 한 레버의 공로로 읽히는 것뿐이다. 논증: ``docs/rationale.md``.
+        # 행의 뺄셈이 한 레버의 공로로 읽히는 것뿐이다.
         lines.append(
             "  한 행에 레버가 둘인 전이: "
             + ", ".join(two_levers)
@@ -565,7 +563,7 @@ def _ledger(state: AutoMLState, config: RunConfig) -> str:
         )
     # **파이프라인이 한 번도 안 움직였으면 침묵한다.** "전처리를 아직 안 써 봤습니다"는
     # 참이면서 동시에 초대이고, 안 써 본 레버를 목록으로 보여 주는 프롬프트는 그것을 써 보게
-    # 만든다. 줄을 쓸 값이 있는 것은 이미 일어난 전이뿐이다. 논증: ``docs/rationale.md``.
+    # 만든다. 줄을 쓸 값이 있는 것은 이미 일어난 전이뿐이다.
     if pipeline_moves:
         if pipeline_alone:
             lines.append(
@@ -693,7 +691,7 @@ def _other_levers_held(
     함께 일어난 전이는 계열 교체와 똑같이 한 축에 주인이 둘이다.
 
     **``hyperparams`` 키가 없으면 "유지됐다"가 아니라 "유지를 확인할 수 없다"로 읽는다.** 그래서
-    거부되는 행은 기록이 말하지 않는 행뿐이다. 논증: ``docs/rationale.md``.
+    거부되는 행은 기록이 말하지 않는 행뿐이다.
     """
     if "hyperparams" not in previous or "hyperparams" not in current:
         return False
@@ -707,7 +705,7 @@ def _pipeline_change(previous: Mapping[str, Any], current: Mapping[str, Any]) ->
 
     계열*과* 파이프라인을 같이 움직인 행은 레버 둘을 썼고 ledger의 뺄셈은 둘을 가르지 못한다.
     여기서 변경을 이름으로 대는 것이 분해는 아니다 — 그 행이 깨끗한 레버 하나로 읽히는 것을
-    막는다. 논증: ``docs/rationale.md``.
+    막는다.
     """
     moved = sorted(key for key in {*previous, *current} if previous.get(key) != current.get(key))
     return ", ".join(
@@ -739,7 +737,6 @@ def _cut_lever_note(
 
     집합이 최대화 쪽이므로 이것이 대체하는 최소화 검사를 포함한다 — 최소화 지표에서는 미달이
     반대로 흐르고 ``balanced_accuracy_cut_headroom``은 아예 존재하지 않는다.
-    논증: ``docs/rationale.md``.
     """
     if metric not in SYMMETRIC_METRICS:
         return None
@@ -777,7 +774,7 @@ def _ranking_ceiling_note(
     차이가 있다는 근거가 되지 못한다.
 
     :data:`SYMMETRIC_METRICS`(상한 항등식이 거기에만 있다)로, 그리고 여전히 바에 못 미치는 상한으로
-    제한한다 — 그 위는 :func:`_cut_lever_note`의 사건이다. 논증: ``docs/rationale.md``.
+    제한한다 — 그 위는 :func:`_cut_lever_note`의 사건이다.
     """
     if metric not in SYMMETRIC_METRICS:
         return None
@@ -859,7 +856,6 @@ def _operating_point_skew(
 
     :data:`SYMMETRIC_METRICS`로 제한한다. ``specificity``는 이진 전용이므로 그것이 있다는 사실이,
     처방이 코드 0과 1을 이름으로 댈 수 있게 해 주는 이진 가드 역할까지 한다.
-    논증: ``docs/rationale.md``.
     """
     if metric not in SYMMETRIC_METRICS:
         return None
@@ -927,7 +923,6 @@ def _ranking_limited(
     **사실 둘이 함께 성립해야 하고, 그것이 이것을 휴리스틱이 아니라 증명으로 만든다** — 컷이 이미
     이 랭킹의 최고에서 :data:`CUT_HEADROOM_FLOOR` 안에 있고, *그리고* 그 최고가 여전히 바 아래다.
     어느 한쪽만으로는 운영점을 먼저 고칠 값이 남는다(그쪽은 skew 분기의 사건이다).
-    논증: ``docs/rationale.md``.
     """
     if metric not in SYMMETRIC_METRICS:
         return None
@@ -958,7 +953,6 @@ def _weight_history(state: AutoMLState) -> list[tuple[float, float]]:
 
     **같은 모델만.** 다른 계열의 점은 이 계열의 운영점이 어디 있는지에 대해 아무 말도 하지 않고,
     둘을 걸쳐 보간하면 교차점이 어느 모델도 가 본 적 없는 자리에 놓인다.
-    논증: ``docs/rationale.md``.
     """
     model = str(state.get("model") or "")
     points: list[tuple[float, float]] = []
@@ -984,7 +978,7 @@ def _interpolated_weight(
 
     구간이 없으면 ``None``이고, **두 점이 단조성이 요구하는 순서로 놓여 있지 않을 때도** 그렇다 —
     시도 사이의 용량 변화가 순서를 뒤집을 수 있고, 뒤집힌 점들을 지나는 secant는 틀린 방향을
-    가리킨다. 논증: ``docs/rationale.md``.
+    가리킨다.
     """
     below = max((point for point in points if point[1] < 0), key=lambda p: p[1], default=None)
     above = min((point for point in points if point[1] > 0), key=lambda p: p[1], default=None)
@@ -1031,7 +1025,7 @@ def _first_rung(state: AutoMLState) -> float:
 
     비율 자체가 아니라 ``max``인 이유 — 균형에 가까운 카드의 비율은 한 스텝 *아래*에 있으므로
     그대로 쓰면 이 분기가 올리려고 있는 가중치를 낮춘다. 첫 단에만 쓴다. 그 뒤의 탐색은 스텝과
-    보간이 맡는다. 논증: ``docs/rationale.md``.
+    보간이 맡는다.
     """
     return max(WEIGHT_STEP, _frequency_ratio(state))
 

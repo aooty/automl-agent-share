@@ -9,7 +9,7 @@
    등록된 비공개 재료(데이터셋 경로)는 전송되는 대신 *실행을 중단시키고*, 그저 파일시스템 경로처럼
    보이는 것은 가려진다.
 
-왜 둘인지는 ``docs/rationale.md``. 여기서는 pandas를 import하지도 데이터 파일을 열지도 않는다:
+여기서는 pandas를 import하지도 데이터 파일을 열지도 않는다:
 이 모듈은 체이고 reader가 아니다.
 """
 
@@ -88,7 +88,7 @@ _DATA_FILE = re.compile(
     re.IGNORECASE,
 )
 # 인용된 리터럴만 가린다. 숫자는 일부러 건드리지 않는다 — Critic이 읽는 OOM·타이밍 증거가 거기
-# 있다 (``docs/rationale.md``).
+# 있다.
 _QUOTED = re.compile(r"(['\"])(?:(?!\1).){1,200}\1")
 _EXCEPTION_LINE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Warning|Interrupt):\s")
 
@@ -119,7 +119,7 @@ def scrub_message(text: str, limit: int = 300) -> str:
 def assert_clean(text: str, label: str = "prompt") -> str:
     """보낼 수 있는 ``text``. 등록된 재료에는 raise, 경로처럼 보이는 것은 가린다.
 
-    비대칭은 의도다. 왜 한쪽은 중단이고 한쪽은 가림인지는 ``docs/rationale.md``.
+    비대칭은 의도다.
     """
     for secret in _PRIVATE:
         if secret in text:
@@ -145,7 +145,7 @@ SAMPLE_KEYS = frozenset(
 
 
 # 카드가 실어도 되는 최상위 키 전부 — denylist가 아니라 allowlist다. 실패 양식은 아무도 생각하지
-# 못한 키이고, 한 번 물렸다 (``docs/rationale.md``).
+# 못한 키이고, 한 번 물렸다.
 CARD_KEYS: tuple[str, ...] = (
     "name",
     "description",
@@ -197,7 +197,7 @@ class CardSchemaError(ValueError):
 def _check_value(value: Any, path: str) -> None:
     """규칙 하나를 재귀로: 컨테이너는 통과, 잎은 스칼라여야 한다.
 
-    키별 타입 표가 아닌 이유는 ``docs/rationale.md``. 이 규칙이 정확히 행을 불가능하게 만드는
+    이 규칙이 정확히 행을 불가능하게 만드는
     규칙이다 — 레코드는 살 구조가 필요하다.
     """
     if _is_scalar(value):
@@ -225,8 +225,7 @@ def _check_value(value: Any, path: str) -> None:
 def validate_card(card: Any) -> dict[str, Any]:
     """fail-closed 스키마 검사. 카드를 그대로 돌려주거나 ``CardSchemaError``.
 
-    *첫* 번째 선이다: 모르는 키는 전달되는 대신 실행을 멈춘다. :func:`public_card`가 뒤에 두 번째
-    선으로 그대로 남아 있는 이유는 ``docs/rationale.md``.
+    *첫* 번째 선이다: 모르는 키는 전달되는 대신 실행을 멈춘다.
     """
     if not isinstance(card, dict):
         raise CardSchemaError("오류: 데이터셋 카드는 JSON 객체여야 합니다.")
@@ -301,7 +300,7 @@ PUBLIC_RESULT_FIELDS: tuple[str, ...] = (
 )
 
 # 아래 넷은 키만이 아니라 *값*까지 걸러야 해서 따로 나른다. 필터는 값이 아니라 모양에 대한
-# 가드다 — 앞으로 생길 키가 객체로 도착하는 것을 막는다 (``docs/rationale.md``).
+# 가드다 — 앞으로 생길 키가 객체로 도착하는 것을 막는다.
 APPLIED_HYPERPARAMS_KEY = "applied_hyperparams"
 # {"impute": "median", "scale": true} — 실행기가 실제로 세운 파이프라인.
 APPLIED_PREPROCESSING_KEY = "applied_preprocessing"
@@ -340,8 +339,7 @@ def _public_paired(block: Any) -> dict[str, Any]:
     """짝지은 비교 블록, 키 하나씩, 또는 ``{}``.
 
     모든 문자열 필드를 ``str``이 아니라 자기 어휘에 대고 검사한다 — ``status``·``unit``·``reason``은
-    :mod:`automl_agent.scoring.intervals`가 쓰는 낱말에, ``metric``은 지표 registry에. 왜 그래야
-    하는지는 ``docs/rationale.md``.
+    :mod:`automl_agent.scoring.intervals`가 쓰는 낱말에, ``metric``은 지표 registry에.
     """
     raw = block if isinstance(block, dict) else {}
     clean: dict[str, Any] = {}

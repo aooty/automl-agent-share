@@ -50,8 +50,8 @@ class AutoMLState(TypedDict):
     ``dataset_card``  ``profiling``이 만든 집계 요약. 추론 노드가 데이터에 대해 아는 것은
                       이것뿐이다.
 
-    추론 노드에 ``data_ref`` 읽기를 하나 추가하면 이 격리가 무너지므로,
-    ``tests/test_privacy.py``가 보관된 프롬프트에 경로가 나타나지 않음을 확인한다.
+    추론 노드에 ``data_ref`` 읽기를 하나 추가하면 이 격리가 무너지므로, 보관된 프롬프트에 경로가
+    나타나지 않음을 테스트가 확인한다.
     """
 
     dataset_card: dict
@@ -155,7 +155,7 @@ def drop_pinned_seed(hyperparams: Any, seed: int | None) -> dict:
     무시할 수 없을 만큼 자주 되풀이한다.
 
     호출자 둘(``critic._other_levers_held``, ``planning._signature``)은 하이퍼파라미터 dict 두 개를
-    견주므로 먼저 이 되풀이를 없애야 한다 — 둘 다 남겨 뒀다가 물린 자리다 (``docs/rationale.md``).
+    견주므로 먼저 이 되풀이를 없애야 한다 — 둘 다 남겨 뒀다가 물린 자리다.
 
     값이 seed와 같을 때만이다. ``--seed 42``에서의 ``random_state: 7``은 실제 레버다 —
     ``early_stopping``의 내부 분할을 움직인다 — 그래서 계속 세어진다.
@@ -195,8 +195,7 @@ def build_attempt(state: AutoMLState, critic: dict | None = None) -> Attempt:
 # 만든다: 하나는 누적하고, 하나는 루프가 끝났음을 정하고, 둘은 남은 것을 나누고, 나머지는
 # 채널을 읽는다.
 #
-# 모두 fail-open이다 — ``total_sec``이 없거나 0 이하이면 "예산 없음"으로 답한다
-# (``docs/rationale.md``).
+# 모두 fail-open이다 — ``total_sec``이 없거나 0 이하이면 "예산 없음"으로 답한다.
 
 
 def accrue_budget(previous: dict | None, seconds: float, total_sec: float) -> dict:
@@ -219,8 +218,7 @@ def loop_time_remaining_sec(state: AutoMLState) -> float | None:
     """*루프*가 아직 쓸 수 있는 시간 — 예산에서 holdout이 떼어 둔 몫을 뺀 것.
 
     루프가 예산 전체를 받지 않는 이유: 이 실행이 보고하는 숫자는 루프가 멈춘 뒤 ``holdout``이
-    측정하는 것이고, 0까지 쓸 수 있는 예산은 실행 자신의 답을 지우는 예산이다
-    (``docs/rationale.md``).
+    측정하는 것이고, 0까지 쓸 수 있는 예산은 실행 자신의 답을 지우는 예산이다.
     """
     total = budget_total_sec(state)
     if total is None:
@@ -238,7 +236,7 @@ def fit_share_sec(state: AutoMLState) -> float | None:
     """적합 하나의 몫: 루프에 남은 시간을 아직 돌 수 있는 반복 수로 나눈 것.
 
     통째로 넘기지 않고 나눈다 — 반복 1이 전부를 쓰면 반복 2에 닿지 못하고, 그런 루프는 이
-    저장소가 측정하는 것이 아니다 (``docs/rationale.md``). 현재 반복은 자기를 센다: 5회 중 1회에서
+    저장소가 측정하는 것이 아니다. 현재 반복은 자기를 센다: 5회 중 1회에서
     적합은 5분의 1을 받고, 5회에서는 남은 것을 전부 받는다.
 
     0 이하로 돌아올 수 있다 — ``stop_condition``은 반복 사이에 예산을 검사하고, 그 결정 뒤의
@@ -257,8 +255,7 @@ def holdout_share_sec(state: AutoMLState) -> float | None:
     """마지막 채점에 남은 시간. 떼어 둔 몫보다 적어지지는 않는다.
 
     적어지지 않는 이유: 이미 진행 중인 적합이 루프의 몫을 넘길 수 있다. 떼어 둔 몫은 루프가
-    손대지 못하게 한 것이므로, 계산상 실행이 이미 끝났다고 나와도 holdout은 그것을 받는다
-    (``docs/rationale.md``).
+    손대지 못하게 한 것이므로, 계산상 실행이 이미 끝났다고 나와도 holdout은 그것을 받는다.
     """
     total = budget_total_sec(state)
     if total is None:
@@ -280,7 +277,7 @@ def goal_met(result: dict, goal: dict) -> bool:
     """``result``가 목표 기준선에 닿았는지. 오류는 결코 목표를 만족시키지 않는다.
 
     기준선이 없는 목표는 결코 달성되지 않는다. ``profiling``이 그런 실행을 루프 시작 전에 멈추므로,
-    이 분기는 손으로 고친 체크포인트가 여기서 터지는 것만 막는다 (``docs/rationale.md``).
+    이 분기는 손으로 고친 체크포인트가 여기서 터지는 것만 막는다.
     """
     metric = str(goal.get("metric", "f1"))
     score = metric_value(result, metric)

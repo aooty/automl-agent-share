@@ -159,8 +159,7 @@ def save_run_config(config: RunConfig) -> None:
         for key, value in dataclasses.asdict(config).items()
     }
     # ``RunConfig`` 필드가 아닌데도 여기 쓴다: 실행이 받은 설정이 아니라 실행이 일어난 환경이고,
-    # ``load_run_config``는 선언된 필드만 남기므로 재개된 실행이 이것을 설정으로 읽는 일은 없다
-    # (``docs/rationale.md``).
+    # ``load_run_config``는 선언된 필드만 남기므로 재개된 실행이 이것을 설정으로 읽는 일은 없다.
     payload["threads"] = thread_state()
     path = config.run_dir / RUN_CONFIG_FILE
     # 형제 파일에 쓰고 rename한다 — ``os.replace``가 양쪽 플랫폼에서 atomic이다. 반쯤 끊긴 쓰기가
@@ -175,7 +174,7 @@ def load_run_config(thread_id: str, artifacts_root: Path | None = None) -> RunCo
 
     ``artifacts_root``는 이 파일이 실제로 발견된 자리로 다시 고정되고 저장된 값은 버려진다.
     ``data_path``와 ``dataset_card_path``는 저장된 그대로 둔다 — ``artifacts/`` 밖을 가리키므로
-    다시 고정할 기준이 없다. 둘을 왜 다르게 다루는지는 ``docs/rationale.md``.
+    다시 고정할 기준이 없다.
     """
     base = artifacts_root or ARTIFACTS_ROOT
     path = base / thread_id / RUN_CONFIG_FILE
@@ -447,8 +446,7 @@ def command_profile(args: argparse.Namespace) -> int:
 def resolve_goal_mode(args: argparse.Namespace) -> str:
     """플래그에서 목표 모드를 정하고, 서로 모순되는 조합은 거절한다.
 
-    조용히 무시된 ``--threshold``(또는 ``--margin``)가 여기서 가장 나쁜 결말이다
-    (``docs/rationale.md``).
+    조용히 무시된 ``--threshold``(또는 ``--margin``)가 여기서 가장 나쁜 결말이다.
     """
     mode = args.goal_mode or (MODE_FIXED if args.threshold is not None else MODE_AUTO)
     if mode == MODE_AUTO and args.threshold is not None:
@@ -584,7 +582,7 @@ def command_run(args: argparse.Namespace) -> int:
 def assert_resumable_data(reference: dict[str, Any], thread_id: str) -> None:
     """데이터 파일이 체크포인트가 말하는 자리에 없는 실행의 재개를 거절한다.
 
-    학습 subprocess에 맡기지 않고 여기서 검사하는 이유는 ``docs/rationale.md``. 데이터 참조가 아예
+    데이터 참조가 아예
     없는 실행은 합성 경로이고 검사할 것이 없다.
     """
     path = str(reference.get("path") or "")
@@ -659,10 +657,7 @@ def command_show(args: argparse.Namespace) -> int:
 
 
 def display_width(text: str) -> int:
-    """``text``가 터미널에서 차지하는 칸 수. 한글 글자는 하나가 아니라 둘이다.
-
-    왜 따로 세는지는 ``docs/rationale.md``.
-    """
+    """``text``가 터미널에서 차지하는 칸 수. 한글 글자는 하나가 아니라 둘이다."""
     return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
 
 
@@ -677,10 +672,7 @@ LIST_COLUMNS = (24, 8, 6, 10, 9, 8)
 
 
 def run_row(directory: Path) -> tuple[str, ...]:
-    """``list``에서 한 실행의 줄. 그 실행의 파일만 읽어서 만든다.
-
-    체크포인트가 아니라 파일에서 읽는 이유는 ``docs/rationale.md``.
-    """
+    """``list``에서 한 실행의 줄. 그 실행의 파일만 읽어서 만든다."""
     from .nodes.report import STOP_REASON_LABELS
 
     config = read_json_object(directory / RUN_CONFIG_FILE) or {}
@@ -714,7 +706,7 @@ def run_row(directory: Path) -> tuple[str, ...]:
 def command_list(args: argparse.Namespace) -> int:
     """아티팩트 루트 아래의 모든 실행, 최근 순으로.
 
-    ``show``는 ``--thread-id``를 받으므로 답할 수 없는 질문에 답한다 (``docs/rationale.md``).
+    ``show``는 ``--thread-id``를 받으므로 답할 수 없는 질문에 답한다.
     """
     base = artifacts_root_arg(args) or ARTIFACTS_ROOT
     directories = (
@@ -754,7 +746,7 @@ def command_list(args: argparse.Namespace) -> int:
 def best_iteration(config: RunConfig) -> int | None:
     """이 실행이 고른 반복. 체크포인트에서, 없으면 ``history.json``에서.
 
-    출처가 둘인 이유는 ``docs/rationale.md``. 둘 다 이름을 대지 않으면 ``None``이고, 성공한 시도가
+    둘 다 이름을 대지 않으면 ``None``이고, 성공한 시도가
     없다는 뜻이다 — 예측할 모델이 없다.
     """
     try:
@@ -778,8 +770,7 @@ def best_iteration(config: RunConfig) -> int | None:
 def command_predict(args: argparse.Namespace) -> int:
     """끝난 실행이 고른 모델을 새 CSV에 적용한다.
 
-    반복을 묻지 않고 풀어내는 이유, 그리고 산출물의 양쪽 절반을 스크립트가 시작하기 전에 검사하는
-    이유는 ``docs/rationale.md``. ``--iteration``은 특정 시도를 일부러 채점할 때를 위해 남아 있다.
+    ``--iteration``은 특정 시도를 일부러 채점할 때를 위해 남아 있다.
     """
     from .scripts.predict import main as predict_main
 
@@ -1156,8 +1147,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\n중단되었습니다. 동일한 --thread-id로 `resume` 하면 이어서 실행됩니다.")
         return 130
     except sqlite3.OperationalError as exc:
-        # 늘 체크포인트 데이터베이스다 — 여기 sqlite 파일은 그것뿐이다. 맨 위에서 잡는 이유는
-        # ``docs/rationale.md``.
+        # 늘 체크포인트 데이터베이스다 — 여기 sqlite 파일은 그것뿐이다.
         print(f"\n오류: 체크포인트 데이터베이스를 쓸 수 없습니다 — {exc}")
         if "locked" in str(exc).lower():
             print(

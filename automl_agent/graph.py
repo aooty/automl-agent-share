@@ -49,7 +49,7 @@ def stop_condition(
     :attr:`automl_agent.config.RunConfig.search_past_goal`.
 
     **순서를 바꾸면 보고서가 멈춤을 부르는 이름이 바뀐다** — 네 조건 모두 같은 노드로 가고,
-    ``out_of_time``이 마지막인 데는 이유가 있다 (``docs/rationale.md``).
+    ``out_of_time``이 마지막인 데는 이유가 있다.
     """
     if not search_past_goal and goal_met(state.get("result", {}) or {}, state.get("goal", {}) or {}):
         return "goal_reached"
@@ -84,7 +84,7 @@ def make_checkpointer(db_path: Path = CHECKPOINT_DB) -> BaseCheckpointSaver:
 
     데이터베이스 하나가 모든 ``thread_id``를 담으므로 ``run``이 쓰는 동안 ``show``나 ``predict``가
     읽는다. 그것을 오류가 아니라 평범한 일로 만드는 것이 ``timeout``(sqlite busy handler)과
-    WAL이고, WAL은 설정이 실패해도 넘어간다 — 논증은 ``docs/rationale.md``.
+    WAL이고, WAL은 설정이 실패해도 넘어간다.
     """
     from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -113,8 +113,7 @@ def _bind(node: Callable[..., dict], config: RunConfig) -> NodeFn:
     이름 짓기가 그대로 남는다.
 
     실행의 시계도 여기서 접어 넣는다 — 모든 노드가 지나가는 자리가 여기뿐이다. 자기 ``budget``을
-    낸 노드는 그것을 지킨다 (지금 그런 노드는 없다). 노드마다 재지 않는 이유와 wall clock이 아니라
-    ``monotonic``인 이유: ``docs/rationale.md``.
+    낸 노드는 그것을 지킨다 (지금 그런 노드는 없다).
     """
 
     def wrapped(state: AutoMLState) -> dict:

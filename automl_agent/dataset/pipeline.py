@@ -3,9 +3,9 @@
 **``exec``되는 것은 없고 설정에서 이름으로 import되는 것도 없다.** :data:`STEPS`는 닫힌 집합이고,
 이 모듈이 모르는 단계는 해석되는 대신 이유와 함께 떨어진다.
 
-**whitelist가 짧은 것은 재 봤기 때문이다** (``docs/PIPELINE-STEPS.md``). 후보 일곱 중 둘만 남았고
+**whitelist가 짧은 것은 재 봤기 때문이다**. 후보 일곱 중 둘만 남았고
 **다섯은 일부러 없으며 각 부재가 하나의 측정이다**. 남은 둘이 합성되는 것이 이것을 플래그 둘이 아니라
-순서 있는 목록으로 만든다 (``docs/rationale.md``).
+순서 있는 목록으로 만든다.
 
 **열 동일성은 이름으로, 적합된 스키마에 대고 해석되고, 그 이름은 인코딩된 쪽이다** — one-hot 원본
 열은 여럿이 되었고, ``city``를 대는 계획은 그 전부를 뜻한다. 이 모듈이
@@ -46,21 +46,20 @@ APPENDING_STEPS = frozenset({STEP_MISSING_INDICATOR, STEP_MISSING_COUNT})
 # 요점은 연달아 오는 두 단계를 로그에서 가를 수 있다는 것이다.
 INDICATOR_SUFFIX = "__missing"
 COUNT_COLUMN = "missing_count"
-# 공백. ``PolynomialFeatures`` 자신이 곱을 적는 방식이고, 읽기 더 좋은 ``*``가 아니다. sklearn의
-# 철자에 맞추는 이유는 ``docs/rationale.md``.
+# 공백. ``PolynomialFeatures`` 자신이 곱을 적는 방식이고, 읽기 더 좋은 ``*``가 아니다.
 INTERACTION_JOIN = " "
 
 IMPUTE_STRATEGIES = ("median", "mean", "most_frequent", "constant")
 # SimpleImputer의 전략이 아니다 — 열을 그대로 두어서 NaN으로 분기하는 계열이 쓸 수 있게 한다.
-# *remainder* 전략으로서, 그리고 그룹 안에서 인정된다 (``docs/rationale.md``).
+# *remainder* 전략으로서, 그리고 그룹 안에서 인정된다.
 IMPUTE_NONE = "none"
 DEFAULT_IMPUTE = "median"
 
-# 차수 2뿐이다 (``docs/rationale.md``). 파라미터가 있는 이유는 자기가 뜻하는 차수를 대는 계획이
+# 차수 2뿐이다. 파라미터가 있는 이유는 자기가 뜻하는 차수를 대는 계획이
 # 조용히 다른 것을 받는 대신 어느 것이 돌았는지 듣게 하려고.
 INTERACTION_DEGREE = 2
 # 입력 열이 이보다 많으면 interaction 단계를 거절한다. ``guard_memory``가 통과한 *뒤* 넓은 인코딩과
-# out-of-memory kill 사이에 서 있는 것은 이것뿐이다 (``docs/rationale.md``).
+# out-of-memory kill 사이에 서 있는 것은 이것뿐이다.
 INTERACTION_MAX_COLUMNS = 50
 
 
@@ -250,8 +249,7 @@ def _interactions_step(
     out-of-memory kill로 펼쳐지게 두는 대신. 가드는 도착하는 행렬의 값을 매기고, 이 단계는 다른
     행렬을 만드는 쪽이다.
 
-    행렬에 NaN이 아직 있을 수 있는 동안에도 거절한다. 그것은 반복 하나를 치르고 찾았다
-    (``docs/rationale.md``).
+    행렬에 NaN이 아직 있을 수 있는 동안에도 거절한다. 그것은 반복 하나를 치르고 찾았다.
     """
     from sklearn.preprocessing import PolynomialFeatures
 
@@ -357,7 +355,7 @@ def build_steps(
     # 행렬 어딘가에 NaN이 아직 있을 수 있는지. ``interactions``가 그것을 받을 수 없는 유일한 단계이고,
     # ``fit`` 안에서 알아내는 대신 이것을 읽는다.
     #
-    # 시작값이 ``True``가 아니라 ``native_nan``인 것이 미묘한 지점 전부다 (``docs/rationale.md``).
+    # 시작값이 ``True``가 아니라 ``native_nan``인 것이 미묘한 지점 전부다.
     #
     # 이것을 지우는 것은 실제 전략으로 *모든* 열을 덮는 ``impute`` 단계뿐이다. passthrough 그룹이
     # 있거나 remainder가 ``none``인 것은 NaN을 지키자고 청하는 것이다.
@@ -384,7 +382,7 @@ def build_steps(
         transformer, names, label = built
         count = seen.get(name, 0)
         seen[name] = count + 1
-        # 첫 등장은 맨 이름을 지키고 되풀이는 번호가 붙는다 (``docs/rationale.md``).
+        # 첫 등장은 맨 이름을 지키고 되풀이는 번호가 붙는다.
         steps.append((name if not count else f"{name}_{count + 1}", transformer))
         applied.append(f"{name}({label})")
     return steps, names, applied

@@ -1,7 +1,7 @@
 """분할 규약: 어느 행이 train, 어느 행이 tune, 그리고 아무도 손대지 않는 행.
 
-**세 번째 분할이 있는 이유는 루프가 수를 보고하는 집합에서 선택하기 때문이다** —
-``docs/rationale.md``. *test* 슬라이스는 루프 뒤에 저장된 최적 모델로 정확히 한 번 채점된다
+**세 번째 분할이 있는 이유는 루프가 수를 보고하는 집합에서 선택하기 때문이다.** *test* 슬라이스는
+루프 뒤에 저장된 최적 모델로 정확히 한 번 채점된다
 (:mod:`automl_agent.nodes.holdout`). 보고서에서 어떤 결정도 그것에 대고 내리지 않은 유일한 수다.
 
 **train/validation 분할보다 먼저 뗀다.** 그래서 test 행은 파일과 시드만의 함수이고, 반복 횟수·모델·
@@ -12,7 +12,7 @@
 기준선은 ``x_test``를 일부러 무시한다.
 
 ``groups``를 주면 어떤 그룹도 두 집합으로 갈라지지 않는다. 그것이 파라미터인 이유는 반복되는 피험자에
-대한 무작위 분할이 여기 어느 검사에도 안 보이기 때문이다 (``docs/rationale.md``). 카드의 *private*
+대한 무작위 분할이 여기 어느 검사에도 안 보이기 때문이다. 카드의 *private*
 ``data`` 블록으로 도착하므로 LLM은 그것을 볼 수도, 바꾸자고 제안할 수도 없다.
 
 모듈 수준에 sklearn이 없다: 노드들은 :func:`protocol` 때문에 이것을 import하고, 프롬프트를 렌더하는
@@ -86,8 +86,7 @@ def protocol(seed: int, group_column: str | None = None, stratified: bool = True
     (:func:`automl_agent.nodes.profiling.assert_protocol_matches`).
 
     ``grouped_by``는 어떤 그룹도 두 집합으로 갈라지지 않은 열의 이름이고, 행 단위 분할에서는
-    ``None``이다. ``stratified``는 회귀 타깃에서 ``False``다 — 균형 잡을 층이 없다. 둘 다 가정하지
-    않고 이름으로 공개하는 이유는 ``docs/rationale.md``.
+    ``None``이다. ``stratified``는 회귀 타깃에서 ``False``다 — 균형 잡을 층이 없다.
     """
     return {
         "train_fraction": TRAIN_SHARE,
@@ -127,7 +126,7 @@ def row_counts(n_rows: int) -> dict[str, int]:
     근사다 — 몫을 딱 맞추자고 그룹을 가를 수는 없다. 이 수를 공개하는 호출자는 어느 쪽인지 말해야
     한다. :func:`automl_agent.capabilities.describe_row_budget`가 그렇게 한다.
 
-    선언된 규약 블록이 아니라 이 모듈의 상수에서 유도한다 (``docs/rationale.md``).
+    선언된 규약 블록이 아니라 이 모듈의 상수에서 유도한다.
 
     분할이 거절할 곳에서 함께 거절한다. 세 행 미만에서는 두 천장이 전부를 가져가고 학습할 것이 남지
     않는다. ``train_test_split``도 거기서 raise하고("the resulting train set will be empty"),
@@ -154,8 +153,7 @@ def split_three_way(
     ``random_state``는 두 호출 모두 실행의 시드다. 그것이 test 행을 실행의 모든 반복에서 —
     그리고 프로파일러의 프로세스와 학습기의 프로세스 사이에서 — 동일하게 만든다.
 
-    ``groups``가 있으면 같은 그룹 값을 가진 행은 모두 같은 집합에 떨어진다. 분할기가
-    ``GroupShuffleSplit``이 아니라 ``StratifiedGroupKFold``인 이유는 ``docs/rationale.md``. 첫
+    ``groups``가 있으면 같은 그룹 값을 가진 행은 모두 같은 집합에 떨어진다. 첫
     fold를 떼어 둔 쪽으로 취하는 것이 *k*-fold 분할기에서 단일 분할을 얻는 방법이고, 그 결과 몫은
     근사다 — 몫을 딱 맞추자고 그룹을 가를 수는 없다.
 
@@ -246,7 +244,7 @@ def val_fingerprint(x_val: Any, y_val: Any) -> str:
     """한 시도가 채점된 정확한 validation 행들의 짧은 요약값.
 
     짝지은 비교(:func:`automl_agent.scoring.intervals.paired_delta`)는 *같은 행*에서 채점된 두 시도를
-    필요로 하고, "같은 시드"는 그것이 아니다 (``docs/rationale.md``). 그래서 행 자체를 해시하고 그
+    필요로 하고, "같은 시드"는 그것이 아니다. 그래서 행 자체를 해시하고 그
     요약값이 예측과 함께 여행한다. 전제가 코드가 단정하는 것에서 나중 시도가 검사할 수 있는 것으로
     바뀐다.
 
@@ -284,7 +282,7 @@ def protocol_mismatch(
     다른 행에서 계산됐다는 뜻이다 — 비교가 아닌 비교의 보고. ``--on-missing-target``과 같은 태도다:
     두 가지 다른 것을 조용히 재는 대신 거절한다.
 
-    규약 블록이 없으면 = 이 필드보다 앞선 카드이고, 받아들인다 (``docs/rationale.md``). 같은
+    규약 블록이 없으면 = 이 필드보다 앞선 카드이고, 받아들인다. 같은
     ``key in declared`` 규칙으로 ``grouped_by``보다 앞선 카드도 받아들인다.
 
     ``stratified``는 *이번 실행이* 할 것이고, 타깃의 과제에서 따라온다. 호출자는 그것을 고르지 않고

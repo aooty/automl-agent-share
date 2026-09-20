@@ -153,7 +153,7 @@ def planning(state: AutoMLState, *, config: RunConfig) -> dict:
 
     proposed = validate_plan(plan, task)
     plan = proposed or fallback_plan(state, critic_verdict, iteration, task)
-    # 둘 중 어느 쪽이 이 계획을 썼는지. 둘이 아니라 세 값인 이유: ``docs/rationale.md``.
+    # 둘 중 어느 쪽이 이 계획을 썼는지.
     plan["source"] = "llm" if proposed else ("fallback" if config.use_llm else "rules")
     plan = enforce_novelty(plan, state, task, config.seed)
     plan["iteration"] = iteration
@@ -195,7 +195,6 @@ def validate_plan(plan: dict[str, Any] | None, task: str | None = None) -> dict[
         "preprocessing": plan.get("preprocessing") if isinstance(plan.get("preprocessing"), dict) else {},
         # 산문이 아니라 *키*인 지렛대 둘. ``preprocessing``과 같은 이유로 실어 나른다: 이 함수는 고정된
         # 목록에서 계획을 다시 세우므로, 여기서 이름을 대지 않는 키는 어느 노드가 읽기도 전에 떨어진다.
-        # 둘이 여기서 빠져 있던 경위: ``docs/rationale.md``.
         "pipeline": plan.get("pipeline") if isinstance(plan.get("pipeline"), list) else [],
         "tune_threshold": plan.get("tune_threshold") is True,
         "changes_from_last": changes,
@@ -336,8 +335,7 @@ def enforce_novelty(
     반복된 시도는 정보 없이 반복 하나를 태우므로, 최상위 후보와 하이퍼파라미터가 앞선 시도와 맞으면
     시도되지 않은 모델로 돌린다.
 
-    **지문은 executor에 닿는 모든 것을 봐야 한다.** 그러지 않았을 때 무슨 일이 있었는지:
-    ``docs/rationale.md``.
+    **지문은 executor에 닿는 모든 것을 봐야 한다.**
     """
     history = list(state.get("history") or [])
     if not history:
@@ -347,8 +345,7 @@ def enforce_novelty(
     # 범위도 넓어진다 — 거기서 벗어난 키는 그것이 유일한 변경일 때 반복으로 읽힌다.
     # ``EXECUTOR_PARAMS``가 미리 이름 댈 만한 것을 덮고, 나머지는 ``applied_hyperparams``가 덮는다.
     # 그것이 executor가 무엇을 받았다고 말하는 것이기 때문이다. 이 절반만 잡는 예가
-    # ``min_child_weight``다. (``early_stopping``도 그랬는데, ``docs/REGISTRY-GAP.md``가 적은 이유로
-    # 지금은 메뉴에 있다.)
+    # ``min_child_weight``다. (``early_stopping``도 그랬지만 지금은 메뉴에 있다.)
     applied_keys: dict[str, set[str]] = {}
     for item in history:
         applied = (item.get("result") or {}).get("applied_hyperparams")
@@ -460,8 +457,8 @@ def _signature(
         # 청했을 때만 덧붙인다. 그래서 이 지렛대가 생기기 전에 계산된 모든 서명이 그대로이고, 재개된
         # 실행의 history가 여전히 자기와 맞는다. 애초에 여기 있어야 하는 이유는 파이프라인과 같다:
         # executor에 닿는 세 번째 축이고, 그것이 없으면 컷만 옮긴 재계획이 완전한 반복으로 읽혀 계열
-        # 교체로 다시 쓰인다 — ``docs/REGISTRY-GAP.md``가 ``early_stopping``과 ``scale_pos_weight``에
-        # 대해 닫은 바로 그 결함이다.
+        # 교체로 다시 쓰인다 — ``early_stopping``과 ``scale_pos_weight``에 대해 이미 닫은 바로 그
+        # 결함이다.
         parts.append("cut=tuned")
     return ",".join(parts)
 

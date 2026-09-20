@@ -1,7 +1,7 @@
 """적합이 어떤 BLAS/OpenMP 스레드 상태에서 돌았는지 — 점수를 움직이므로 기록한다.
 
 **"같은 seed, 같은 설정"은 "같은 숫자"가 아니다.** 스레드 수가 다르면 부동소수점 덧셈의 순서가
-달라지고 점수가 움직인다 (``docs/rationale.md``).
+달라지고 점수가 움직인다.
 
 **이 모듈은 기록만 한다.** 변수를 설정하지 않고, 어떤 값을 두고 경고하지도 않는다.
 """
@@ -12,8 +12,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-# 이 셋이고 더는 아니다 — 저장소의 estimator가 실제로 읽는 것, 그리고 ``bench/paired.py``가
-# 기록하는 것과 같은 tuple.
+# 이 셋이고 더는 아니다 — 저장소의 estimator가 실제로 읽는 것.
 THREAD_ENV: tuple[str, ...] = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 
 CPU_COUNT_KEY = "cpu_count"
@@ -50,7 +49,7 @@ def describe_thread_state(state: Mapping[str, Any] | None) -> str:
 def _effective(state: Mapping[str, Any]) -> tuple[str, ...]:
     """각 변수가 적합에 대해 실제로 무엇으로 풀리는지. unset은 코어 수로 접는다.
 
-    날값을 비교하면 두 기록을 거꾸로 판정한다 (``docs/rationale.md``).
+    날값을 비교하면 두 기록을 거꾸로 판정한다.
     """
     cores = state.get(CPU_COUNT_KEY)
     return tuple(

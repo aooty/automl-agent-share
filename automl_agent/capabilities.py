@@ -5,9 +5,6 @@
 
 **플래그만 하고 절대 거절하지 않는다.** 마커는 부분 문자열 매치이고, 온전한 계획을 버린 false
 positive는 결함 있는 계획과 같은 iteration을 치른다.
-
-논증: ``docs/rationale.md``. 목록 뒤의 실행들과 CANNOT에서 CAN으로 넘어간 두 번은
-``docs/contracts.md``.
 """
 
 from __future__ import annotations
@@ -133,9 +130,8 @@ _MISSINGNESS = (
     "a row was recorded rather than the subject's state, these columns let the model learn "
     "the recording regime — a random split scores that as a gain instead of showing it."
 )
-# 랭킹 축에 순서가 없는 이유: `docs/rationale.md`. 이 항목이 이제 인용하지 않는 크기들 —
-# 표본 하나, 실행 하나여서 어디로도 일반화되지 않는다: `docs/contracts.md`,
-# `docs/FINDINGS-mimic.md`.
+# 랭킹 축에 순서가 없다. 이 항목이 이제 인용하지 않는 크기들은 표본 하나, 실행 하나여서
+# 어디로도 일반화되지 않는다.
 #
 # 레버는 자기가 움직이는 축에서 값을 매겨라 — `balanced_accuracy` 차이만으로는 순서를 못 정한다.
 _LEVER_AXES = (
@@ -310,7 +306,7 @@ _REGRESSION_SCORING = _scoring_protocol(
 )
 
 # 순서가 의미를 나른다 — 프롬프트는 위에서 아래로 읽히므로, 레버는 그것을 값 매기는 수보다
-# 앞서지 않고, 문법은 그것이 순서 짓는 변환들보다 앞서지 않는다 (`docs/rationale.md`).
+# 앞서지 않고, 문법은 그것이 순서 짓는 변환들보다 앞서지 않는다.
 CAN: tuple[str, ...] = (
     _ONE_ESTIMATOR,
     _HYPERPARAMS,
@@ -346,7 +342,7 @@ CAN_BY_TASK: dict[str, tuple[str, ...]] = {
 
 # 능력이 ``CAN``으로 옮겨가면 마커도 함께 옮기거나 지운다 — 항목을 여기 남기려고 좁히는 일은
 # 없다. 부분 문자열은 지원되는 요청과 안 되는 요청을 구분할 수 없어서, 좁힌 항목은 둘 다
-# 플래그한다 (`docs/rationale.md`).
+# 플래그한다.
 CANNOT: tuple[Capability, ...] = (
     Capability(
         name="cross_validation",
@@ -530,7 +526,7 @@ NEGATION_CUES: tuple[str, ...] = (
 
 # 구절이 주어일 때 *앞의* 구절을 부정하는 서술어들: "indicator columns are forbidden".
 # 전부 동사에 붙인 것은 일부러다 — 맨 "negligible"은 요청인 "a threshold sweep at negligible
-# cost"를 침묵시킨다. 구분선 아래 두 번째 계열이 왜 있는지: `docs/rationale.md`.
+# cost"를 침묵시킨다.
 DISCLAIMER_PREDICATES: tuple[str, ...] = (
     "is forbidden",
     "are forbidden",
@@ -614,7 +610,7 @@ def describe_row_budget(n_rows: Any, *, grouped: bool = False) -> str:
     """적합이 실제로 보게 되는 행 수에 대한 planning 프롬프트 블록.
 
     :func:`automl_agent.scripts.train.describe_internal_validation`가 재는 것의 예보이고, 둘은
-    테스트가 묶어 둔다. 비는 일은 없다. 논증: ``docs/rationale.md``.
+    테스트가 묶어 둔다. 비는 일은 없다.
     """
     try:
         counts = row_counts(int(n_rows))
@@ -687,7 +683,7 @@ def unsupported_claims(*texts: object) -> list[str]:
     """주어진 산문이 의존하는 것으로 보이는, 없는 능력들의 이름.
 
     계획과 verdict 산문만. 보고서는 절대 아니다. 부정되지 않은 등장 하나로 충분하고
-    (:func:`_is_negated`), 태스크로는 걸러지지 않는다 — ``docs/rationale.md``.
+    (:func:`_is_negated`), 태스크로는 걸러지지 않는다.
     """
     # 공백이 아니라 개행: 필드들은 서로 다른 문장이고, 한 문장 끝의 단서가 다음 문장까지
     # 닿아서는 안 된다.

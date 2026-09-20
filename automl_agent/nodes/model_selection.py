@@ -289,7 +289,7 @@ LIMITS: dict[str, tuple[float, float]] = {
     "l2_regularization": (0.0, 100.0),
     "reg_lambda": (0.0, 100.0),
     # 추정기 둘 몫의 범위: MLP의 weight decay는 아래쪽에 살고, ridge와 elasticnet의 정규화 강도는
-    # 위쪽을 원한다. 상한을 올린 경위: ``docs/rationale.md``.
+    # 위쪽을 원한다.
     "alpha": (1e-8, 1000.0),
     # elasticnet의 l1/l2 배합. sklearn은 [0, 1] 밖을 대놓고 거절하므로, clamp되지 않은 제안은 시도
     # 전체를 쓴다.
@@ -320,12 +320,12 @@ LIMITS: dict[str, tuple[float, float]] = {
 
 ALLOWED_STRINGS = {"class_weight", "weights", "kernel", "precision", "solver", "penalty"}
 
-# 문자열 형태에서 뜻이 있는 표기가 정확히 하나뿐인 키. 키 목록은 이런 것에 너무 거칠다 — 경위:
-# ``docs/rationale.md``. 어느 추정기가 실제로 그 문자열을 받는지는 그 추정기에 대한 사실이므로 executor가
+# 문자열 형태에서 뜻이 있는 표기가 정확히 하나뿐인 키. 키 목록은 이런 것에 너무 거칠다. 어느
+# 추정기가 실제로 그 문자열을 받는지는 그 추정기에 대한 사실이므로 executor가
 # 정하고(``scripts/train.py::STRING_EARLY_STOPPING``), 이 맵은 어디서도 뜻이 없는 표기만 막는다.
 ALLOWED_STRING_VALUES: dict[str, frozenset[str]] = {"early_stopping": frozenset({"auto"})}
 
-# ``class_weight``는 맵으로도 올 수 있는 하나뿐인 키다. 경위: ``docs/rationale.md``.
+# ``class_weight``는 맵으로도 올 수 있는 하나뿐인 키다.
 WEIGHT_MAP_KEYS = {"class_weight"}
 # 가중치는 클래스 코드마다 하나이므로 그럴듯한 맵은 작다. 경계는 폭주한 값(1e9는 모든 지표를
 # 퇴화시킨다)이 추정기에 닿는 것을 막으려고만 있다.
@@ -574,8 +574,7 @@ def digest_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:
         # 각자 건드린 열과 함께. 둘 다 있는 이유는 ``applied_preprocessing``이 spec이 더하는 것의 어느
         # 절반도 표현할 수 없기 때문이다 — ``ColumnTransformer``에 대해 ``impute: per_column``을
         # 보고하고, 순서에는 자리가 아예 없다. 플래그를 쓴 시도에는 없고, 그것이 플래그를 썼다고
-        # 말하는 것이다. 이 키가 ``result``만이 아니라 digest에도 있어야 하는 경위:
-        # ``docs/rationale.md``.
+        # 말하는 것이다.
         "applied_pipeline": result.get("applied_pipeline") or [],
         # ``preprocessing`` 옆인 이유도 같다: 청한 것이 아니라 executor가 한 것이다. 비어 있으면
         # 추정기가 행을 떼어 두지 않은 것이고, executor가 그것을 보고하기 전에 기록된 실행에는 없다.

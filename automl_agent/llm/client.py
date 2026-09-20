@@ -39,8 +39,7 @@ class TextCompletion(NamedTuple):
     """자유 서술 완성과, 모델이 끝내기 전에 잘렸는지.
 
     잘린 응답은 전송 계층이 올릴 수 있는 오류가 아니라 우연히 불완전한, 형식이 올바른 답이다.
-    그래서 그것을 알아챌 수 있는 자리는 반환하는 여기뿐이다. 이름이 ``stop_reason``이 아닌 이유와
-    이 필드가 생긴 경위는 ``docs/rationale.md``.
+    그래서 그것을 알아챌 수 있는 자리는 반환하는 여기뿐이다.
     """
 
     text: str
@@ -64,7 +63,6 @@ def needs_anthropic(config: RunConfig) -> bool:
     두 반쪽이 따로 풀린다 — proposer는 ``proposer_model``이 설정돼 있으면 그것을, 아니면
     ``llm_model``을 따른다. 자격 증명이 필요 없는 것은 전부 로컬인 경우뿐이고,
     ``main.check_credentials``가 이것을 근거로 그래프 시작 전에 거절한다.
-    논증: ``docs/rationale.md``.
     """
     proposer = config.proposer_model or config.llm_model
     return not (
@@ -120,7 +118,7 @@ def _route_key() -> str:
 _PLACEHOLDER = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 
 # 프롬프트의 캐시 가능한 접두사가 끝나는 자리. 여기서 정하지 않고 ``.md`` 파일에 적는 이유는
-# *어느* 블록이 안정적인지가 프롬프트의 성질이기 때문이다. 논증: ``docs/rationale.md``.
+# *어느* 블록이 안정적인지가 프롬프트의 성질이기 때문이다.
 CACHE_MARKER = "<!-- cache -->"
 # API가 요청당 넷을 허용한다. 그보다 많이 요구하는 프롬프트는 전송 계층 안쪽의 400이 아니라
 # 이름을 붙여 줄 값이 있는 실수다.
@@ -209,7 +207,7 @@ def archive_prompt_only(config: RunConfig, label: str, prompt: str) -> Path | No
 def archive_label(prompt_name: str, *, iteration: int | None = None, attempt: int = 1) -> str:
     """아카이브된 교환 하나에 이름을 붙여, 그것을 만든 반복으로 되짚을 수 있게 한다.
 
-    ``attempt``는 정정 재시도 계수기이고 루프 계수기가 아니다. 논증: ``docs/rationale.md``.
+    ``attempt``는 정정 재시도 계수기이고 루프 계수기가 아니다.
     """
     parts = [prompt_name]
     if iteration:
@@ -283,7 +281,6 @@ class LLMClient:
             # ``anthropic.claude-opus-5``가 되어야 한다. 검사가 앞자리가 아니라 id의 *어디든*을
             # 보는 이유 — cross-region inference profile은 벤더 앞에 스코프를 붙이므로
             # (``global.anthropic.claude-...``) 앞자리 앵커로 보면 접두사가 두 번 붙는다.
-            # 논증: ``docs/rationale.md``.
             if "anthropic." not in self._model:
                 self._model = f"anthropic.{self._model}"
         else:
@@ -415,7 +412,6 @@ class LLMClient:
             # 끈다. 이것이 이 경로가 되는 것과 안 되는 것의 차이다 — thinking 모델은 추론을
             # ``message.thinking``에, 답을 ``message.content``에 넣고 둘이 하나의 출력 허용량에서
             # 나온다. 생각하지 않는 모델에서도 안전하다(Ollama가 플래그를 받고 무시한다).
-            # 논증: ``docs/rationale.md``.
             "think": False,
             "options": {"num_predict": max_tokens, "temperature": 0, "seed": self.config.seed},
         }

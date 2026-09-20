@@ -1,13 +1,13 @@
 """카드의 "집계가 보여 주지 않는, 이 데이터에 대한 것들" 채널.
 
-왜 이 채널이 필요한지는 ``docs/rationale.md``. 출처는 둘이고, 같은 목록에 얹힌다:
+출처는 둘이고, 같은 목록에 얹힌다:
 
 - **프로파일러 자신의 검사.** 지금은 센티넬 코드 (:mod:`automl_agent.dataset.sentinels`).
 - **운영자.** ``--caveat "..."``, 반복 가능. 시스템에서 *사람*의 원본 데이터 지식을 프롬프트로
   나르는 유일한 채널이다.
 
 **운영자의 텍스트는 적힌 그대로 프롬프트에 닿는다 — 셀 값이 손으로 거기 갈 수 있는 유일한 자리다.**
-의도한 것이다 (``docs/rationale.md``). **아래 상한은 내용이 아니라 길이와 개수에 걸린다** — 지키는
+의도한 것이다. **아래 상한은 내용이 아니라 길이와 개수에 걸린다** — 지키는
 것은 프롬프트 예산이고 비공개가 아니다.
 """
 
@@ -21,7 +21,7 @@ from .sentinels import KIND_NUMERIC_CODE
 # 참조하므로 다섯 군데에 적는 대신 여기서 이름을 갖는다.
 CAVEATS_KEY = "caveats"
 
-# 이 텍스트는 매 반복의 모든 추론 프롬프트에 렌더되므로 상한이 있다 (``docs/rationale.md``).
+# 이 텍스트는 매 반복의 모든 추론 프롬프트에 렌더되므로 상한이 있다.
 MAX_CAVEATS = 20
 MAX_CAVEAT_CHARS = 400
 
@@ -53,8 +53,7 @@ def sentinel_caveats(by_column: dict[str, list[dict[str, Any]]]) -> list[str]:
 def grouping_caveats(group_column: str | None, n_groups: int | None = None) -> list[str]:
     """열이 아니라 *분할*에 대한 유일한 주의사항.
 
-    그룹 분할은 ``baseline.protocol.grouped_by``에도 발표되는데 여기 한 번 더 적는 이유는
-    ``docs/rationale.md``.
+    그룹 분할은 ``baseline.protocol.grouped_by``에도 발표되지만, 여기 한 번 더 적는다.
     """
     if not group_column:
         return []
