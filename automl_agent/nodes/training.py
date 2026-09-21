@@ -275,6 +275,28 @@ def decision_block(plan: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _named_step(entry: dict[str, Any]) -> dict[str, Any]:
+    """``{"impute": {...}}``를 ``{"step": "impute", ...}``로 편다.
+
+    제안자가 실제로 쓴 모양이다. 단계 이름이 ``step``의 *값*이라는 것은 CAN 목록도 planning 프롬프트도
+    글자로 보여주지 않으므로(둘 다 "a list of steps"까지만 말한다) 모델은 껍데기를 짐작해야 하고, 이름을
+    키로 적는 쪽을 짐작한다. 짐작이 틀렸을 때 실제로 일어난 일: 명세 전체가 아래의 ``step`` 검사에서
+    조용히 떨어지고, config에 ``pipeline`` 키가 아예 없고, executor는 플래그 경로를 돌고, 서로 다른
+    전처리를 청한 세 반복이 바이트 단위로 같은 config로 같은 점수를 냈다.
+
+    읽는 쪽에서 받는 이유는 여기가 모든 명세가 지나는 한 곳이기 때문이다. 애매하지 않을 때만 편다 —
+    키가 하나뿐이고, 그것이 아는 단계 이름이고, 값이 dict일 때. 그 밖에는 손대지 않고 원래의 검사에
+    보낸다. 껍데기 안의 ``step``보다 키 쪽 이름이 이기는 이유는 이 모양에서 이름을 적는 자리가
+    키이기 때문이다.
+    """
+    if "step" in entry or len(entry) != 1:
+        return entry
+    name, body = next(iter(entry.items()))
+    if name not in PIPELINE_STEPS or not isinstance(body, dict):
+        return entry
+    return {**body, "step": name}
+
+
 def pipeline_block(plan: dict[str, Any]) -> list[dict[str, Any]]:
     """executor가 해석할 순서 있는 파이프라인 spec만 통과시킨다.
 
@@ -297,7 +319,10 @@ def pipeline_block(plan: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     steps: list[dict[str, Any]] = []
     for entry in raw:
-        if not isinstance(entry, dict) or str(entry.get("step") or "") not in PIPELINE_STEPS:
+        if not isinstance(entry, dict):
+            continue
+        entry = _named_step(entry)
+        if str(entry.get("step") or "") not in PIPELINE_STEPS:
             continue
         step = {key: value for key, value in entry.items() if isinstance(key, str)}
         for holder in (step, *(g for g in step.get("groups") or [] if isinstance(g, dict))):
