@@ -111,10 +111,6 @@ class OllamaCompletion(NamedTuple):
 _STRUCTURED_MODE: dict[str, str] = {}
 
 
-def _route_key() -> str:
-    return "bedrock" if use_bedrock() else "anthropic"
-
-
 _PLACEHOLDER = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 
 # 프롬프트의 캐시 가능한 접두사가 끝나는 자리. 여기서 정하지 않고 ``.md`` 파일에 적는 이유는
@@ -242,14 +238,38 @@ class LLMClient:
         self._model = (config.proposer_model if proposer else "") or config.llm_model
 
     @property
+    def _route(self) -> str:
+        """이 클라이언트가 실제로 말을 거는 전송.
+
+        ``use_bedrock()``만으로 정할 수 없다. 그것은 env 하나에 대한 전역 답이고, 제안자 모델이
+        ``ollama:``로 시작하면 이 클라이언트는 그 env가 무엇이든 localhost로 간다. 한 실행에 전송이
+        둘 있을 수 있다는 것이 ``--proposer-model``의 요점이므로, 전송을 아는 자리는 전역 함수가 아니라
+        클라이언트다.
+
+        전역 답이었을 때 실제로 일어난 일: ollama로 간 planning 호출의 아카이브가 ``route: bedrock``을
+        기록했다. 결과를 읽는 쪽에는 그것이 제안자가 누구였는지 묻는 하나뿐인 자리이므로, 그 필드가
+        틀리면 실행이 무엇을 쟀는지 사후에 말할 수 있는 것이 없어진다.
+        """
+        if self._model.startswith(OLLAMA_PREFIX):
+            return "ollama"
+        return "bedrock" if use_bedrock() else "anthropic"
+
+    @property
     def _structured_mode(self) -> str:
         """더 엄격한 ``output_config`` json_schema로 시작하고, 어느 전송이 그것을 거절하면
-        강제 tool use로 내려앉는다."""
-        return _STRUCTURED_MODE.get(_route_key(), "output_config")
+        강제 tool use로 내려앉는다.
+
+        ollama는 그 둘 중 어느 것도 아니다 — 스키마가 ``format`` 필드로 가고 내림도 없다. 이름을
+        따로 두는 이유는 캐시가 전송별인데 키가 공유였기 때문이다: Bedrock이 ``tool``로 내려앉으면
+        ollama 호출의 아카이브도 ``tool``이라고 적었고, 그 경로는 그것을 읽지도 않는다.
+        """
+        if self._route == "ollama":
+            return "format"
+        return _STRUCTURED_MODE.get(self._route, "output_config")
 
     @_structured_mode.setter
     def _structured_mode(self, mode: str) -> None:
-        _STRUCTURED_MODE[_route_key()] = mode
+        _STRUCTURED_MODE[self._route] = mode
 
     # -- 전송 --------------------------------------------------------- #
 
@@ -552,7 +572,7 @@ class LLMClient:
             "label": label,
             "model": self._model,
             "structured_mode": self._structured_mode,
-            "route": "bedrock" if use_bedrock() else "anthropic",
+            "route": self._route,
             "system": system,
             "prompt": prompt,
             "error": reason,
@@ -583,7 +603,7 @@ class LLMClient:
             "label": label,
             "model": self._model,
             "structured_mode": self._structured_mode,
-            "route": "bedrock" if use_bedrock() else "anthropic",
+            "route": self._route,
             "system": system,
             "prompt": prompt,
             "response": text,
