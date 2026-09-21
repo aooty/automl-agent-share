@@ -18,7 +18,7 @@ from ..dataset.caveats import describe_caveats
 from ..graph import stop_condition
 from ..llm.client import LLMClient, LLMUnavailable, archive_prompt_only, render_prompt
 from ..scoring.goal import describe, goal_threshold
-from ..scoring.intervals import contains, describe_interval, interval_of
+from ..scoring.intervals import as_number, contains, describe_interval, interval_of
 from ..state import AutoMLState, build_attempt, describe_budget, goal_met, state_int
 from .holdout import describe as describe_holdout
 from .model_selection import _history_digest, digest_attempt, task_of_state
@@ -178,7 +178,7 @@ def fallback_report(
     metric = str(goal.get("metric", config.metric))
     threshold = goal_threshold(goal, config.fallback_threshold)
     best = dict(state.get("best") or {})
-    best_score = best.get("score")
+    best_score = as_number(best.get("score"))
     iterations = state_int(state, "iteration")
     max_iterations = state_int(state, "max_iterations", config.max_iterations)
 
@@ -193,7 +193,7 @@ def fallback_report(
     best_line = (
         f"최고 성능은 iteration {best.get('iteration')}의 `{best.get('model')}`이며 "
         f"{describe_interval(metric, best_score, bounds)}입니다."
-        if isinstance(best_score, (int, float))
+        if best_score is not None
         else "성공적으로 학습을 마친 시도가 없어 유효한 최고 성능이 없습니다."
     )
     if contains(bounds, threshold):
@@ -232,8 +232,8 @@ def fallback_report(
 
     for attempt in history:
         metrics = attempt.get("metrics") or {}
-        score = metrics.get(metric)
-        if attempt.get("status") == "ok" and isinstance(score, (int, float)):
+        score = as_number(metrics.get(metric))
+        if attempt.get("status") == "ok" and score is not None:
             outcome = f"{metric}={score:.4f}"
         else:
             outcome = f"실패 (`{attempt.get('error_type') or 'unknown'}`)"
@@ -254,7 +254,7 @@ def fallback_report(
             f"- model: `{best.get('model')}`",
             f"- hyperparams: {_format_hyperparams(best.get('hyperparams') or {})}",
             f"- preprocessing: {_format_hyperparams(best.get('preprocessing') or {})}",
-            f"- {metric}: {best_score:.4f}" if isinstance(best_score, (int, float)) else f"- {metric}: 없음",
+            f"- {metric}: {best_score:.4f}" if best_score is not None else f"- {metric}: 없음",
             f"- 전체 지표: {_format_hyperparams(best.get('metrics') or {})}",
             f"- 학습 시간: {best.get('train_time_sec')}초",
             f"- 재현: `seed={config.seed}`, iteration {best.get('iteration')}",

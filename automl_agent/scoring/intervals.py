@@ -446,7 +446,7 @@ def paired_of(
     block = (result or {}).get(PAIRED_KEY)
     if not isinstance(block, Mapping) or block.get("status") != PAIRED_MEASURED:
         return None
-    if _iteration(block.get("baseline_iteration")) != _iteration(baseline_iteration):
+    if as_iteration(block.get("baseline_iteration")) != as_iteration(baseline_iteration):
         return None
     values = {field: as_number(block.get(field)) for field in PAIRED_FIELDS}
     if any(value is None for value in values.values()):
@@ -484,11 +484,10 @@ def describe_paired(block: Mapping[str, Any] | None) -> str:
     return text
 
 
-def _iteration(value: Any) -> int | None:
+def as_iteration(value: Any) -> int | None:
     """반복 번호를 ``int``로, 또는 ``None``. ``bool``은 반복 번호가 아니다."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return int(value)
+    number = as_number(value)
+    return None if number is None else int(number)
 
 
 def resolution_note(

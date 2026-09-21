@@ -125,6 +125,7 @@ from automl_agent.scoring.intervals import (  # noqa: E402
     PAIRED_KEY,
     PAIRED_MEASURED,
     PAIRED_SKIPPED,
+    as_number,
     bootstrap_interval,
     describe_interval,
     describe_paired,
@@ -1337,10 +1338,8 @@ def bootstrap_resamples(cfg: dict[str, Any]) -> int:
     단호해 보이게 하려고 그것을 끄도록 초대하게 된다. 쓰레기 값은 실행을 실패시키지 않고 기본값으로
     떨어진다.
     """
-    raw = dict(cfg.get("bootstrap") or {}).get("resamples", DEFAULT_RESAMPLES)
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        return DEFAULT_RESAMPLES
-    return max(0, int(raw))
+    raw = as_number(dict(cfg.get("bootstrap") or {}).get("resamples", DEFAULT_RESAMPLES))
+    return DEFAULT_RESAMPLES if raw is None else max(0, int(raw))
 
 
 def _proba(model: Any, x_arr: Any, n_classes: int, log: LogBuffer) -> Any:
@@ -1422,13 +1421,14 @@ def requested_cut(cfg: dict[str, Any], log: LogBuffer) -> float | str | None:
             f'or "{DECISION_TUNED}"'
         )
         return None
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0.0 < float(raw) < 1.0:
+    cut = as_number(raw)
+    if cut is None or not 0.0 < cut < 1.0:
         log.write(
             f"decision.threshold={raw!r} ignored: outside (0, 1), which labels every row "
             "the same way"
         )
         return None
-    return round(float(raw), 6)
+    return round(cut, 6)
 
 
 def tune_threshold(
@@ -1543,14 +1543,14 @@ def load_decision(path: Path, log: LogBuffer) -> float | None:
     except (OSError, json.JSONDecodeError) as exc:
         log.write(f"{path.name} unusable ({exc}); scoring at the default rule")
         return None
-    # 변환하지 않고 검사한다. 날값에 ``float(...)``을 쓰는 것은 닿을 수 있는 모든 실패가 위의
-    # ``except``에 있어서 작동했지만, "파일을 믿고 뒷감당은 잡는다"로 읽혔다 — 게다가 타입이 ``Any``라
-    # 반환값이 float임을 증명할 수 있는 것이 없었다.
+    # ``float(...)``을 날값에 바로 걸지 않는다. 닿을 수 있는 모든 실패가 위의 ``except``에 있어서
+    # 작동했지만 "파일을 믿고 뒷감당은 잡는다"로 읽혔고, 타입이 ``Any``라 반환값이 float임을 증명할 수
+    # 있는 것이 없었다. ``as_number``는 그 둘을 한 번에 준다 — 판정과 좁혀진 타입.
     raw = loaded.get("threshold") if isinstance(loaded, dict) else None
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+    cut = as_number(raw)
+    if cut is None:
         log.write(f"{path.name} holds no numeric threshold; scoring at the default rule")
         return None
-    cut = float(raw)
     if not 0.0 < cut < 1.0:
         log.write(f"{path.name} holds threshold={cut}, outside (0, 1); scoring at the default rule")
         return None
@@ -1932,6 +1932,177 @@ class TrainingRun:
     applied_pipeline: list[str] = field(default_factory=list)
 
 
+@dataclass
+class HeldBackCut:
+    """결정 컷 요청의 결말, 그리고 그것을 고르려고 학습 행에서 무엇을 뺐는지.
+
+    ``request``는 거절을 다 거친 뒤 남은 것이고 ``asked``는 계획이 청한 것이다. 둘을 따로 드는 이유는
+    ``applied_threshold``의 부재가 컷이 효력이 없다고만 말하고 컷이 원해진 적이 있는지는 말하지 못하기
+    때문이다 — ``dropped_hyperparams``가 있는 이유와 같다. ``declined``가 그 이유를 적는다.
+
+    ``x_fit``/``y_fit``/``groups_fit``은 조각을 뺀 *뒤의* 학습 행이다. 컷이 거절됐으면 들어온 것
+    그대로이니, 요청하지 않은 시도는 늘 적합돼 온 바로 그 행에 적합된다.
+    """
+
+    request: float | str | None
+    asked: float | str | None
+    declined: str | None
+    rows: dict[str, Any]
+    x_fit: Any
+    y_fit: Any
+    groups_fit: Any
+    x_cut: Any
+    y_cut: Any
+
+
+def hold_back_cut(
+    cfg: dict[str, Any],
+    x_train: Any,
+    y_train: Any,
+    groups_train: Any,
+    seed: int,
+    *,
+    task: str,
+    n_classes: int,
+    log: LogBuffer,
+) -> HeldBackCut:
+    """결정 컷을 고를 행을 적합 *전에* 학습 분할에서 빼낸다.
+
+    추정기가 그 행을 절대 보지 않도록 여기서, 적합 전에 한다. 거절이 넷이고 모두 조각을 잘라내기
+    *전에* 검사하는 것이 이 함수의 요점이다: 쓸기가 알아낼 때쯤 조각은 이미 적합에서 빠져 있고, 시도는
+    고를 수도 없었던 손잡이에 학습 행의 20%를 치른 것이 된다. 어떤 실제 실행이 그렇게 5,658행을 냈고
+    유일한 흔적은 ``applied_threshold``의 부재였다.
+    """
+    request = requested_cut(cfg, log)
+    # 아래의 모든 거절이 ``request``를 비우므로 청해진 것은 따로 들고 있는다. 여기서 한 번만 잡는
+    # 이유는 ``requested_cut``이 로그를 쓰기 때문이다 — 두 번 부르면 줄이 두 번 남는다.
+    asked = request
+    regression = task == TASK_REGRESSION
+    goal = goal_metric(cfg, task)
+    declined: str | None = None
+    if request is not None and (METRICS.get(goal) or METRICS["f1"]).needs_proba:
+        # ``roc_auc``와 ``pr_auc``는 확률만으로 계산되니 모든 후보 컷이 같은 점수를 받고
+        # ``tune_threshold``는 애초에 거절할 예정이었다.
+        log.write(
+            f"decision.threshold={request!r} ignored: the goal metric {goal} is computed from "
+            "the probabilities, not from the labels, so no cut changes it"
+        )
+        request, declined = None, f"the goal metric {goal} is cut-invariant"
+    if request is not None and (regression or n_classes != 2):
+        # 연속형 타깃에는 고를 컷이 없고 다중 클래스에는 단일 컷이 없으니 ``tune_threshold``는 여기서
+        # 애초에 ``None``으로 답할 예정이었다.
+        log.write(
+            f"decision.threshold={request!r} ignored: "
+            + (
+                "the target is continuous, so there is no decision rule to move"
+                if regression
+                else f"the target has {n_classes} classes and a single cut is a binary rule"
+            )
+        )
+        request = None
+        declined = (
+            "the target is continuous" if regression else f"the target has {n_classes} classes"
+        )
+    # 조각을 떼지 않은 결말. 셋이 여기로 온다: 컷을 청하지 않은 config, 위에서 거절된 요청, 그리고
+    # 아래에서 조각이 너무 작다고 거절되는 것.
+    kept = HeldBackCut(
+        request=request,
+        asked=asked,
+        declined=declined,
+        rows={},
+        x_fit=x_train,
+        y_fit=y_train,
+        groups_fit=groups_train,
+        x_cut=None,
+        y_cut=None,
+    )
+    if request != DECISION_TUNED:
+        return kept
+    fit_idx, cut_idx = held_back_indices(
+        x_train, y_train, seed, not regression, groups_train, CUT_FRACTION
+    )
+    if len(cut_idx) < MIN_CUT_ROWS:
+        # 줄이지 않고 끈다. 크기가 모자란 멈춤 조각과 같은 조건이다: 40행에서 고른 컷은 보고서가 면책
+        # 문구를 붙여야 할 수이고, 기본 규칙은 적어도 규칙이다. 아래쪽의 어떤 것도 컷이 요청됐다고
+        # 믿지 않도록 ``request``를 비운다.
+        log.write(
+            f"decision.threshold={DECISION_TUNED!r} not applied: the slice held back to "
+            f"choose the cut would hold {len(cut_idx)} rows, under the {MIN_CUT_ROWS} needed"
+        )
+        kept.request = None
+        kept.declined = (
+            f"the slice to choose the cut on would hold {len(cut_idx)} rows, "
+            f"under the {MIN_CUT_ROWS} needed"
+        )
+        return kept
+    log.write(
+        f"decision.threshold={DECISION_TUNED!r}: {len(cut_idx)} of train's rows are held "
+        f"out of the fit to choose the cut on, leaving {len(fit_idx)} to fit — the price "
+        "of the lever, and reported in internal_validation"
+    )
+    return HeldBackCut(
+        request=request,
+        asked=asked,
+        declined=None,
+        rows={"cut_held_out_rows": len(cut_idx), "cut_fraction": CUT_FRACTION},
+        x_fit=x_train[fit_idx],
+        y_fit=y_train[fit_idx],
+        groups_fit=None if groups_train is None else groups_train[fit_idx],
+        x_cut=x_train[cut_idx],
+        y_cut=y_train[cut_idx],
+    )
+
+
+def held_back_by_estimator(model: Any, n_train: int, log: LogBuffer) -> dict[str, Any]:
+    """추정기 *자신의* early stopping이 떼어 간 학습 행, 적합된 객체에서 읽어서.
+
+    ``fit_estimator``가 아무것도 말하지 않았을 때만 물을 것이다. 학습 행을 떼어 둘 수 있는 추정기가
+    둘인데 그중 나중에 물어볼 수 있는 것은 하나뿐이다: harness가 직접 분할했으면(xgboost의 eval set)
+    ``fit_estimator``가 개수를 돌려주고 이미 로그에 남겼고, 추정기가 자기 것을 만들었으면 적합된 객체
+    말고는 아는 것이 없다. 어느 쪽이든 적합 뒤다 — 그 전에는 읽을 것이 없기 때문이다.
+    """
+    held = describe_internal_validation(
+        (getattr(model, "named_steps", None) or {}).get("model"), n_train
+    )
+    if held:
+        stopped = (
+            f", iteration {held['stopped_at_iter']}/{held['max_iter']}에서 멈춤"
+            if {"stopped_at_iter", "max_iter"} <= held.keys()
+            else ""
+        )
+        log.write(
+            f"early_stopping이 위 {n_train}행 중 {held['held_out_rows']}행을 자체 검증으로 "
+            f"떼어 갔습니다 — 실제 학습은 {held['fit_rows']}행{stopped}"
+        )
+    return held
+
+
+def record_train_val_gap(
+    metrics: dict[str, float], target_metric: str, task: str, log: LogBuffer
+) -> None:
+    """``metrics["train_val_gap"]``을 제자리에 적는다 — 잴 두 점수가 다 있을 때만.
+
+    태스크의 첫 기본값이 아니라 목표 지표에서 정의한다: Critic의 과적합/과소적합 분기가 읽는 것이 이 한
+    수이고, 아무도 최적화하지 않는 지표에서 잰 격차는 그것에 틀린 진단을 보낸다. 대체값은 train 짝이
+    없는 목표 지표를 위한 것이다(predict_proba 없는 모델에서의 확률 지표).
+    """
+    gap_metric = target_metric if f"train_{target_metric}" in metrics else TRAIN_METRICS[task][0]
+    if gap_metric not in metrics or f"train_{gap_metric}" not in metrics:
+        return
+    # 언제나 "검증이 학습보다 얼마나 나쁜가"이고, 맨 뺄셈이 아니다: 최소화 지표에서는 학습 점수가
+    # *더 작은* 수이므로 ``train - val``은 모델이 과적합일 때 정확히 음수가 된다. 모든 소비자가 양수
+    # 격차를 과적합으로 읽으니(``nodes/critic.py``, Critic 프롬프트의 규칙) 방향은 각자에게가 아니라
+    # 여기 한 곳에서 적용한다.
+    train_value, val_value = metrics[f"train_{gap_metric}"], metrics[gap_metric]
+    worse_by = (
+        val_value - train_value
+        if direction_of(gap_metric) == MINIMIZE
+        else train_value - val_value
+    )
+    metrics["train_val_gap"] = round(worse_by, 6)
+    log.write(f"train_val_gap measured on {gap_metric} ({direction_of(gap_metric)})")
+
+
 def run_training(
     cfg: dict[str, Any],
     log: LogBuffer,
@@ -1963,81 +2134,20 @@ def run_training(
     # 유지해야 하므로 아래의 subsample이 둘 다 자른다.
     groups_train = splits.groups_train
 
-    subsample = (cfg.get("hyperparams") or {}).get("train_subsample")
-    if isinstance(subsample, (int, float)) and 0 < float(subsample) < 1:
-        keep = max(50, int(len(x_train) * float(subsample)))
+    subsample = as_number((cfg.get("hyperparams") or {}).get("train_subsample"))
+    if subsample is not None and 0 < subsample < 1:
+        keep = max(50, int(len(x_train) * subsample))
         x_train, y_train = x_train[:keep], y_train[:keep]
         if groups_train is not None:
             groups_train = groups_train[:keep]
         log.write(f"train_subsample={subsample} -> {keep} rows")
 
-    # 결정 컷을 고를 행. 추정기가 절대 그것을 보지 않도록 적합 *전에* train에서 빼낸다. 계획이 튜닝된
-    # 컷을 요청했을 때만이다: 요청하지 않은 시도는 늘 적합돼 온 바로 그 행에 적합된다.
-    request = requested_cut(cfg, log)
-    x_cut, y_cut = None, None
-    cut_rows: dict[str, Any] = {}
-    # 요청받은 것. 아래의 모든 거절이 ``request``를 비우므로 따로 들고 있는다 — 그리고 왜 거절됐는지도,
-    # ``dropped_hyperparams``가 있는 이유와 같은 이유로. ``applied_threshold``의 부재는 컷이 효력이
-    # 없다고 말하지만 컷이 원해진 적이 있는지는 말할 수 없으니, ``history.json``을 읽는 사람은 "요청한
-    # 계획이 없었다"와 "실행기가 거절했고 이유는 이것이다"를 구분할 수 없었다.
-    cut_requested = request
-    cut_declined: str | None = None
-    goal = goal_metric(cfg, task)
-    if request is not None and (METRICS.get(goal) or METRICS["f1"]).needs_proba:
-        # ``roc_auc``와 ``pr_auc``는 확률만으로 계산되니 모든 후보 컷이 같은 점수를 받고
-        # ``tune_threshold``는 애초에 거절할 예정이었다. 거기가 아니라 여기서 검사하는 이유는 아래의
-        # 타깃 검사와 같다: 쓸기가 알아낼 때쯤 조각은 이미 적합에서 빠져 있다. 어떤 실제 실행은 고를
-        # 수도 없었던 컷에 학습 행 5,658개를 치렀고, 유일한 흔적은 ``applied_threshold``의 부재였다.
-        log.write(
-            f"decision.threshold={request!r} ignored: the goal metric {goal} is computed from "
-            "the probabilities, not from the labels, so no cut changes it"
-        )
-        request, cut_declined = None, f"the goal metric {goal} is cut-invariant"
-    if request is not None and (regression or n_classes != 2):
-        # 쓸기가 거절한 뒤가 아니라 행을 잘라내기 *전에* 검사한다. 연속형 타깃에는 고를 컷이
-        # 없고 다중 클래스에는 단일 컷이 없으니 ``tune_threshold``는 여기서 애초에 ``None``으로
-        # 답할 예정이었다 — 그런데 그때쯤이면 조각은 이미 적합에서 빠져 있고, 시도는 이 타깃에
-        # 존재할 수 없는 손잡이에 학습 행의 20%를 치른 것이 된다.
-        log.write(
-            f"decision.threshold={request!r} ignored: "
-            + (
-                "the target is continuous, so there is no decision rule to move"
-                if regression
-                else f"the target has {n_classes} classes and a single cut is a binary rule"
-            )
-        )
-        request = None
-        cut_declined = (
-            "the target is continuous" if regression else f"the target has {n_classes} classes"
-        )
-    if request == DECISION_TUNED:
-        fit_idx, cut_idx = held_back_indices(
-            x_train, y_train, seed, not regression, groups_train, CUT_FRACTION
-        )
-        if len(cut_idx) < MIN_CUT_ROWS:
-            # 줄이지 않고 끈다. 크기가 모자란 멈춤 조각과 같은 조건이다: 40행에서 고른 컷은
-            # 보고서가 면책 문구를 붙여야 할 수이고, 기본 규칙은 적어도 규칙이다. 아래쪽의 어떤
-            # 것도 컷이 요청됐다고 믿지 않도록 ``request``를 비운다.
-            log.write(
-                f"decision.threshold={DECISION_TUNED!r} not applied: the slice held back to "
-                f"choose the cut would hold {len(cut_idx)} rows, under the {MIN_CUT_ROWS} needed"
-            )
-            request = None
-            cut_declined = (
-                f"the slice to choose the cut on would hold {len(cut_idx)} rows, "
-                f"under the {MIN_CUT_ROWS} needed"
-            )
-        else:
-            x_cut, y_cut = x_train[cut_idx], y_train[cut_idx]
-            x_train, y_train = x_train[fit_idx], y_train[fit_idx]
-            if groups_train is not None:
-                groups_train = groups_train[fit_idx]
-            cut_rows = {"cut_held_out_rows": len(cut_idx), "cut_fraction": CUT_FRACTION}
-            log.write(
-                f"decision.threshold={DECISION_TUNED!r}: {len(cut_idx)} of train's rows are held "
-                f"out of the fit to choose the cut on, leaving {len(fit_idx)} to fit — the price "
-                "of the lever, and reported in internal_validation"
-            )
+    # 결정 컷을 고를 행, 적합 전에 빼낸다 — 거절 넷과 그 이유는 ``hold_back_cut``. 지역 이름으로 풀어
+    # 두는 이유는 아래에서 ``cut_declined``가 두 번 더 채워지고 ``cut_rows``가 자라기 때문이다.
+    cut = hold_back_cut(cfg, x_train, y_train, groups_train, seed, task=task, n_classes=n_classes, log=log)
+    request, cut_requested, cut_declined = cut.request, cut.asked, cut.declined
+    x_cut, y_cut, cut_rows = cut.x_cut, cut.y_cut, cut.rows
+    x_train, y_train, groups_train = cut.x_fit, cut.y_fit, cut.groups_fit
 
     # 선언된 파이프라인. 단계가 *열*을 지목하고 어느 열이 어느 것인지 말하는 것이 스키마이므로
     # 여기서 해석한다. ``None`` — 키가 없음 — 은 플래그 경로를 그대로 두니, 이 블록보다 먼저 쓰인
@@ -2058,10 +2168,6 @@ def run_training(
         declared=declared,
     )
     log.write(f"fitting on {len(x_train)} rows, validating on {len(x_val)} rows")
-    # 학습 행을 떼어 둘 수 있는 추정기가 둘인데, 그중 나중에 물어볼 수 있는 것은 하나뿐이다.
-    # harness가 직접 분할했으면(xgboost의 eval set) ``fit_estimator``가 개수를 돌려주고 이미 로그에
-    # 남겼다. 추정기가 자기 것을 만들었으면 적합된 객체 말고는 아는 것이 없으니 거기서 읽는다. 어느
-    # 쪽이든 이것은 적합 뒤다. 그 전에는 읽을 것이 없기 때문이다.
     internal_validation = fit_estimator(
         model,
         x_train,
@@ -2070,23 +2176,7 @@ def run_training(
         log,
         stratify=not regression,
         groups=groups_train,
-    )
-    if not internal_validation:
-        internal_validation = describe_internal_validation(
-            (getattr(model, "named_steps", None) or {}).get("model"), len(x_train)
-        )
-        if internal_validation:
-            stopped = (
-                f", iteration {internal_validation['stopped_at_iter']}"
-                f"/{internal_validation['max_iter']}에서 멈춤"
-                if {"stopped_at_iter", "max_iter"} <= internal_validation.keys()
-                else ""
-            )
-            log.write(
-                f"early_stopping이 위 {len(x_train)}행 중 "
-                f"{internal_validation['held_out_rows']}행을 자체 검증으로 떼어 갔습니다 — "
-                f"실제 학습은 {internal_validation['fit_rows']}행{stopped}"
-            )
+    ) or held_back_by_estimator(model, len(x_train), log)
     model_path = save_model(model, model_out, log) if model_out is not None else None
     # 적합 뒤에, 모델 옆에 쓴다. 그래야 디스크의 파일이 나중에 따로 유도된 것이 아니라 이 추정기가
     # 실제로 본 행렬의 인코딩을 기술한다.
@@ -2112,10 +2202,8 @@ def run_training(
         threshold = tune_threshold(
             y_cut, _proba(model, x_cut, n_classes, log), target_metric, average, task, log
         )
-    elif isinstance(request, (int, float)) and not isinstance(request, bool):
-        threshold = float(request)
     else:
-        threshold = None
+        threshold = as_number(request)
     proba_train = None
     if threshold is not None:
         proba_train = _proba(model, x_train, n_classes, log)
@@ -2218,24 +2306,7 @@ def run_training(
     ).items():
         metrics[f"train_{name}"] = value
 
-    # 태스크의 첫 기본값이 아니라 목표 지표에서 정의한다: Critic의 과적합/과소적합 분기가 읽는 것이
-    # 이 한 수이고, 아무도 최적화하지 않는 지표에서 잰 격차는 그것에 틀린 진단을 보낸다. 대체값은
-    # train 짝이 없는 목표 지표를 위한 것이다(predict_proba 없는 모델에서의 확률 지표).
-    fallback_gap_metric = TRAIN_METRICS[task][0]
-    gap_metric = target_metric if f"train_{target_metric}" in metrics else fallback_gap_metric
-    if gap_metric in metrics and f"train_{gap_metric}" in metrics:
-        # 언제나 "검증이 학습보다 얼마나 나쁜가"이고, 맨 뺄셈이 아니다: 최소화 지표에서는 학습
-        # 점수가 *더 작은* 수이므로 ``train - val``은 모델이 과적합일 때 정확히 음수가 된다. 모든
-        # 소비자가 양수 격차를 과적합으로 읽으니(``nodes/critic.py``, Critic 프롬프트의 규칙) 방향은
-        # 각자에게가 아니라 여기 한 곳에서 적용한다.
-        train_value, val_value = metrics[f"train_{gap_metric}"], metrics[gap_metric]
-        worse_by = (
-            val_value - train_value
-            if direction_of(gap_metric) == MINIMIZE
-            else train_value - val_value
-        )
-        metrics["train_val_gap"] = round(worse_by, 6)
-        log.write(f"train_val_gap measured on {gap_metric} ({direction_of(gap_metric)})")
+    record_train_val_gap(metrics, target_metric, task, log)
 
     log.write("metrics: " + json.dumps({k: round(v, 4) for k, v in metrics.items()}))
     return TrainingRun(
@@ -2366,9 +2437,10 @@ def drop_nonfinite(value: Any, path: str = "") -> tuple[Any, list[str]]:
             # 주위로 줄이는 대신 ``null``이 된다.
             kept_list.append(clean)
         return kept_list, dropped
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return value, []
-    if math.isfinite(value):
+    # 값이 아니라 판정만 ``as_number``에서 빌린다. 돌려주는 것은 날값 그대로여야 한다 — ``414``는
+    # ``414.0``이 아니고, 이 함수는 유한하지 않은 것만 없애는 자리다.
+    number = as_number(value)
+    if number is None or math.isfinite(number):
         return value, []
     return None, [path or "<root>"]
 

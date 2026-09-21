@@ -33,7 +33,7 @@ from typing import Any
 
 from ..config import TRAIN_SCRIPT, RunConfig, read_json_object, run_fixed_script
 from ..privacy import public_result
-from ..scoring.intervals import CI_LEVEL, contains, interval_of
+from ..scoring.intervals import CI_LEVEL, as_number, contains, interval_of
 from ..scoring.metrics import MINIMIZE, direction_of
 from ..scoring.splits import TEST_FRACTION
 from ..state import AutoMLState, holdout_share_sec
@@ -118,12 +118,13 @@ def holdout(state: AutoMLState, *, config: RunConfig) -> dict:
         "metrics": result["metrics"],
         "wall_time_sec": round(time.perf_counter() - started, 3),
     }
-    score = holdout_block["score"]
-    if isinstance(score, (int, float)) and isinstance(best.get("score"), (int, float)):
+    score = as_number(holdout_block["score"])
+    val_score = as_number(best.get("score"))
+    if score is not None and val_score is not None:
         # 지표가 어느 쪽으로 가든 양수가 언제나 "검증이 낙관적이었다"를 뜻하도록 부호를 맞춘다. 오류
         # 지표에서 ``best``는 잡음 있는 검증 수들의 *최소*이므로, 거기서 ``best - test``는 선택 효과가
         # 있을 때 정확히 음수다 — 그리고 ``describe``는 이 수를 그 효과의 크기라고 부른다.
-        gap = float(best["score"]) - float(score)
+        gap = val_score - score
         holdout_block["selection_gap"] = round(-gap if direction_of(metric) == MINIMIZE else gap, 6)
         # 격차가 이 행들이 분해할 수 있는 것보다 큰지. test 분할은 파일의 ~20%이므로 그 구간이 실행에서
         # 가장 넓고, 그 안에 든 격차는 이 측정이 0과 구분하지 못하는 격차다.
@@ -148,8 +149,8 @@ def describe(block: dict[str, Any]) -> str:
     if block.get("status") != "ok":
         return f"최종 테스트 채점 생략 — {SKIP_REASONS.get(str(block.get('reason')), '사유 불명')}"
     metric = block.get("metric", "metric")
-    score = block.get("score")
-    if not isinstance(score, (int, float)):
+    score = as_number(block.get("score"))
+    if score is None:
         return f"최종 테스트 채점: iteration {block.get('iteration')} 모델, {metric} 값 없음"
     line = (
         f"최종 테스트({int(float(block.get('test_fraction') or TEST_FRACTION) * 100)}%, "
@@ -159,13 +160,11 @@ def describe(block: dict[str, Any]) -> str:
     ci = block.get("score_ci")
     if isinstance(ci, (list, tuple)) and len(ci) == 2:
         line += f" ({int(CI_LEVEL * 100)}% CI {float(ci[0]):.4f}~{float(ci[1]):.4f})"
-    gap = block.get("selection_gap")
-    if isinstance(gap, (int, float)):
-        val = block.get("val_score")
+    gap = as_number(block.get("selection_gap"))
+    if gap is not None:
+        val = as_number(block.get("val_score"))
         line += (
-            f" (검증 {float(val):.4f} 대비 {gap:+.4f}"
-            if isinstance(val, (int, float))
-            else f" (검증 대비 {gap:+.4f}"
+            f" (검증 {val:.4f} 대비 {gap:+.4f}" if val is not None else f" (검증 대비 {gap:+.4f}"
         )
         line += " — 이 차이가 선택 편향의 크기입니다"
         # 소리 내어 말한다. 격차가 이 노드의 대표 숫자이고, 듣지 못한 독자는 0이 아닌 값을 모두 측정된

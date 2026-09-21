@@ -58,7 +58,11 @@ from automl_agent.dataset.features import (  # noqa: E402
     encode_with_schema,
 )
 from automl_agent.scoring import calibration  # noqa: E402
-from automl_agent.scoring.intervals import DEFAULT_RESAMPLES  # noqa: E402
+from automl_agent.scoring.intervals import (  # noqa: E402
+    DEFAULT_RESAMPLES,
+    as_number,
+    interval_of,
+)
 from automl_agent.scoring.metrics import (  # noqa: E402
     ALIASES as METRIC_ALIASES,
 )
@@ -479,10 +483,10 @@ def describe_score(scored: dict[str, Any]) -> list[str]:
     metric = scored.get("metric")
     if metric and metric in metrics:
         headline = f"  {metric}={float(metrics[metric]):.4f}"
-        low, high = metrics.get(f"{metric}_ci_low"), metrics.get(f"{metric}_ci_high")
-        if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+        bounds = interval_of(metrics, metric)
+        if bounds is not None:
             headline += (
-                f" (95% 구간 {float(low):.4f}~{float(high):.4f}, "
+                f" (95% 구간 {bounds[0]:.4f}~{bounds[1]:.4f}, "
                 f"row 단위 재표집 {int(scored.get('resamples') or 0)}회)"
             )
         lines.append(headline + " ← 이 실행이 목표로 삼았던 지표")
@@ -511,11 +515,11 @@ def describe_score(scored: dict[str, Any]) -> list[str]:
     # 찍혔다), 그리고 같은 수를 다른 이름으로 내는 registry의 alias들.
     hidden = {metric, calibration.BRIER_KEY, calibration.CALIBRATION_KEY, *METRIC_ALIASES}
     others = ", ".join(
-        f"{name}={float(value):.4f}"
+        f"{name}={number:.4f}"
         for name, value in sorted(metrics.items())
         if name not in hidden
-        and isinstance(value, (int, float))
         and not name.endswith(("_ci_low", "_ci_high"))
+        and (number := as_number(value)) is not None
     )
     if others:
         lines.append(f"  그 밖의 지표: {others}")

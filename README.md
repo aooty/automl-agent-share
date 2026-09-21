@@ -148,13 +148,13 @@ python -m automl_agent.main graph --out graph.png
 | `--dataset-card` / `--data` | 둘 중 하나 필수. 카드로 시작하거나 원본 CSV로 시작합니다 |
 | `--target` | 정답 컬럼. `--data`를 쓸 때 필수 |
 | `--metric` | 분류 `f1` `accuracy` `balanced_accuracy` `precision` `recall` `roc_auc` `pr_auc` / 회귀 `r2` `mae` `rmse`. 목록은 [metrics.py](automl_agent/scoring/metrics.py) 한 곳에서 나옵니다 |
-| `--goal-mode {auto,fixed}` | 기본 `auto`(기준선에서 도출). `--threshold`를 주면 `fixed`로 간주 |
-| `--threshold` / `--margin` | 각각 `fixed`의 목표값 / `auto`가 요구할 남은 여유의 비율(기본 `0.25`). 모드와 어긋나면 거부 |
+| `--threshold` | 목표값을 이 수로 못박습니다(`fixed` 모드). 생략하면 `auto`로, 카드의 기준선에서 도출합니다. 모드를 이름으로 고르는 플래그는 없습니다 — 어느 쪽을 줬는지가 모드입니다 |
+| `--margin` | `auto`가 요구할 남은 여유의 비율(기본 `0.25`). `auto`에서만 뜻이 있으므로 `--threshold`와 함께 주면 거부합니다 |
 | `--max-iterations` / `--seed` | 반복 상한 / 시드 |
 | `--time-budget-sec` | **실행 하나가 일하는 초의 상한**(기본 `3600`). 학습 하나의 timeout이 아니라 모든 노드의 소요를 누적한 값입니다 — 10%는 holdout 몫으로 예약되고, 적합 하나의 몫은 `남은 시간 ÷ 남은 반복 수`입니다. 몫을 넘긴 적합은 `too_slow`, 예산을 다 쓰고 끊긴 루프는 `out_of_time` |
 | `--search-past-goal` | 목표를 넘어도 멈추지 않고 예산을 다 씁니다. `auto`의 바는 기준선에서 도출되므로 첫 시도가 넘는 일이 흔하고, 그러면 Critic이 한 번도 안 돕니다 — 진단·재계획 경로를 실제로 돌려 보려면 이 플래그입니다. 바를 올리지도, 우승자 규칙(val 최고)을 바꾸지도 않습니다 |
 | `--no-llm` | 학습은 **실제로** 하고 계획하는 쪽만 규칙 기반. 자격 증명 불필요. **자격 증명이 없을 때의 차선이 아니라 대조군입니다** — 학습·분할·지표·홀드아웃 규칙이 전부 같고 계획만 결정론적이므로 같은 카드·같은 시드면 같은 계획이 나옵니다. LLM이 무엇을 더 벌었는지 말하려면 이 팔의 점수가 바입니다 |
-| `--dry-run` / `--scenario` | LLM과 학습을 **모두** 모킹. `--scenario {success,fail,oom,stall,slow,crash}` |
+| `--dry-run [시나리오]` | LLM과 학습을 **모두** 모킹. 값을 주면 모의 학습이 그 궤적을 따라갑니다 — `success`(기본), `fail`, `oom`, `stall`, `slow`, `crash` |
 | `--force` | 같은 `--thread-id`의 기존 체크포인트를 지우고 처음부터 |
 | `--on-missing-target {reject,drop}` | 정답이 빈 행의 처리. 기본은 개수를 알리고 중단 |
 | `--keep-models {best,all}` | 실행이 끝날 때 진 시도의 `model.joblib`을 지울지 |
@@ -162,12 +162,11 @@ python -m automl_agent.main graph --out graph.png
 | `--caveat` | 집계가 보여주지 못하는 것을 아는 사람의 지식이 들어오는 **유일한 통로**. 여러 번 줄 수 있고 모든 추론 프롬프트에 실립니다 — 그래서 **행 단위 사실을 적으면 안 됩니다** |
 | `--model` | 심판(critic·report)이 쓸 Claude 모델 ID. 기본 `claude-opus-5` |
 | `--proposer-model` | planning·model_selection에만 쓸 모델. 생략하면 `--model`과 같습니다. `ollama:<모델>`을 주면 로컬 Ollama로 나갑니다(예: `ollama:gemma4:12b`). **이 둘만 코드 검증(`validate_plan`·레지스트리 화이트리스트·클램프)을 통과하므로 약한 모델을 놓을 수 있는 절반입니다** — critic·report에는 그 관문이 없습니다. 제안자는 `check_credentials`가 검사하지 않으므로 로컬 서버가 죽어 있으면 실행은 계속 돌고 계획만 규칙 폴백이 됩니다. 끝난 뒤 `history.json`의 `plan_source`로 확인하세요 |
-| `--direction {maximize,minimize}` | **지표가 이미 정하므로 생략이 기본입니다** — `mae`는 `minimize`, `f1`은 `maximize`. 함의와 다르게 주면 선호가 아니라 실수이므로 거부합니다 |
 | `--artifacts-root` | 아티팩트 루트 재지정. 두 실행을 나란히 돌릴 때 |
 
 `--force` 없이 이미 쓴 `thread_id`로 `run`을 다시 호출하면 **거부합니다** — 두 실행의
 `history`가 `operator.add`로 조용히 이어붙기 때문입니다. 모순되는 플래그 조합
-(`auto` + `--threshold` 등)과 실행을 무의미하게 만드는 값(`--max-iterations -1`,
+(`--threshold` + `--margin`)과 실행을 무의미하게 만드는 값(`--max-iterations -1`,
 음수 margin, NaN threshold)도 호출 시점에 끊습니다. 조용히 무시된 플래그가
 최악이라서입니다.
 

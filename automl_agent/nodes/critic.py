@@ -22,6 +22,7 @@ from ..scoring.goal import goal_threshold
 from ..scoring.intervals import (
     PAIRED_KEY,
     PAIRED_SKIPPED,
+    as_iteration,
     as_number,
     describe_paired,
     paired_of,
@@ -287,16 +288,12 @@ def heuristic_verdict(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
         # 거기서는 바가 중립적인 대체값이다.
         measured = threshold if direction_of(metric) == MINIMIZE else 0.0
     score = float(measured)
-    train_score = metrics.get(f"train_{metric}")
-    gap = metrics.get("train_val_gap")
-    if gap is None and isinstance(train_score, (int, float)):
+    train_score = as_number(metrics.get(f"train_{metric}"))
+    gap = as_number(metrics.get("train_val_gap"))
+    if gap is None and train_score is not None:
         # 실행기가 정규화하는 방식 그대로 — validation이 얼마나 *더 나쁜지* — 로 맞춘다.
         # 그래야 지표가 어느 방향이든 부호가 과적합을 뜻한다.
-        gap = (
-            score - float(train_score)
-            if direction_of(metric) == MINIMIZE
-            else float(train_score) - score
-        )
+        gap = score - train_score if direction_of(metric) == MINIMIZE else train_score - score
 
     # 이 시도가 바의 건너편에 있는지. ``--search-past-goal``에서만 가능하고, 아래 분기 몇 개가
     # 무엇을 주장할 수 있는지를 바꾼다. 과적합과 운영점 분기는 일부러 이것으로 막지 *않는다* —
@@ -306,11 +303,11 @@ def heuristic_verdict(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
 
     direction_override: str | None = None
     changes_override: dict[str, Any] | None = None
-    if isinstance(gap, (int, float)) and _overfits(metric, float(gap), train_score):
+    if gap is not None and _overfits(metric, gap, train_score):
         failure_type = "overfitting"
         evidence = (
             f"train_{metric}={train_score}, {metric}={score:.4f}, "
-            f"train_val_gap={float(gap):.4f} — 검증이 학습보다 그만큼 나쁨."
+            f"train_val_gap={gap:.4f} — 검증이 학습보다 그만큼 나쁨."
         )
     elif (collapse := _operating_point_collapse(metric, score, metrics, history)) is not None:
         # 과소적합보다 먼저 본다 — 이 모양이 과거에 그것으로 오인됐다. 과적합보다는
@@ -326,8 +323,8 @@ def heuristic_verdict(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
         evidence, direction_override, changes_override = skew
     elif (
         not cleared
-        and isinstance(train_score, (int, float))
-        and _underfits(metric, float(train_score), threshold)
+        and train_score is not None
+        and _underfits(metric, train_score, threshold)
     ):
         # 미달에 맞춰 문구만 쓴 것이 아니라 미달로 막는다. 검증 점수가 바를 넘은 시도는 학습
         # 점수가 무엇이든 용량이 모자란 것이 아니고, 거기서 용량을 *더* 처방하는 것은 격차까지
@@ -414,9 +411,9 @@ def _resolution(state: AutoMLState, config: RunConfig) -> str:
     goal = dict(state.get("goal") or {})
     metric = str(goal.get("metric", config.metric))
     others: dict[str, Any] = {}
-    threshold = goal.get("threshold")
-    if isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
-        others["목표"] = float(threshold)
+    threshold = as_number(goal.get("threshold"))
+    if threshold is not None:
+        others["목표"] = threshold
     for attempt in state.get("history") or []:
         value = metric_value(dict(attempt.get("result") or {}), metric)
         if value is not None:
@@ -529,7 +526,7 @@ def _ledger(state: AutoMLState, config: RunConfig) -> str:
             gained = score is not None and is_better(score, best, direction)
             paid[prescription] = paid.get(prescription, False) or gained
         if is_better(score, best, direction):
-            best, best_iteration = score, _iteration_of(attempt)
+            best, best_iteration = score, as_iteration(attempt.get("iteration"))
         lines.append("  " + "  ".join(parts))
 
     spent = []
@@ -589,13 +586,6 @@ def _ledger(state: AutoMLState, config: RunConfig) -> str:
     remaining = max(0, int(config.max_iterations) - len(attempts))
     lines.append(f"  남은 iteration: {remaining}")
     return "\n".join(lines)
-
-
-def _iteration_of(attempt: Mapping[str, Any]) -> int | None:
-    value = attempt.get("iteration")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return int(value)
 
 
 def _paired_note(attempt: Mapping[str, Any], baseline_iteration: int | None) -> str:
@@ -831,8 +821,8 @@ def _operating_point_collapse(
     이진 시도에서 목표 지표와 나란히 그것을 내보내기 때문이다.
     """
     spec = METRICS.get(metric)
-    ranking = metrics.get("roc_auc")
-    if spec is None or spec.needs_proba or not isinstance(ranking, (int, float)):
+    ranking = as_number(metrics.get("roc_auc"))
+    if spec is None or spec.needs_proba or ranking is None:
         return None
     for attempt in history:
         prior = dict(attempt.get("result") or {})
@@ -840,10 +830,10 @@ def _operating_point_collapse(
         ranking_was = metric_value(prior, "roc_auc")
         if was is None or ranking_was is None:
             continue
-        if was - score > GOAL_METRIC_DROP and float(ranking) >= ranking_was - RANKING_TOLERANCE:
+        if was - score > GOAL_METRIC_DROP and ranking >= ranking_was - RANKING_TOLERANCE:
             return (
                 f"{metric}={score:.4f}로 iteration {attempt.get('iteration')}의 {was:.4f}보다 "
-                f"{was - score:.4f} 낮은데 roc_auc는 {float(ranking):.4f} vs {ranking_was:.4f}로 "
+                f"{was - score:.4f} 낮은데 roc_auc는 {ranking:.4f} vs {ranking_was:.4f}로 "
                 f"유지됨 — 순위는 그대로이고 판정 규칙만 움직였다."
             )
     return None
@@ -941,11 +931,11 @@ def _ranking_limited(
 
 def _skew(metrics: Mapping[str, Any]) -> float | None:
     """``recall - specificity``. 음수면 양성 클래스에 가중치가 더 필요하다는 뜻이다."""
-    recall = metrics.get("recall")
-    specificity = metrics.get("specificity")
-    if not isinstance(recall, (int, float)) or not isinstance(specificity, (int, float)):
+    recall = as_number(metrics.get("recall"))
+    specificity = as_number(metrics.get("specificity"))
+    if recall is None or specificity is None:
         return None
-    return float(recall) - float(specificity)
+    return recall - specificity
 
 
 def _weight_history(state: AutoMLState) -> list[tuple[float, float]]:
@@ -1038,8 +1028,8 @@ def _frequency_ratio(state: AutoMLState) -> float:
         major, minor = float(max(balance)), float(min(balance))
         if minor > 0:
             return round(major / minor, 4)
-    ratio = card.get("imbalance_ratio")
-    return float(ratio) if isinstance(ratio, (int, float)) and ratio > 0 else 1.0
+    ratio = as_number(card.get("imbalance_ratio"))
+    return ratio if ratio is not None and ratio > 0 else 1.0
 
 
 def _family_plateaued(history: Sequence[Mapping[str, Any]], state: AutoMLState) -> bool:

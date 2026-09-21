@@ -422,7 +422,7 @@ def _tail(text: str, limit: int = 4000) -> str:
 
 
 def _mocked_result(state: AutoMLState, config: RunConfig, iteration: int) -> dict[str, Any]:
-    """``--scenario``로 고르는, 학습의 결정적인 대역.
+    """``--dry-run <시나리오>``로 고르는, 학습의 결정적인 대역.
 
     궤적이 반복 번호에서 나오므로 모든 시나리오가 ``route``의 서로 다른 분기로 끝난다: 목표 도달, 반복
     예산, 정체.

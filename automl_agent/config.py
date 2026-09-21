@@ -56,11 +56,16 @@ DECISION_FILENAME = "decision_rule.json"
 # 되돌아가는 지표가 구조적으로 같은 이름이다.
 DEFAULT_METRIC = DEFAULT_METRICS[TASK_CLASSIFICATION]
 DEFAULT_THRESHOLD = 0.85
-# ``--direction``이 받는 값. 기본값 상수는 일부러 두지 않았다: 기본값은 지표가 선언한
-# 방향(``scoring.metrics.direction_of``)이고, 하나 더 두면 진실이 둘이 된다.
+# ``direction``이 받는 값. 기본값 상수는 일부러 두지 않았다: 기본값은 지표가 선언한
+# 방향(``scoring.metrics.direction_of``)이고, 하나 더 두면 진실이 둘이 된다. CLI 플래그는 없다 —
+# 지표가 이미 정하므로 줄 수 있는 값이 하나뿐이었다. 남은 이유는 이것이 ``run_config.json``의 키이고,
+# 손으로 고친 파일이 ``resume``에서 거절돼야 하기 때문이다.
 DIRECTIONS = ("maximize", "minimize")
 DEFAULT_MAX_ITERATIONS = 5
 DRY_RUN_SCENARIOS = ("success", "fail", "oom", "stall", "slow", "crash")
+# ``--dry-run``에 값을 주지 않았을 때. 상수인 이유는 argparse의 ``const``와 아래 필드 기본값이 같은
+# 수여야 하기 때문이다.
+DEFAULT_DRY_RUN_SCENARIO = DRY_RUN_SCENARIOS[0]
 DEFAULT_TIME_BUDGET_SEC = 3600
 STALL_LIMIT = 2  # 개선 없는 반복이 이만큼 연속되면 포기한다
 
@@ -134,7 +139,7 @@ class RunConfig:
     search_past_goal: bool = False
     dry_run: bool = False
     # --dry-run에서 모사된 trainer가 어떤 경로를 따를지.
-    dry_run_scenario: str = "success"
+    dry_run_scenario: str = DEFAULT_DRY_RUN_SCENARIO
     # 실제 학습은 하고, LLM 호출 대신 규칙 기반 추론을 쓴다. 자격 증명 없이 실행 경로
     # 전체를 훑을 수 있다.
     no_llm: bool = False
@@ -192,7 +197,8 @@ class RunConfig:
                 # 뒤집는다.
                 raise ValueError(
                     f"{metric}은 {implied} 지표라서 direction={self.direction!r}로 실행할 수 없습니다. "
-                    "방향은 지표에서 나오므로 --direction 은 생략하거나 지표와 같은 값을 주십시오"
+                    "방향은 지표에서 나오므로 run_config.json의 direction을 지우거나 "
+                    f"{implied}로 고치십시오"
                 )
         _one_of("dry_run_scenario는", self.dry_run_scenario, DRY_RUN_SCENARIOS)
         _one_of("keep_models는", self.keep_models, KEEP_MODELS_MODES)

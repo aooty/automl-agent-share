@@ -32,6 +32,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .intervals import as_number
+
 # 이 모듈이 metrics dict에 넣는 두 키. 여기서 이름 붙이는 이유는 그것을 쓰는 스크립트와 되읽는 노드가
 # 오타로 어긋날 수 없게 하려고.
 BRIER_KEY = "brier"
@@ -148,19 +150,19 @@ def describe(metrics: Any, rows: int | None = None) -> str:
     라벨이 아니라는 것이다.
     """
     values = dict(metrics or {})
-    score = values.get(BRIER_KEY)
-    error = values.get(CALIBRATION_KEY)
-    if not isinstance(score, (int, float)) and not isinstance(error, (int, float)):
+    score = as_number(values.get(BRIER_KEY))
+    error = as_number(values.get(CALIBRATION_KEY))
+    if score is None and error is None:
         return ""
     parts: list[str] = []
-    if isinstance(score, (int, float)):
-        parts.append(f"brier={float(score):.4f}")
-    if isinstance(error, (int, float)):
-        parts.append(f"확률 오차={float(error):.4f}")
+    if score is not None:
+        parts.append(f"brier={score:.4f}")
+    if error is not None:
+        parts.append(f"확률 오차={error:.4f}")
     line = "확률 품질(진단, 목표로 삼을 수 없음): " + ", ".join(parts)
-    if isinstance(error, (int, float)):
+    if error is not None:
         line += (
-            f" — 예측 확률과 실제 발생률의 차이가 평균 {float(error) * 100:.1f}%p입니다"
+            f" — 예측 확률과 실제 발생률의 차이가 평균 {error * 100:.1f}%p입니다"
             f" ({N_BINS}개 구간, 개수 가중)"
         )
     elif rows is not None and rows < MIN_CALIBRATION_ROWS:

@@ -105,10 +105,10 @@ LLM 쪽에서 온 것입니다. LLM을 쓰려면 5번.
 | --- | --- |
 | (생략) | `auto` 기본. 기준선 + 남은 여유의 25% |
 | `--margin 0.5` | `auto`, 남은 여유의 50% (더 어렵게) |
-| `--goal-mode fixed --threshold 0.88` | 그 숫자를 그대로 |
-| `--goal-mode fixed` | 지표별 기본값 (`f1` 0.85, `roc_auc` 0.90 …) |
+| `--threshold 0.88` | 그 숫자를 그대로 (`fixed` 모드) |
 
-`--goal-mode auto` + `--threshold`, `--goal-mode fixed` + `--margin` 은 **거부됩니다**(8번).
+모드를 이름으로 고르는 플래그는 없습니다 — `--threshold`를 줬는지가 모드입니다.
+`--threshold` + `--margin` 은 **거부됩니다**(8번).
 
 ### 지표 — 분류 (`died` 같은 라벨 열)
 
@@ -126,7 +126,7 @@ LLM 쪽에서 온 것입니다. LLM을 쓰려면 5번.
 | 조각 | 방향 | 비고 |
 | --- | --- | --- |
 | `--metric r2` | 높을수록 좋음 | 1이 상한이라 `auto` 여유 계산이 분류와 같습니다. 음수도 나옵니다 |
-| `--metric mae` | **낮을수록 좋음** | 정답 열의 단위 그대로. `fixed` 기본값이 없어 `--threshold`나 측정된 기준선이 필요합니다 |
+| `--metric mae` | **낮을수록 좋음** | 정답 열의 단위 그대로. 지표별 기본 바가 없어 `--threshold`나 측정된 기준선이 필요합니다 |
 | `--metric rmse` | **낮을수록 좋음** | 큰 오차에 더 민감. `mae`와 같은 이유로 기본값 없음 |
 
 받는 이름은 이 아홉 개뿐입니다(별칭: `average_precision`→`pr_auc`,
@@ -136,7 +136,7 @@ LLM 쪽에서 온 것입니다. LLM을 쓰려면 5번.
 **두 목록은 섞이지 않습니다.** task는 고르는 값이 아니라 정답 열에서 읽힙니다
 (`targets.detect_task`). 연속 열에 `--metric f1`을 주면 거부가 아니라 `r2`로 **바뀌어
 실행되고**, 바꿨다는 사실이 콘솔·Critic 프롬프트·`report.md`에 같은 한 줄로 남습니다
-(8번). `--direction`은 지표가 이미 정하므로 생략하는 것이 기본입니다.
+(8번). 방향은 지표가 정하므로 고를 수 없습니다 — `mae`는 낮을수록, `f1`은 높을수록 좋습니다.
 
 ### LLM — 하나만
 
@@ -189,9 +189,9 @@ LLM 쪽에서 온 것입니다. LLM을 쓰려면 5번.
 
 ```powershell
 python -m automl_agent.main run --dataset-card examples\dataset_card.json --dry-run --thread-id t-dry-success
-python -m automl_agent.main run --dataset-card examples\dataset_card_hard.json --dry-run --scenario fail --thread-id t-dry-fail
-python -m automl_agent.main run --dataset-card examples\dataset_card_oom.json --dry-run --scenario oom --thread-id t-dry-oom
-python -m automl_agent.main run --dataset-card examples\dataset_card_crash.json --dry-run --scenario crash --thread-id t-dry-crash
+python -m automl_agent.main run --dataset-card examples\dataset_card_hard.json --dry-run fail --thread-id t-dry-fail
+python -m automl_agent.main run --dataset-card examples\dataset_card_oom.json --dry-run oom --thread-id t-dry-oom
+python -m automl_agent.main run --dataset-card examples\dataset_card_crash.json --dry-run crash --thread-id t-dry-crash
 ```
 
 이 카드들에는 `baseline`이 없어서 `auto`가 지표별 기본값으로 폴백하고, 그렇다고
@@ -334,25 +334,25 @@ python -m automl_agent.scripts.predict `
 ## 8. 거부되는 조합
 
 ```powershell
-# auto + --threshold
-python -m automl_agent.main run --dataset-card local\my_card.json --goal-mode auto --threshold 0.9 --thread-id t-x
+# --threshold + --margin (바를 정하는 방식이 서로 다릅니다)
+python -m automl_agent.main run --dataset-card local\my_card.json --threshold 0.9 --margin 0.5 --thread-id t-x
 
-# fixed + --margin
-python -m automl_agent.main run --dataset-card local\my_card.json --goal-mode fixed --margin 0.5 --thread-id t-x
+# 알 수 없는 시나리오 (argparse가 바로 거부)
+python -m automl_agent.main run --dataset-card local\my_card.json --dry-run clever --thread-id t-x
 
 # 이미 쓴 thread-id (--force 없이) — run_config.json은 그대로 남습니다
 python -m automl_agent.main run --dataset-card local\my_card.json --thread-id t-auto
 
-# 없는 지표 이름 / 바가 없는 지표를 fixed로 / 실행을 무의미하게 만드는 값
+# 없는 지표 이름 / 바가 없는 지표를 바 없이 / 실행을 무의미하게 만드는 값
 python -m automl_agent.main run --dataset-card local\my_card.json --metric auroc --thread-id t-x
-python -m automl_agent.main run --dataset-card local\my_reg_card.json --goal-mode fixed --metric mae --thread-id t-x
+python -m automl_agent.main run --dataset-card local\my_reg_card.json --metric mae --thread-id t-x
 python -m automl_agent.main run --dataset-card local\my_card.json --max-iterations -1 --thread-id t-x
 ```
 
 ```
-오류: auto 모드는 카드의 기준선에서 임계값을 도출하므로 --threshold 와 함께 쓸 수 없습니다.
-  - 값을 못박으려면: --goal-mode fixed --threshold 0.9
-  - 요구 수준만 조절하려면: --margin 0.5
+오류: --threshold 와 --margin 은 함께 쓸 수 없습니다 — 바를 정하는 방식이 서로 다릅니다.
+  - 값을 못박으려면: --threshold 0.9
+  - 기준선에서 도출하되 요구 수준만 조절하려면: --margin 0.5  (기준선에서 남은 여유의 50%)
 ```
 
 조용히 무시된 플래그가 최악이라서 모순되는 조합은 실행 전에 종료합니다. 반면

@@ -20,6 +20,7 @@ from typing import Any
 
 from ..config import RunConfig
 from ..llm.client import LLMClient, LLMUnavailable, archive_prompt_only, render_prompt
+from ..scoring.intervals import as_number
 from ..scoring.metrics import TASK_CLASSIFICATION, TASK_REGRESSION, card_task
 from ..state import AutoMLState, state_int
 
@@ -479,15 +480,16 @@ def _weight_map(value: Mapping[Any, Any]) -> dict[int, float] | None:
     low, high = WEIGHT_RANGE
     clean: dict[int, float] = {}
     for raw_code, raw_weight in value.items():
-        if isinstance(raw_code, bool) or isinstance(raw_weight, bool):
+        # 코드 쪽은 문자열로 올 수 있어 따로 막는다 — ``True``는 ``int()``를 통과해 클래스 1이 된다.
+        if isinstance(raw_code, bool):
             return None
-        if not isinstance(raw_weight, (int, float)):
+        weight = as_number(raw_weight)
+        if weight is None:
             return None
         try:
             code = int(str(raw_code).strip())
         except (TypeError, ValueError):
             return None
-        weight = float(raw_weight)
         if not math.isfinite(weight) or weight <= 0 or code < 0 or code in clean:
             return None
         clean[code] = min(max(weight, low), high)
@@ -591,7 +593,7 @@ def digest_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:
         # Critic의 ledger가 자기가 추적하는 baseline에 대고 렌더하는 조종 계기다(``nodes/critic.py``).
         # digest로 복사되면 그 baseline 없이 도착하고, 보고서에서는 떼어 둔 점수 옆에 앉아 둘이 같은
         # 질문에 답하는 것처럼 보인다 — 왜 그렇지 않은지는 ``nodes/holdout.py``.
-        "metrics": {k: v for k, v in metrics.items() if isinstance(v, (int, float))},
+        "metrics": {k: v for k, v in metrics.items() if as_number(v) is not None},
         "train_time_sec": result.get("train_time_sec"),
         "critic": attempt.get("critic"),
     }

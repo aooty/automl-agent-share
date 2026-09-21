@@ -25,6 +25,7 @@ from .scoring.intervals import (
     PAIRED_REASONS,
     PAIRED_STATUSES,
     RESAMPLE_UNITS,
+    as_number,
 )
 from .scoring.metrics import METRICS, canonical
 
@@ -186,8 +187,12 @@ def _is_scalar(value: Any) -> bool:
 
 
 def _is_number(value: Any) -> bool:
-    """실수/정수이고 ``bool``이 아닐 때만 True. 값은 바꾸지 않는다 — ``414``는 ``414.0``이 아니다."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """실수/정수이고 ``bool``이 아닐 때만 True. 값은 바꾸지 않는다 — ``414``는 ``414.0``이 아니다.
+
+    무엇이 숫자로 통하는지는 :func:`automl_agent.scoring.intervals.as_number` 한 곳에서만 정한다.
+    여기는 값을 쓰지 않고 통과 여부만 묻는 자리라서 판정만 빌려 온다.
+    """
+    return as_number(value) is not None
 
 
 class CardSchemaError(ValueError):

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .intervals import CI_LEVEL, contains
+from .intervals import CI_LEVEL, as_number, contains
 from .metrics import ALIASES, METRICS, MINIMIZE, card_task, direction_of, spec, substitute_metric
 from .ranking import card_ceiling, passable_margin, required_ks
 
@@ -108,10 +108,7 @@ def _reference(card: dict[str, Any], metric: str) -> tuple[float | None, float |
 
     def score(section: str) -> float | None:
         scores = baseline_block.get(section)
-        raw = scores.get(metric) if isinstance(scores, dict) else None
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            return None
-        return float(raw)
+        return as_number(scores.get(metric) if isinstance(scores, dict) else None)
 
     return score("scores"), score("chance")
 
@@ -300,15 +297,15 @@ def _note_baseline_interval(
     bound = scores.get(metric) if isinstance(scores, dict) else None
     if not isinstance(bound, dict):
         return
-    low, high = bound.get("low"), bound.get("high")
-    if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
+    low, high = as_number(bound.get("low")), as_number(bound.get("high"))
+    if low is None or high is None:
         return
-    reference["baseline_ci"] = [round(float(low), 4), round(float(high), 4)]
+    reference["baseline_ci"] = [round(low, 4), round(high, 4)]
     # ``unit``이 독법에 중요하다: 그룹 단위 구간이 넓고 정직한 쪽이며, 군집된 데이터에서 바가 구간 안에
     # 들어갈 수 있는 이유가 그 폭이다.
     if isinstance(interval, dict) and interval.get("unit"):
         reference["baseline_ci_unit"] = str(interval["unit"])
-    if contains((float(low), float(high)), threshold):
+    if contains((low, high), threshold):
         reference["inside_baseline_ci"] = True
 
 
@@ -324,8 +321,8 @@ def derive_goal(
     """두 모드 중 하나에 대한 ``goal`` 채널을 세운다.
 
     ``threshold``를 대는 것이 ``fixed``를 고르는 것*이므로*, 모드와 충돌하는 대신 모드를 함의한다 —
-    숫자를 건넨 호출자가 그것이 조용히 무시되는 일을 겪지 않는다. CLI는
-    ``--goal-mode auto --threshold``를 아예 거절하므로, 그 추론은 의도가 모호하지 않은 곳에만 걸린다.
+    숫자를 건넨 호출자가 그것이 조용히 무시되는 일을 겪지 않는다. CLI에는 모드를 이름으로 고르는
+    플래그가 아예 없으므로, 그 추론은 의도가 모호할 수 없는 곳에만 걸린다.
 
     ``auto``에서 이것은 ``--data`` 경로에서 두 번 불린다: 한 번은 ``initial_state``에서(아직 카드가
     없으므로 지표별 기본값), 한 번은 카드가 생긴 뒤 ``profiling`` 노드에서. 두 번째가 첫 번째를 덮어쓰고,
@@ -434,7 +431,7 @@ def missing_bar_message(metric: str) -> str:
     return (
         f"{metric}는 정답 열의 단위로 나오는 지표라서 이식 가능한 기본 목표값이 없습니다 — "
         f"0.85 같은 숫자를 넣으면 모델이 아니라 그 열의 단위에 대한 바가 됩니다.\n"
-        f"  - 요구 수준을 알고 있다면: --goal-mode fixed --threshold <{metric} 값>\n"
+        f"  - 요구 수준을 알고 있다면: --threshold <{metric} 값>\n"
         "  - 데이터에서 도출하려면: 기준선이 측정된 카드로 auto 모드를 쓰십시오 "
         "(`profile`을 --no-baseline 없이 실행)"
     )
@@ -493,7 +490,7 @@ def describe(goal: dict[str, Any]) -> str:
             # 맞는 것이다) margin이다.
             line += (
                 f" (도달 불가) — 오차 0을 요구하는 바입니다. --margin을 1보다 작게 두거나, "
-                f"실제 허용 오차를 알고 있다면 --goal-mode fixed --threshold <{metric} 값>으로 "
+                f"실제 허용 오차를 알고 있다면 --threshold <{metric} 값>으로 "
                 "직접 지정하십시오"
             )
         if reference.get("raised_to_ranking_floor"):

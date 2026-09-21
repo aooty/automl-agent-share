@@ -28,11 +28,11 @@ from .config import (
     API_KEY_ENV,
     ARTIFACTS_ROOT,
     BEDROCK_FLAG_ENV,
+    DEFAULT_DRY_RUN_SCENARIO,
     DEFAULT_KEEP_MODELS,
     DEFAULT_MAX_ITERATIONS,
     DEFAULT_METRIC,
     DEFAULT_TIME_BUDGET_SEC,
-    DIRECTIONS,
     DRY_RUN_SCENARIOS,
     KEEP_MODELS_MODES,
     RunConfig,
@@ -58,6 +58,7 @@ from .scoring.goal import (
     describe,
     resolve_goal,
 )
+from .scoring.intervals import as_number
 from .scoring.metrics import GOAL_METRICS
 from .state import describe_budget
 from .threads import thread_state
@@ -76,8 +77,9 @@ def outcome_text(metric: str, score: Any, error_type: Any) -> str:
     한 시도의 결말을 한 조각으로 적는 유일한 자리 — 반복 요약 줄과 ``show``의 시도 이력이 같은
     문장을 써야 한다.
     """
-    if isinstance(score, (int, float)):
-        return f"{metric}={float(score):.4f}"
+    number = as_number(score)
+    if number is not None:
+        return f"{metric}={number:.4f}"
     return f"실패({error_type or 'unknown'})"
 
 
@@ -371,8 +373,8 @@ def print_outcome(state: dict[str, Any], config: RunConfig) -> None:
     print("")
     print("=" * 70)
     print(f"종료 사유: {STOP_REASON_LABELS.get(reason, reason)}")
-    score = best.get("score")
-    if isinstance(score, (int, float)):
+    score = as_number(best.get("score"))
+    if score is not None:
         print(
             f"최고 성능: {best.get('metric')}={score:.4f} "
             f"(iteration {best.get('iteration')}, model={best.get('model')})"
@@ -444,24 +446,23 @@ def command_profile(args: argparse.Namespace) -> int:
 
 
 def resolve_goal_mode(args: argparse.Namespace) -> str:
-    """플래그에서 목표 모드를 정하고, 서로 모순되는 조합은 거절한다.
+    """어느 플래그를 줬는지에서 목표 모드를 정하고, 둘 다 준 것은 거절한다.
+
+    모드를 이름으로 고르는 플래그는 없다. 바를 정하는 방식이 둘이고 각각 자기 플래그를 갖고 있으니
+    모드는 그 선택에서 읽으면 되고, 세 번째 플래그는 같은 사실을 두 번 말하면서 어긋날 여지만 만든다 —
+    ``--goal-mode auto --threshold 0.9``가 그 어긋남이었다.
 
     조용히 무시된 ``--threshold``(또는 ``--margin``)가 여기서 가장 나쁜 결말이다.
     """
-    mode = args.goal_mode or (MODE_FIXED if args.threshold is not None else MODE_AUTO)
-    if mode == MODE_AUTO and args.threshold is not None:
+    if args.threshold is not None and args.margin is not None:
         raise SystemExit(
-            "오류: auto 모드는 임계값을 카드의 기준선에서 스스로 도출하므로 "
-            "--threshold 와 함께 쓸 수 없습니다.\n"
-            "  - 값을 못박으려면: --goal-mode fixed --threshold 0.9\n"
-            "  - 요구 수준만 조절하려면: --margin 0.5  (기준선에서 남은 여유의 50%)"
+            "오류: --threshold 와 --margin 은 함께 쓸 수 없습니다 — 바를 정하는 방식이 서로 "
+            "다릅니다.\n"
+            "  - 값을 못박으려면: --threshold 0.9\n"
+            "  - 기준선에서 도출하되 요구 수준만 조절하려면: --margin 0.5  "
+            "(기준선에서 남은 여유의 50%)"
         )
-    if mode == MODE_FIXED and args.margin is not None:
-        raise SystemExit(
-            "오류: --margin 은 기준선에서 목표를 도출하는 auto 모드에서만 의미가 있습니다.\n"
-            "  - fixed 모드에서 값을 바꾸려면 --threshold 를 쓰세요."
-        )
-    return str(mode)
+    return MODE_FIXED if args.threshold is not None else MODE_AUTO
 
 
 def command_run(args: argparse.Namespace) -> int:
@@ -481,12 +482,12 @@ def command_run(args: argparse.Namespace) -> int:
         goal_mode=goal_mode,
         threshold=args.threshold,
         goal_margin=DEFAULT_MARGIN if args.margin is None else args.margin,
-        direction=args.direction,
         max_iterations=args.max_iterations,
         time_budget_sec=args.time_budget_sec,
         search_past_goal=args.search_past_goal,
-        dry_run=args.dry_run,
-        dry_run_scenario=args.scenario,
+        # 한 플래그가 둘을 정한다: 값이 있으면 모킹이 켜지고 그 값이 시나리오다.
+        dry_run=args.dry_run is not None,
+        dry_run_scenario=args.dry_run or DEFAULT_DRY_RUN_SCENARIO,
         no_llm=args.no_llm,
         seed=args.seed,
         llm_model=args.model,
@@ -567,7 +568,7 @@ def command_run(args: argparse.Namespace) -> int:
         if card:
             print(
                 "  경고: 이 카드에는 기준선(baseline)이 없어 auto 모드가 데이터셋에 맞출 수 "
-                "없습니다. `profile` 로 카드를 다시 만들거나 --goal-mode fixed 를 쓰세요."
+                "없습니다. `profile` 로 카드를 다시 만들거나 --threshold 로 바를 직접 주세요."
             )
         else:
             print("  profiling이 기준선을 측정하면 다시 도출됩니다")
@@ -683,18 +684,17 @@ def run_row(directory: Path) -> tuple[str, ...]:
 
     def score_of(block: Any) -> str:
         value = (block or {}).get("metrics", {}).get(metric) if isinstance(block, dict) else None
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            return "—"
-        return f"{float(value):.4f}"
+        number = as_number(value)
+        return "—" if number is None else f"{number:.4f}"
 
     best = digest.get("best") or {}
-    best_score = best.get("score")
+    best_score = as_number(best.get("score"))
     holdout = digest.get("holdout") or {}
     return (
         directory.name,
         mode,
         metric or "—",
-        f"{float(best_score):.4f}" if isinstance(best_score, (int, float)) else "—",
+        f"{best_score:.4f}" if best_score is not None else "—",
         score_of(holdout) if holdout.get("status") == "ok" else "—",
         # history.json이 없는 실행은 아직 보고하지 않았다 — 돌고 있거나 report 노드 앞에서 죽었다.
         # 어느 쪽이든 개수는 0이 아니라 알 수 없는 것이다.
@@ -961,34 +961,21 @@ def build_parser() -> argparse.ArgumentParser:
         "(분류 타겟에 rmse 등) 그 task의 기본 지표로 바꿔 실행하고, 바꿨다는 사실을 실행 시작 "
         "시점과 report에 적습니다",
     )
-    run_parser.add_argument(
-        "--goal-mode",
-        choices=list(GOAL_MODES),
-        default=None,
-        help=f"목표 임계값을 정하는 방식 (기본: {DEFAULT_MODE}, --threshold 를 주면 fixed). "
-        "auto = 카드의 기준선(logreg)에서 데이터셋마다 도출 (--margin 으로 조절). "
-        "fixed = --threshold 로 준 값을 그대로, 안 주면 지표별 기본값.",
-    )
+    # 바를 정하는 플래그는 둘이고, 모드를 이름으로 고르는 세 번째는 없다. 어느 쪽을 줬는지가 모드를
+    # 말한다 — ``resolve_goal_mode``.
     run_parser.add_argument(
         "--threshold",
         type=float,
         default=None,
-        help="fixed 모드의 목표 임계값. 이 값을 주면 --goal-mode fixed 로 간주합니다. "
-        "auto 모드와 함께 쓸 수 없습니다.",
+        help=f"목표 임계값을 이 값으로 못박습니다 (fixed 모드). 생략하면 {DEFAULT_MODE} 모드로, "
+        "카드의 기준선(logreg)에서 데이터셋마다 도출합니다. --margin 과 함께 쓸 수 없습니다.",
     )
     run_parser.add_argument(
         "--margin",
         type=float,
         default=None,
-        help=f"auto 모드에서 기준선의 남은 여유 중 목표로 삼을 비율 (기본: {DEFAULT_MARGIN}). "
-        "fixed 모드에서는 의미가 없습니다.",
-    )
-    run_parser.add_argument(
-        "--direction",
-        choices=list(DIRECTIONS),
-        default=None,
-        help="지표 최적화 방향. 생략하면 지표에서 정해집니다 (mae·rmse는 minimize, 나머지는 "
-        "maximize). 지표와 다른 방향을 주면 거부합니다 — 방향은 취향이 아닙니다.",
+        help=f"기준선에 남은 여유 중 목표로 삼을 비율 (기본: {DEFAULT_MARGIN}). "
+        f"{MODE_AUTO} 모드에서만 의미가 있으므로 --threshold 와 함께 쓸 수 없습니다.",
     )
     run_parser.add_argument(
         "--max-iterations", type=int, default=DEFAULT_MAX_ITERATIONS, help="최대 반복 횟수 (기본: 5)"
@@ -1018,17 +1005,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="같은 thread_id의 기존 체크포인트를 삭제하고 처음부터 다시 실행합니다",
     )
-    run_parser.add_argument("--dry-run", action="store_true", help="LLM과 학습을 모두 모킹합니다")
+    # 시나리오가 따로 있던 플래그가 아니라 이것의 값이다. 따로 두면 ``--scenario oom`` 단독처럼 아무
+    # 뜻도 없는 조합을 표현할 수 있고, 그것을 쓴 사람은 오류가 아니라 침묵을 받았다.
+    run_parser.add_argument(
+        "--dry-run",
+        nargs="?",
+        const=DEFAULT_DRY_RUN_SCENARIO,
+        default=None,
+        choices=list(DRY_RUN_SCENARIOS),
+        metavar="시나리오",
+        help="LLM과 학습을 모두 모킹합니다. 값을 주면 모의 학습이 그 시나리오를 따라갑니다 "
+        f"(기본: {DEFAULT_DRY_RUN_SCENARIO}, 가능한 값: {', '.join(DRY_RUN_SCENARIOS)})",
+    )
     run_parser.add_argument(
         "--no-llm",
         action="store_true",
         help="학습은 실제로 하되 추론 노드는 규칙 기반 폴백으로 실행합니다 (API 키 불필요)",
-    )
-    run_parser.add_argument(
-        "--scenario",
-        choices=list(DRY_RUN_SCENARIOS),
-        default="success",
-        help="--dry-run에서 모의 학습이 따라갈 시나리오 (기본: success)",
     )
     run_parser.add_argument(
         "--on-missing-target",
