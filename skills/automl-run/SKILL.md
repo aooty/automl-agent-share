@@ -54,11 +54,43 @@ description: >
   플러그인 설치 폴더를 기본값으로 제시하지 마라. 사용자가 이미 경로를 말했으면 확인만 받는다
 - **파이썬** — 그 디렉터리에 venv가 있나. 윈도는 `.venv\Scripts\python.exe`, 그 밖은
   `.venv/bin/python`. 없으면 어느 파이썬으로 설치할지 정한다
-- **심판 자격** — `ANTHROPIC_API_KEY`인가 `AUTOML_USE_BEDROCK`+`AWS_REGION`인가
-  ([README.md](README.md)의 「자격 증명」). **존재만** 확인하고 값을 출력하지 마라. 없으면 거기서
-  멈춘다 — critic 없이 도는 실행은 이 플러그인이 약속한 것이 아니다
-- **제안자** — `ollama list`에 `gemma4:12b`가 있나. 없으면 `ollama pull gemma4:12b`를 사용자가
-  돌릴지 정한다. 4단계를 보라: 죽어 있어도 실행은 실패하지 않고 조용히 규칙으로 떨어진다
+
+**모델 두 개는 묻고, 답을 명령으로 확인한다.** 환경변수를 몰래 먼저 들여다보고 넘어가지 마라 — 이 컴퓨터에
+무엇이 있는지는 사용자가 안다. 두 질문을 위 항목들과 같은 `AskUserQuestion` 카드에 묶어라.
+
+**질문 1 — Claude(심판)를 어떻게 쓰나?** ([README.md](README.md)의 「자격 증명」)
+
+| 답 | 확인 |
+| --- | --- |
+| Anthropic API 키 | `ANTHROPIC_API_KEY`가 있는가 |
+| AWS Bedrock | `AUTOML_USE_BEDROCK=1`과 `AWS_REGION`이 있는가 |
+| 없다 | **여기서 멈춘다.** critic 없이 도는 실행은 이 플러그인이 약속한 것이 아니다 |
+
+- **키를 대화창에 붙여 넣게 하지 마라.** 붙여 넣은 키는 대화 기록에 남는다. 사용자가 이미 붙여 넣었다면
+  그 값을 다시 적지 말고, 그 키는 폐기하고 새로 발급받으라고 말해라
+- 확인은 **존재만** — 값을 출력하는 명령(`echo $env:ANTHROPIC_API_KEY` 따위)은 쓰지 마라:
+
+  ```bash
+  python -c "import os; print({k: bool(os.environ.get(k)) for k in ('ANTHROPIC_API_KEY', 'AUTOML_USE_BEDROCK', 'AWS_REGION')})"
+  ```
+- 없다고 나오면 설정 방법을 안내한다. **사용자가 따로 연 PowerShell의 `$env:`는 이 세션에 닿지 않는다** —
+  명령은 Claude Code의 셸에서 돌기 때문이다. 그래서 영구 설정 후 Claude Code를 재시작하게 한다:
+
+  ```powershell
+  setx ANTHROPIC_API_KEY "<키>"      # 사용자가 직접 친다. 그다음 Claude Code 재시작
+  ```
+
+**질문 2 — 이 컴퓨터에 ollama가 있나?**
+
+| 답 | 할 일 |
+| --- | --- |
+| 있다 | `ollama list`로 확인한다. 서버가 안 떠 있으면 이 명령 자체가 실패한다. `gemma4:12b`가 목록에 없으면 사용자가 `ollama pull gemma4:12b`를 돌린다(수 GB) |
+| 없다 — 설치하겠다 | 설치(`winget install Ollama.Ollama`, 또는 https://ollama.com)와 `ollama pull gemma4:12b`를 사용자가 하고, 끝났다고 하면 `ollama list`로 확인한다 |
+| 없다 — Claude가 제안도 맡는다 | `--proposer-model`을 **빼고** 돌린다. 4단계의 고정 조합에서 벗어나는 것이지만 사용자가 인터뷰에서 고른 것이므로 "명시적 요구"다. planning·model_selection도 Claude를 부르므로 **API 비용이 늘어난다**고 말해라 |
+
+**확인이 실패한 채로 넘어가지 마라.** ollama가 죽어 있어도 실행은 오류 없이 끝까지 돈다 — 매 반복의 계획이
+규칙으로 조용히 폴백하고, 그 실행은 모델이 아니라 규칙을 잰 것이 된다(4단계). 이것을 막는 것은 코드가 아니라
+이 질문이다.
 
 ### 1. 데이터셋을 묻는다
 
@@ -180,6 +212,7 @@ python -m automl_agent.main run --dataset-card local/<이름>_card.json --thread
 ```
 
 - **3단계에서 확인받은 값을 그대로 쓴다.** 승인받은 뒤에 말없이 바꾸지 마라
+- 0단계에서 Claude가 제안까지 맡기로 했으면 `--proposer-model ollama:gemma4:12b`를 뺀다
 - `--metric`을 생략해서 기본값으로 넘기지 마라 — 어느 지표를 목표로 잡았는지가 실행이 무엇을
   재는지 그 자체다
 - `fixed`를 받았으면 `--threshold <수>`를 붙인다. `auto`면 아무것도 붙이지 않는다(기본)
@@ -200,6 +233,7 @@ python -m automl_agent.main run --dataset-card local/<이름>_card.json --thread
 - holdout 점수, 목표선, 달성/미달. 지표의 chance도 함께 (0.5가 아닐 수 있다)
 - thread_id와 **쓴 `--artifacts-root`** — 나중에 `show`로 다시 열려면 둘 다 필요하다
 - 3단계에서 확인받은 지표와 그 이유 한 줄
+- 제안자가 무엇이었나 — `ollama:gemma4:12b`인가, 0단계에서 Claude로 바꿨나
 - 1단계에서 남긴 가정 — 그룹 열 없이 돌렸으면 그 한 줄을 여기에
 - `plan_source`가 `fallback`인 반복이 있었는지. 절반이 `fallback`이면 그 실행은 모델이 아니라
   규칙을 잰 것이다
