@@ -42,6 +42,7 @@ from .config import (
     use_bedrock,
 )
 from .dataset.caveats import CAVEATS_KEY, card_caveats, merge_caveats
+from .dataset.source import as_source
 from .dataset.targets import DEFAULT_TARGET_MISSING_POLICY, TARGET_MISSING_POLICIES
 from .graph import build_graph, build_state_graph, make_checkpointer
 
@@ -204,8 +205,12 @@ def load_run_config(thread_id: str, artifacts_root: Path | None = None) -> RunCo
         )
     fields = {field.name for field in dataclasses.fields(RunConfig)}
     kwargs: dict[str, Any] = {key: value for key, value in raw.items() if key in fields}
-    for key in ("dataset_card_path", "data_path"):
-        kwargs[key] = Path(str(kwargs[key])) if kwargs.get(key) else None
+    kwargs["dataset_card_path"] = (
+        Path(str(kwargs["dataset_card_path"])) if kwargs.get("dataset_card_path") else None
+    )
+    # ``data_path``만 ``as_source``를 지나는 이유: 접속 URL일 수 있고, 그것을 ``Path``에 넣으면
+    # 윈도에서 조용히 망가진다 — 재개된 실행이 아무 데도 접속하지 못하고 오류도 나지 않는다.
+    kwargs["data_path"] = as_source(kwargs.get("data_path")) or None
     kwargs["artifacts_root"] = base
     return RunConfig(**kwargs)
 
@@ -254,7 +259,14 @@ def initial_state(card: dict[str, Any], config: RunConfig) -> dict[str, Any]:
     프롬프트 가드에도 등록되므로, 그것을 카드에 되돌려 놓는 회귀는 API로 보내지는 대신 실행을
     멈춘다.
     """
-    reference = data_ref(card, config.data_path, config.target_column, config.group_column)
+    reference = data_ref(
+        card,
+        config.data_path,
+        config.target_column,
+        config.group_column,
+        table=config.data_table,
+        query=config.data_query,
+    )
     if reference.get("path"):
         register_private(reference["path"])
     return {
@@ -421,6 +433,8 @@ def command_profile(args: argparse.Namespace) -> int:
             *[item for note in (args.caveats or []) for item in ("--caveat", str(note))],
             *(["--group-column", str(args.group_column)] if args.group_column else []),
             *(["--no-baseline"] if args.no_baseline else []),
+            *(["--table", str(args.table)] if args.table else []),
+            *(["--query", str(args.query)] if args.query else []),
         ]
     )
     if code != 0:
@@ -493,7 +507,9 @@ def command_run(args: argparse.Namespace) -> int:
         llm_model=args.model,
         proposer_model=args.proposer_model,
         dataset_card_path=Path(args.dataset_card) if args.dataset_card else None,
-        data_path=Path(args.data) if args.data else None,
+        data_path=as_source(args.data) or None,
+        data_table=args.table,
+        data_query=args.query,
         target_column=args.target,
         on_missing_target=args.on_missing_target,
         caveats=tuple(args.caveats or ()),
@@ -767,6 +783,21 @@ def best_iteration(config: RunConfig) -> int | None:
     return None
 
 
+def default_prediction_name(args: argparse.Namespace) -> str:
+    """``--out`` 없이 부른 ``predict``가 쓸 파일 이름.
+
+    파일 출처에서는 입력 파일 이름이다. DB 출처에서는 그럴 이름이 없고, 접속 URL의 ``stem``은
+    호스트 조각이 되어 파일 이름에 접속 정보를 적게 된다. 그래서 테이블 이름을 쓰고, ``--query``에는
+    이름이 없으므로 ``query``로 둔다 — 같은 실행에서 두 번 부르면 덮어쓰므로 그때는 ``--out``을
+    주는 것이 맞다.
+    """
+    if getattr(args, "table", None):
+        return f"{args.table}_predictions.csv"
+    if getattr(args, "query", None):
+        return "query_predictions.csv"
+    return f"{Path(args.data).stem}_predictions.csv"
+
+
 def command_predict(args: argparse.Namespace) -> int:
     """끝난 실행이 고른 모델을 새 CSV에 적용한다.
 
@@ -809,9 +840,7 @@ def command_predict(args: argparse.Namespace) -> int:
             "  - 이 파일이 저장되기 전 버전에서 만든 실행이면, 같은 데이터로 다시 학습해야 합니다."
         )
 
-    out_path = (
-        Path(args.out) if args.out else config.run_dir / "predict" / f"{Path(args.data).stem}_predictions.csv"
-    )
+    out_path = Path(args.out) if args.out else config.run_dir / "predict" / default_prediction_name(args)
     report_path = Path(args.report) if args.report else out_path.with_suffix(".report.json")
     code = predict_main(
         [
@@ -827,6 +856,8 @@ def command_predict(args: argparse.Namespace) -> int:
             str(report_path),
             *(["--id-column", str(args.id_column)] if args.id_column else []),
             *(["--label-column", str(args.label_column)] if args.label_column else []),
+            *(["--table", str(args.table)] if args.table else []),
+            *(["--query", str(args.query)] if args.query else []),
         ]
     )
     if code != 0:
@@ -876,7 +907,22 @@ def build_parser() -> argparse.ArgumentParser:
     profile_parser = subparsers.add_parser(
         "profile", help="원본 데이터에서 데이터셋 카드를 생성합니다 (집계만, 원본 행 없음)"
     )
-    profile_parser.add_argument("--data", required=True, help="프로파일링할 CSV 경로")
+    profile_parser.add_argument(
+        "--data",
+        required=True,
+        help="프로파일링할 출처. CSV 경로, sqlite 파일 경로(.db/.sqlite/.sqlite3), 또는 "
+        "SQLAlchemy 접속 URL. DB 출처에는 --table 또는 --query 가 필요합니다",
+    )
+    profile_parser.add_argument(
+        "--table",
+        default=None,
+        help="DB 출처 전용: 이 테이블의 모든 행을 읽습니다 (SELECT * FROM <이름> 의 줄임)",
+    )
+    profile_parser.add_argument(
+        "--query",
+        default=None,
+        help="DB 출처 전용: 이 SELECT의 결과 행이 데이터셋입니다",
+    )
     profile_parser.add_argument("--target", required=True, help="정답(label) 컬럼 이름")
     profile_parser.add_argument("--out", required=True, help="생성할 카드 JSON 경로")
     profile_parser.add_argument(
@@ -947,8 +993,19 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--data",
         default=None,
-        help="원본 CSV 경로. 카드 없이 주면 profiling 노드가 카드를 만듭니다. "
-        "이 경로는 data_ref 채널에만 들어가고 프롬프트에는 포함되지 않습니다.",
+        help="원본 데이터의 출처 — CSV 경로, sqlite 파일 경로(.db/.sqlite/.sqlite3), 또는 "
+        "SQLAlchemy 접속 URL. 카드 없이 주면 profiling 노드가 카드를 만듭니다. "
+        "이 문자열은 data_ref 채널에만 들어가고 프롬프트에는 포함되지 않습니다.",
+    )
+    run_parser.add_argument(
+        "--table",
+        default=None,
+        help="DB 출처 전용: 이 테이블의 모든 행으로 실행합니다 (SELECT * FROM <이름> 의 줄임)",
+    )
+    run_parser.add_argument(
+        "--query",
+        default=None,
+        help="DB 출처 전용: 이 SELECT의 결과 행으로 실행합니다. --table 과 같이 쓸 수 없습니다",
     )
     run_parser.add_argument("--target", default=None, help="정답 컬럼 이름 (--data 를 쓸 때 필수)")
     # 자유 문자열이 아니라 choices: 학습기가 낼 수 없는 지표는 실행 내내 goal_met을 False로 두고,
@@ -1085,7 +1142,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     predict_parser = subparsers.add_parser("predict", help="끝난 실행이 선택한 모델을 새 CSV에 적용합니다")
     predict_parser.add_argument("--thread-id", required=True, help="어느 실행의 모델을 쓸지")
-    predict_parser.add_argument("--data", required=True, help="예측할 CSV 경로")
+    predict_parser.add_argument(
+        "--data",
+        required=True,
+        help="예측할 출처. CSV 경로, sqlite 파일 경로(.db/.sqlite/.sqlite3), 또는 "
+        "SQLAlchemy 접속 URL. DB 출처에는 --table 또는 --query 가 필요합니다",
+    )
+    predict_parser.add_argument(
+        "--table",
+        default=None,
+        help="DB 출처 전용: 이 테이블의 모든 행을 예측합니다",
+    )
+    predict_parser.add_argument(
+        "--query",
+        default=None,
+        help="DB 출처 전용: 이 SELECT의 결과 행이 예측할 배치입니다",
+    )
     predict_parser.add_argument(
         "--out",
         default=None,

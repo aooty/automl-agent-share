@@ -263,6 +263,8 @@ def data_ref(
     path: Any = None,
     target_column: str | None = None,
     group_column: str | None = None,
+    table: str | None = None,
+    query: str | None = None,
 ) -> dict[str, Any]:
     """비공개 ``data_ref`` 채널을 만든다. 명시된 인자가 카드를 이긴다.
 
@@ -281,6 +283,12 @@ def data_ref(
     grouped = group_column or declared.get("group_column")
     if grouped:
         reference["group_column"] = str(grouped)
+    # DB 출처는 경로만으로 어느 행인지 정해지지 않는다. 질의가 ``path``와 같은 채널로 오는 이유도
+    # 같다 — 어떤 행이 존재하는지를 정하므로 프롬프트가 볼 수 없다.
+    for key, value in (("table", table), ("query", query)):
+        resolved = value or declared.get(key)
+        if resolved:
+            reference[key] = str(resolved)
     return reference
 
 

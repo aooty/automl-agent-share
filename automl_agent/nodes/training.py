@@ -350,6 +350,11 @@ def data_block(card: dict[str, Any], reference: dict[str, Any] | None = None) ->
             # 전달만 하고 기본값을 세우지 않는다: 카드의 baseline이 측정된 분할 규약이 train.py가
             # 재현하는 것이어야 한다.
             block["group_column"] = str(declared["group_column"])
+        for key in ("table", "query"):
+            # DB 출처에서 어느 행을 읽는가. 카드가 프로파일된 행과 학습되는 행이 같아야 하므로
+            # 같은 참조에서 그대로 옮긴다.
+            if declared.get(key):
+                block[key] = str(declared[key])
         return block
 
     difficulty = dict(card.get("difficulty") or {})

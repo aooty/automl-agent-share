@@ -53,6 +53,7 @@ config 모양
       "preprocessing": {"impute": "median", "scale": true},
       "target_missing": {"policy": "reject" | "drop"},
       "data": {"path": null, "target_column": "target",
+               "table": null, "query": null,
                "synthetic": {"n_samples": 5000, "n_features": 20, ...}},
       "metric": "f1",
       "seed": 42,
@@ -111,6 +112,7 @@ from automl_agent.dataset.pipeline import (  # noqa: E402
     STEP_SCALE as PIPELINE_STEP_SCALE,
 )
 from automl_agent.dataset.pipeline import build_steps  # noqa: E402
+from automl_agent.dataset.source import load_frame  # noqa: E402
 from automl_agent.dataset.targets import (  # noqa: E402
     DEFAULT_TARGET_MISSING_POLICY,
     detect_task,
@@ -267,10 +269,8 @@ def load_data(
     declared_task = str(cfg.get("task") or TASK_CLASSIFICATION)
 
     if path:
-        import pandas as pd
-
         target = str(data.get("target_column") or "target")
-        frame = pd.read_csv(path)
+        frame = load_frame(path, table=data.get("table"), query=data.get("query"))
         if target not in frame.columns:
             raise ValueError(f"target_column {target!r} not found in {path}")
         y_series = frame[target]

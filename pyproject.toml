@@ -24,6 +24,10 @@ xgboost = ["xgboost>=2.0"]
 # AUTOML_USE_BEDROCK=1 only: the SDK signs those requests with SigV4 via botocore.
 # The direct ANTHROPIC_API_KEY route needs none of this.
 bedrock = ["anthropic[bedrock]>=0.60"]
+# Connection-URL sources only (postgres, mysql, ...). A sqlite file path needs none of this:
+# sqlite3 is in the standard library. The DBAPI driver is separate and yours to pick —
+# psycopg for postgres, pymysql for mysql.
+db = ["sqlalchemy>=2.0"]
 dev = ["ruff>=0.6", "mypy>=1.11"]
 
 [tool.setuptools.packages.find]

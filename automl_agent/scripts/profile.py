@@ -70,6 +70,7 @@ from automl_agent.dataset.sentinels import (  # noqa: E402
     describe_sentinels,
     detect_sentinels,
 )
+from automl_agent.dataset.source import as_source, load_frame, source_kind  # noqa: E402
 from automl_agent.dataset.targets import (  # noqa: E402
     DEFAULT_TARGET_MISSING_POLICY,
     TARGET_MISSING_POLICIES,
@@ -475,7 +476,7 @@ def target_profile(series: Any) -> dict[str, Any]:
 
 
 def build_card(
-    data_path: Path,
+    data_path: Path | str,
     target_column: str,
     *,
     name: str | None = None,
@@ -487,11 +488,11 @@ def build_card(
     caveats: tuple[str, ...] | list[str] = (),
     group_column: str | None = None,
     bootstrap_resamples: int = DEFAULT_RESAMPLES,
+    table: str | None = None,
+    query: str | None = None,
 ) -> dict[str, Any]:
     """데이터를 읽어 카드를 돌려준다. 여기서 행을 보는 유일한 함수다."""
-    import pandas as pd
-
-    frame = pd.read_csv(data_path)
+    frame = load_frame(data_path, table=table, query=query)
     if target_column not in frame.columns:
         # 사용자가 고른 파일의 열 이름은 원본 데이터가 아니고, 없는 것을 이름 짓는 것이 이
         # 오류의 진단 가치 전부다.
@@ -589,8 +590,10 @@ def build_card(
 
     card: dict[str, Any] = {
         "name": name or f"{target_column}-prediction",
+        # 출처의 *종류*만 적는다. 이 필드는 공개 카드에 남아 모든 추론 프롬프트에 실리므로
+        # 접속 URL이 여기로 나갈 수 없다 (automl_agent.dataset.source::source_kind).
         "description": (
-            f"{data_path.suffix.lstrip('.') or 'csv'} 데이터에서 자동 생성된 카드입니다. "
+            f"{source_kind(data_path)} 데이터에서 자동 생성된 카드입니다. "
             "원본 행은 이 카드에 포함되지 않습니다 — 모든 수치는 열 전체에 대한 집계입니다."
         ),
         "task": _card_task(task, n_classes),
@@ -635,6 +638,12 @@ def build_card(
         # 안 된다. automl_agent.scoring.splits 참고.
         "data": {"path": str(data_path), "target_column": target_column},
     }
+    # DB 출처는 경로만으로 어느 행인지 정해지지 않는다. 카드가 기술하는 행을 ``--resume``과
+    # ``run`` 이 다시 읽을 수 있어야 하므로 질의도 같은 비공개 블록에 남긴다.
+    if table:
+        card["data"]["table"] = str(table)
+    if query:
+        card["data"]["query"] = str(query)
     if regression:
         # 분류 카드에서 ``class_balance``가 하는 일. 타깃 자기 단위의 수가 무엇을 뜻하는지
         # 말하는 유일한 블록이다. 회귀 경로에만 있는 것은, 클래스로 코딩된 타깃의 모양이 곧 그
@@ -771,7 +780,23 @@ def summarise(card: dict[str, Any]) -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a dataset card from raw data.")
-    parser.add_argument("--data", required=True, help="path to the CSV to profile")
+    parser.add_argument(
+        "--data",
+        required=True,
+        help="path to the CSV, path to a sqlite file (.db/.sqlite/.sqlite3), or a "
+        "SQLAlchemy connection URL. A database source needs --table or --query",
+    )
+    parser.add_argument(
+        "--table",
+        default=None,
+        help="database source only: read every row of this table (shorthand for "
+        '--query \'SELECT * FROM "<name>"\')',
+    )
+    parser.add_argument(
+        "--query",
+        default=None,
+        help="database source only: the SELECT whose rows are the dataset",
+    )
     parser.add_argument("--target", required=True, help="name of the target column")
     parser.add_argument("--out", required=True, help="where to write the dataset card JSON")
     parser.add_argument(
@@ -824,7 +849,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         card = build_card(
-            Path(args.data),
+            as_source(args.data),
             args.target,
             name=args.name,
             memory_limit_mb=args.memory_limit_mb,
@@ -834,8 +859,10 @@ def main(argv: list[str] | None = None) -> int:
             on_missing_target=args.on_missing_target,
             caveats=list(args.caveats or []),
             group_column=args.group_column,
+            table=args.table,
+            query=args.query,
         )
-    except (OSError, ValueError, KeyError, ImportError) as exc:
+    except (OSError, ValueError, KeyError, ImportError, RuntimeError) as exc:
         sys.stderr.write(f"profiling failed: {type(exc).__name__}: {exc}\n")
         return 1
 

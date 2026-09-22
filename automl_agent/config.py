@@ -156,7 +156,13 @@ class RunConfig:
     # ``data_path``와 ``group_column``은 dataset card가 아니라 여기 둔다: 둘 다 어떤 행이
     # 존재하는지 또는 떼어 두는지를 정하므로, 카드 안에 있으면 카드와 함께 프롬프트로 실려 갈
     # 수 있고, LLM이 둘 중 어느 것도 바꾸자고 제안할 수 있어서는 안 된다.
-    data_path: Path | None = None
+    # ``Path``가 아닐 수 있는 이유: 접속 URL은 ``Path``를 통과하면 윈도에서 조용히 망가진다
+    # (automl_agent.dataset.source::as_source). 아래 독자는 전부 ``str()``로 받는다.
+    data_path: Path | str | None = None
+    # DB 출처일 때 어느 행을 읽는가 — 둘 중 하나만. ``data_path`` 옆에 있는 이유가 같다:
+    # 어떤 행이 존재하는지를 정하므로 어떤 프롬프트도 볼 수 없다.
+    data_table: str | None = None
+    data_query: str | None = None
     target_column: str | None = None
     # 라벨이 없는 행: "reject" 또는 "drop". None은 "카드를 따르고, 카드가 말이 없으면
     # reject"라는 뜻이다 — nodes/training.py::build_train_config 참고.
@@ -220,6 +226,15 @@ class RunConfig:
             # 배열로 직렬화되어 있다 — 이것이 없으면 재개된 실행의 caveats는 list가 되고
             # dataclass는 더 이상 hashable하지도 비교 가능하지도 않다.
             object.__setattr__(self, "caveats", tuple(str(item) for item in self.caveats or ()))
+        if self.data_table and self.data_query:
+            # 둘이 같이 오면 어느 쪽이 이겼는지가 실행마다 달라진다. 로더도 거부하지만 여기서
+            # 거부하면 프로파일링이 시작되기 전에 멈춘다.
+            raise ValueError(
+                "--table 과 --query 는 같이 쓸 수 없습니다 — 읽을 행을 정하는 방식이 서로 "
+                "다릅니다. --table 은 SELECT * FROM <이름> 의 줄임입니다"
+            )
+        if (self.data_table or self.data_query) and not self.data_path:
+            raise ValueError("--table/--query 는 --data 없이는 가리킬 데이터베이스가 없습니다")
 
     # -- 파생 경로 ---------------------------------------------------------- #
 

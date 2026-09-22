@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import PROFILE_SCRIPT, PROFILE_TIMEOUT_SEC, RunConfig, run_fixed_script
+from ..dataset.source import as_source
 from ..privacy import CardSchemaError, public_card, register_private, validate_card
 from ..scoring.goal import describe, missing_bar_message, resolve_goal
 from ..scoring.metrics import TASK_REGRESSION, card_task, metrics_for, task_of
@@ -51,9 +52,11 @@ def profiling(state: AutoMLState, *, config: RunConfig) -> dict:
 
     register_private(path)
     card = run_profiler(
-        Path(str(path)),
+        as_source(path),
         str(reference.get("target_column") or "target"),
         config,
+        table=reference.get("table"),
+        query=reference.get("query"),
     )
     # "auto" 모드에서 목표는 방금 측정된 기준 baseline에서 여기서 유도된다. baseline이 존재하는 첫
     # 순간이기 때문이다 — ``initial_state``는 짐작밖에 할 수 없었다. "fixed" 모드에서는 씨앗으로 받은
@@ -154,7 +157,14 @@ def assert_goal_is_usable(
         raise ProfilingFailed(missing_bar_message(str(goal.get("metric") or config.metric)))
 
 
-def run_profiler(data_path: Path, target_column: str, config: RunConfig) -> dict[str, Any]:
+def run_profiler(
+    data_path: Path | str,
+    target_column: str,
+    config: RunConfig,
+    *,
+    table: str | None = None,
+    query: str | None = None,
+) -> dict[str, Any]:
     """``scripts/profile.py``를 띄우고 그것이 쓴 카드를 되읽는다."""
     config.ensure_dirs()
     card_path = config.run_dir / "dataset_card.json"
@@ -185,6 +195,12 @@ def run_profiler(data_path: Path, target_column: str, config: RunConfig) -> dict
         # 수가 되고 모든 시도는 그룹 밖 수가 되는데, 그것이 protocol_mismatch가 잡으려고 존재하는 바로
         # 그 비교 불가능성이다.
         command += ["--group-column", config.group_column]
+    # DB 출처에서 어느 행을 프로파일하는가. ``config``가 아니라 인자로 받는 이유는 ``group_column``과
+    # 같다 — 두 출처(카드의 비공개 블록과 CLI)가 이미 ``data_ref``에서 해소된다.
+    if table:
+        command += ["--table", str(table)]
+    if query:
+        command += ["--query", str(query)]
 
     returncode, console = run_fixed_script(command, timeout=PROFILE_TIMEOUT_SEC, label="profiling")
 

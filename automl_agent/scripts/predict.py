@@ -57,6 +57,7 @@ from automl_agent.dataset.features import (  # noqa: E402
     describe_drift,
     encode_with_schema,
 )
+from automl_agent.dataset.source import as_source, load_frame  # noqa: E402
 from automl_agent.scoring import calibration  # noqa: E402
 from automl_agent.scoring.intervals import (  # noqa: E402
     DEFAULT_RESAMPLES,
@@ -353,10 +354,12 @@ def score_batch(
 def run_prediction(
     model_path: Path,
     schema_path: Path,
-    data_path: Path,
+    data_path: Path | str,
     out_path: Path,
     id_column: str | None = None,
     label_column: str | None = None,
+    table: str | None = None,
+    query: str | None = None,
 ) -> dict[str, Any]:
     """``data_path``의 모든 행을 예측해 CSV로 쓴다. 요약을 돌려준다.
 
@@ -368,7 +371,7 @@ def run_prediction(
 
     schema = load_schema(schema_path)
     model = joblib.load(model_path)
-    frame = pd.read_csv(data_path)
+    frame = load_frame(data_path, table=table, query=query)
     if id_column and id_column not in frame.columns:
         raise ValueError(f"id_column {id_column!r} not found in {data_path}")
     if label_column and label_column not in frame.columns:
@@ -584,7 +587,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "derived: re-deriving the encoding from the new file is what produces a misaligned "
         "matrix that scores without complaining",
     )
-    parser.add_argument("--data", required=True, help="path to the CSV to predict on")
+    parser.add_argument(
+        "--data",
+        required=True,
+        help="path to the CSV, path to a sqlite file (.db/.sqlite/.sqlite3), or a "
+        "SQLAlchemy connection URL. A database source needs --table or --query",
+    )
+    parser.add_argument(
+        "--table",
+        default=None,
+        help="database source only: predict on every row of this table",
+    )
+    parser.add_argument(
+        "--query",
+        default=None,
+        help="database source only: the SELECT whose rows are the batch",
+    )
     parser.add_argument("--out", required=True, help="path to write the predictions CSV")
     parser.add_argument(
         "--report",
@@ -615,12 +633,14 @@ def main(argv: list[str] | None = None) -> int:
         summary = run_prediction(
             Path(args.model),
             Path(args.schema),
-            Path(args.data),
+            as_source(args.data),
             Path(args.out),
             id_column=args.id_column,
             label_column=args.label_column,
+            table=args.table,
+            query=args.query,
         )
-    except (OSError, ValueError, KeyError, ImportError) as exc:
+    except (OSError, ValueError, KeyError, ImportError, RuntimeError) as exc:
         # FeatureSchemaMismatch는 ValueError이므로, 이 스크립트가 있는 이유인 거절들은
         # traceback이 아니라 메시지로 나온다.
         sys.stderr.write(f"prediction failed: {type(exc).__name__}: {exc}\n")

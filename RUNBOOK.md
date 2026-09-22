@@ -55,6 +55,42 @@ python -m automl_agent.main profile `
 카드는 사람이 읽고 고칠 수 있는 집계 요약입니다. `--no-baseline`을 주면 기준선
 측정을 건너뛰지만, 그러면 `auto` 모드가 지표별 기본값으로 폴백합니다.
 
+### CSV가 아니라 데이터베이스에서
+
+`--data`에 준 문자열이 무엇으로 읽을지를 정합니다. sqlite 파일은 표준 라이브러리로
+읽으므로 설치할 것이 없고, 접속 URL은 `pip install -e ".[db]"`와 드라이버가 필요합니다.
+
+```powershell
+# sqlite 파일 — 테이블 하나를 그대로
+python -m automl_agent.main profile `
+  --data local\mimic.db --table admissions `
+  --target died --out local\mimic_card.json
+
+# 기간으로 좁혀서 (--table 과 --query 는 둘 중 하나만)
+python -m automl_agent.main run `
+  --data local\mimic.db --query "SELECT * FROM admissions WHERE admit_year >= 2020" `
+  --target died --metric pr_auc `
+  --max-iterations 3 --thread-id t-db
+
+# postgres — 비밀번호는 환경변수로만
+$env:AUTOML_DB_PASSWORD = "..."
+python -m automl_agent.main run `
+  --data "postgresql+psycopg://user@host:5432/clinical" --table admissions `
+  --target died --metric pr_auc --thread-id t-pg
+```
+
+**URL에 비밀번호를 적으면 시작 전에 거부합니다.** 출처 문자열은 `run_config.json`에
+적히고 `resume`이 그것을 다시 읽으므로, URL 안의 비밀번호는 곧 디스크 위의
+비밀번호입니다. 거부 메시지는 URL을 되풀어 적지 않습니다.
+
+접속 문자열은 프롬프트로 나가지 않습니다 — 카드의 비공개 `data` 블록과 비공개
+`data_ref` 채널에만 실리고, 카드의 공개 `description`에는 `sqlite`/`sql` 같은 종류
+낱말만 들어갑니다.
+
+**경로 오타는 빈 데이터베이스가 되지 않습니다.** `sqlite3.connect`는 없는 파일을
+만들지만, 여기서는 파일이 없으면 만들기 전에 멈춥니다 — 오타 하나가 "no such table"로
+바뀌면 진단할 것이 남지 않기 때문입니다.
+
 ---
 
 ## 2. 실행

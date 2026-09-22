@@ -74,10 +74,28 @@ report에는 그 관문이 없습니다.
 
 ## 데이터
 
-**데이터는 포함되어 있지 않고, 자기 CSV가 필요합니다.** 정답 열이 하나 있는
+**데이터는 포함되어 있지 않고, 자기 데이터가 필요합니다.** 정답 열이 하나 있는
 표(tabular) 하나면 됩니다 — 라벨 열이면 분류, 연속 열이면 회귀로 자동 판정합니다.
 
-원본 CSV와 거기서 만든 카드는 **`local/`에 두세요.** `.gitignore`가 이 디렉터리를
+`--data`에 준 **문자열이 무엇으로 읽을지를 정합니다.**
+
+| 준 것 | 읽는 것 | 추가 의존성 |
+| --- | --- | --- |
+| `local/data.csv` | `pandas.read_csv` | 없음 |
+| `local/data.db`, `.sqlite`, `.sqlite3` | 표준 라이브러리 `sqlite3` | 없음 |
+| `postgresql+psycopg://user@host:5432/db` 처럼 `scheme://`로 시작하는 것 | SQLAlchemy | `.[db]` + DBAPI 드라이버(postgres는 `psycopg`, mysql은 `pymysql`) |
+
+DB 출처에는 **`--table` 또는 `--query` 중 정확히 하나**가 필요합니다. `--table`은
+`SELECT * FROM "이름"`의 줄임이고(식별자가 아닌 이름은 거부합니다), 기간이나 코호트로
+좁히려면 `--query`에 SQL을 그대로 줍니다. 그 선택은 카드의 비공개 블록과
+`run_config.json`에 남으므로 `resume`과 학습 서브프로세스가 **카드를 만든 것과 같은
+행**을 읽습니다.
+
+**접속 URL에 비밀번호를 넣으면 거부합니다.** 출처 문자열은 `run_config.json`에 적히고
+`resume`이 그것을 다시 읽으므로, URL 안의 비밀번호는 곧 디스크 위의 비밀번호입니다.
+`AUTOML_DB_PASSWORD` 환경변수로 주면 접속할 때만 붙습니다.
+
+원본 데이터와 거기서 만든 카드는 **`local/`에 두세요.** `.gitignore`가 이 디렉터리를
 통째로 막으므로 "이 파일 커밋해도 되나"가 파일마다의 질문이 아니라 디렉터리 하나에
 대한 질문이 됩니다.
 
@@ -123,6 +141,15 @@ python -m automl_agent.main run --dataset-card local/my_card.json \
 python -m automl_agent.main run --data local/data.csv --target died \
   --metric roc_auc --thread-id my-run-002
 
+# 실행 (sqlite 파일에서 — 테이블 하나를 그대로, 또는 --query 로 좁혀서)
+python -m automl_agent.main run --data local/mimic.db --table admissions \
+  --target died --metric pr_auc --thread-id my-run-003
+
+# 실행 (접속 URL에서 — 비밀번호는 AUTOML_DB_PASSWORD 로, URL에 넣으면 거부합니다)
+python -m automl_agent.main run --data "postgresql+psycopg://user@host:5432/clinical" \
+  --query "SELECT * FROM admissions WHERE admit_year >= 2020" \
+  --target died --metric pr_auc --thread-id my-run-004
+
 # 중단된 실행 재개 (다른 플래그 불필요 — run_config.json에서 복원)
 python -m automl_agent.main resume --thread-id my-run-001
 
@@ -147,8 +174,9 @@ python -m automl_agent.main graph --out graph.png
 
 | 플래그 | 의미 |
 | --- | --- |
-| `--dataset-card` / `--data` | 둘 중 하나 필수. 카드로 시작하거나 원본 CSV로 시작합니다 |
+| `--dataset-card` / `--data` | 둘 중 하나 필수. 카드로 시작하거나 원본 출처로 시작합니다. `--data`의 문자열이 CSV·sqlite 파일·접속 URL 중 무엇인지를 정합니다(위 [데이터](#데이터)) |
 | `--target` | 정답 컬럼. `--data`를 쓸 때 필수 |
+| `--table` / `--query` | DB 출처일 때 **정확히 하나** 필수. 테이블 전체를 읽거나 SQL로 좁힙니다. 파일 출처에 주면 거부합니다 |
 | `--metric` | 분류 `f1` `accuracy` `balanced_accuracy` `precision` `recall` `roc_auc` `pr_auc` / 회귀 `r2` `mae` `rmse`. 목록은 [metrics.py](automl_agent/scoring/metrics.py) 한 곳에서 나옵니다 |
 | `--threshold` | 목표값을 이 수로 못박습니다(`fixed` 모드). 생략하면 `auto`로, 카드의 기준선에서 도출합니다. 모드를 이름으로 고르는 플래그는 없습니다 — 어느 쪽을 줬는지가 모드입니다 |
 | `--margin` | `auto`가 요구할 남은 여유의 비율(기본 `0.25`). `auto`에서만 뜻이 있으므로 `--threshold`와 함께 주면 거부합니다 |
@@ -164,7 +192,7 @@ python -m automl_agent.main graph --out graph.png
 | `--caveat` | 집계가 보여주지 못하는 것을 아는 사람의 지식이 들어오는 **유일한 통로**. 여러 번 줄 수 있고 모든 추론 프롬프트에 실립니다 — 그래서 **행 단위 사실을 적으면 안 됩니다** |
 | `--model` | 심판(critic·report)이 쓸 Claude 모델 ID. 기본 `claude-opus-5` |
 | `--proposer-model` | planning·model_selection에만 쓸 모델. 생략하면 `--model`과 같습니다. `ollama:<모델>`을 주면 로컬 Ollama로 나갑니다(예: `ollama:gemma4:12b`). **이 둘만 코드 검증(`validate_plan`·레지스트리 화이트리스트·클램프)을 통과하므로 약한 모델을 놓을 수 있는 절반입니다** — critic·report에는 그 관문이 없습니다. 제안자는 `check_credentials`가 검사하지 않으므로 로컬 서버가 죽어 있으면 실행은 계속 돌고 계획만 규칙 폴백이 됩니다. 끝난 뒤 `history.json`의 `plan_source`로 확인하세요 |
-| `--artifacts-root` | 아티팩트 루트 재지정. 두 실행을 나란히 돌릴 때 |
+| `--artifacts-root` | 아티팩트 루트 재지정. 두 실행을 나란히 돌릴 때, 그리고 **플러그인으로 쓸 때**: 기본값은 현재 디렉터리가 아니라 설치된 패키지 옆이라서(`config.py`의 `ARTIFACTS_ROOT`) 주지 않으면 실행 기록이 플러그인 캐시에 쌓입니다. `list`·`show`·`resume`·`predict`에도 같은 값을 줘야 그 실행이 보입니다 |
 
 `--force` 없이 이미 쓴 `thread_id`로 `run`을 다시 호출하면 **거부합니다** — 두 실행의
 `history`가 `operator.add`로 조용히 이어붙기 때문입니다. 모순되는 플래그 조합
@@ -390,6 +418,7 @@ automl_agent/          최상위 6개는 오케스트레이션 척추 — 그래
     calibration.py     확률이 확률로서 쓸 만한지 — 재기만 하고 모델은 안 바꿈
     ranking.py         랭킹 상한(KS) — 운영점이 아직 살 수 있는 것이 무엇인지
   dataset/             표의 열을 어떻게 읽는가 (데이터 행은 여기 없습니다 — 규칙과 어휘만)
+    source.py          출처 문자열 하나 → DataFrame. CSV / sqlite / 접속 URL을 가르는 유일한 입구
     features.py        특성 열 정책 — 수치 통과, 저카디널리티 one-hot, 나머지는 이름과 함께 제외
     pipeline.py        전처리 step을 정렬된 spec으로 — 이름이 붙은 순서만 실행됩니다
     targets.py         정답 열 인코딩 + task 판정(detect_task) + 결측 정책(reject/drop)
