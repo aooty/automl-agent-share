@@ -6,7 +6,13 @@ description: >
   "보고서 읽어 줘", "점수 얼마야" 라고 할 때 쓴다. 새 실행을 띄우는 것은 automl-run 쪽이다.
 ---
 
-저장소 루트(`${CLAUDE_PLUGIN_ROOT}`)에서 돌린다.
+**먼저 `--artifacts-root`를 물어라.** `${CLAUDE_PLUGIN_ROOT}`는 플러그인 설치 폴더일 뿐이고,
+`artifacts/`의 기본 위치는 cwd가 아니라 **패키지 옆**이다(`config.py`의 `ARTIFACTS_ROOT`). 실행을
+`--artifacts-root <경로>`로 돌렸다면 여기서도 **같은 값을 줘야** 그 실행이 보인다. `list`가
+"실행이 없습니다"라고 하면 **본 경로를 함께 말해 준다** — 그것을 읽어라. 대개 실행이 없는 것이
+아니라 다른 곳을 본 것이다.
+
+아래 명령 전부에 그 플래그를 붙인다.
 
 ```bash
 python -m automl_agent.main list                          # 어떤 실행이 있나 (최근 순)
