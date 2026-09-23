@@ -65,7 +65,7 @@ description: >
 | B. 데이터셋 | 1단계, **이 세 질문 고정** — 더하지도 빼지도 않는다 | 정답 열 (`Other`로 이름 · 모른다 — 여기서 멈춘다) / 한 대상이 여러 행인가 (아니다, 한 행에 한 대상 · 그렇다 — `Other`로 식별자 열 이름 · 모르겠다 — 독립 가정으로 진행) / 주의사항 (없다 · 있다 — `Other`로, 행 단위 사실 금지) |
 | B2. DB 범위 | 1단계, 출처가 DB일 때만 | 읽을 범위 (`--table` — `Other`로 이름 · `--query` — `Other`로 SQL) |
 | C. 그룹 재확인 | 2단계, 조건이 맞을 때 한 번만 | 이 열로 묶을까 (카드에서 찾은 열 이름들 · 묶지 않는다) |
-| D. 설정 | 3단계 | 지표 (카드 근거로 고른 것(권장) · 다른 후보) / 목표 (`auto`(권장) — 바의 값을 설명에 · `fixed` — `Other`로 수) / 반복 수 (5(권장) · 3 · 10) / thread_id (제안한 이름(권장) · `Other`) |
+| D. 설정 | 3단계 | 지표 (카드 근거로 고른 것(권장) · 다른 후보) / 목표 (margin 0.1 · margin 0.25(기본) · margin 0.5 — 라벨마다 그 margin의 바 값 · `fixed` — `Other`로 수) / 반복 수 (5(권장) · 3 · 10) / thread_id (제안한 이름(권장) · `Other`) |
 
 카드 C와 D는 카드가 생긴 뒤이므로 선택지에 **카드에서 읽은 이름과 수**를 넣을 수 있다.
 
@@ -201,6 +201,11 @@ task는 고르는 값이 아니다 — 정답 열이 정한다. 연속 열에 �
 
 - `auto`(기본) — 카드 기준선에서 바를 유도한다. 제시할 때 **그 바가 얼마가 될지 말해라**
   (`--margin`으로 조절). 사용자가 "그냥 잘 나오게"라면 이쪽이다
+- **margin은 기본값으로 넘기지 말고 묻는다.** 바는 `기준선 + (1 − 기준선) × margin`, 기준선과 만점
+  사이 거리 중 얼마를 더 가라는 것이다. 선택지마다 **그 margin으로 계산한 바**를 라벨에 넣고, 기준선과
+  그 95% 구간을 설명에 같이 보여 줘라. 기본 0.25가 늘 닿는 높이는 아니다 — 이 저장소의 임상 코호트는
+  `pr_auc` 기준선 0.5327에서 바 0.6495를 요구받았고, 여러 번 돌려도 holdout이 0.60 근처에서 멈췄다.
+  권장 표시는 붙이지 마라 — 얼마나 올려야 성공인지는 카드가 아니라 사용자가 정한다
 - `fixed` — 논문·규제·이전 실험에서 온 숫자를 못박을 때. `--threshold <수>`를 받는다. 밖에서 온
   수가 없으면 이 모드를 제시하지 마라. 둘을 함께 주면 거부된다
 
@@ -231,7 +236,7 @@ fallback 0회, 판정은 Claude와 구분되지 않는다 — 그 probe는 개�
 
 ```bash
 python -m automl_agent.main run --dataset-card local/<이름>_card.json --thread-id <아이디> \
-  --metric <지표> --max-iterations 5 --artifacts-root <작업디렉터리>/artifacts \
+  --metric <지표> --margin <마진> --max-iterations 5 --artifacts-root <작업디렉터리>/artifacts \
   --model claude-opus-5 --proposer-model ollama:gemma4:12b
 ```
 
@@ -239,7 +244,8 @@ python -m automl_agent.main run --dataset-card local/<이름>_card.json --thread
 - 0단계에서 Claude가 제안까지 맡기로 했으면 `--proposer-model ollama:gemma4:12b`를 뺀다
 - `--metric`을 생략해서 기본값으로 넘기지 마라 — 어느 지표를 목표로 잡았는지가 실행이 무엇을
   재는지 그 자체다
-- `fixed`를 받았으면 `--threshold <수>`를 붙인다. `auto`면 아무것도 붙이지 않는다(기본)
+- `auto`면 3단계에서 고른 `--margin <마진>`을 붙인다. `fixed`를 받았으면 `--margin` 대신
+  `--threshold <수>`를 붙인다 — 둘을 함께 주면 거부된다
 - 카드가 아니라 원본 출처에서 바로 돌릴 때는 `--data <출처>`와 `--table`/`--query`를 그대로 넘긴다
 - **`run_in_background: true`로 띄우고** thread_id를 알려 준 뒤 진행은 로그로 봐라. 실행은
   분에서 시간 단위다. 붙잡고 기다리지 마라
@@ -256,7 +262,7 @@ python -m automl_agent.main run --dataset-card local/<이름>_card.json --thread
 
 - holdout 점수, 목표선, 달성/미달. 지표의 chance도 함께 (0.5가 아닐 수 있다)
 - thread_id와 **쓴 `--artifacts-root`** — 나중에 `show`로 다시 열려면 둘 다 필요하다
-- 3단계에서 확인받은 지표와 그 이유 한 줄
+- 3단계에서 확인받은 지표와 그 이유 한 줄, 그리고 고른 margin(또는 고정 수)과 그 바
 - 제안자가 무엇이었나 — `ollama:gemma4:12b`인가, 0단계에서 Claude로 바꿨나
 - 1단계에서 남긴 가정 — 그룹 열 없이 돌렸으면 그 한 줄을 여기에
 - `plan_source`가 `fallback`인 반복이 있었는지. 절반이 `fallback`이면 그 실행은 모델이 아니라
