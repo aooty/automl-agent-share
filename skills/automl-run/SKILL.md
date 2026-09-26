@@ -31,8 +31,8 @@ description: >
 하나보다 덜 읽는 것이 아니다.
 
 이 저장소의 보장이 그것이고, 규약이 아니라 구조다: `llm/client.py`가 유일한 API 출구이고 모든
-프롬프트가 `assert_clean`을 지난다([README.md](README.md)의 「1. LLM은 원본 데이터를 보지
-않는다」). 그 보장은 **그래프의 프롬프트**에 대한 것이므로, 네가 대화창에서 행을 읽으면 테스트는
+프롬프트가 `assert_clean`을 지난다([README.md](README.md)의 「Raw data 엄격
+격리」). 그 보장은 **그래프의 프롬프트**에 대한 것이므로, 네가 대화창에서 행을 읽으면 테스트는
 통과하는데 보장은 깨진 상태가 된다. 그리고 행을 본 사람이 `--caveat`에 행 단위 사실을 적으면
 그것은 **모든 추론 프롬프트에 실린다.**
 
@@ -79,7 +79,7 @@ description: >
 **모델 두 개는 묻고, 답을 명령으로 확인한다.** 환경변수를 몰래 먼저 들여다보고 넘어가지 마라 — 이 컴퓨터에
 무엇이 있는지는 사용자가 안다. 두 질문을 위 항목들과 같은 `AskUserQuestion` 카드에 묶어라.
 
-**질문 1 — Claude(심판)를 어떻게 쓰나?** ([README.md](README.md)의 「자격 증명」)
+**질문 1 — Claude(심판)를 어떻게 쓰나?** ([README.md](README.md)의 「LLM backend 설정」)
 
 | 답 | 확인 |
 | --- | --- |
@@ -197,7 +197,7 @@ task는 고르는 값이 아니다 — 정답 열이 정한다. 연속 열에 �
 기본 지표로 **바뀌어 실행되고**, 바꿨다는 사실만 한 줄로 남는다. 그러니 제시할 지표는 카드의 `task`
 안에서 고른다.
 
-**목표.** 두 모드 중 하나를 받아라([README.md](README.md)의 「2. 목표 임계값은 코드가 정한다」).
+**목표.** 두 모드 중 하나를 받아라([README.md](README.md)의 「신뢰할 수 있는 평가 체계」).
 
 - `auto`(기본) — 카드 기준선에서 바를 유도한다. 제시할 때 **그 바가 얼마가 될지 말해라**
   (`--margin`으로 조절). 사용자가 "그냥 잘 나오게"라면 이쪽이다
@@ -250,8 +250,8 @@ python -m automl_agent.main run --dataset-card local/<이름>_card.json --thread
 - **`run_in_background: true`로 띄우고** thread_id를 알려 준 뒤 진행은 로그로 봐라. 실행은
   분에서 시간 단위다. 붙잡고 기다리지 마라
 - 불균형 타깃이면 `--search-past-goal` 없이도 계획이 `tune_threshold`를 쓸 수 있다. 그게 이
-  프로젝트에서 측정된 가장 큰 레버다(test `balanced_accuracy` +0.0762 — 측정 문서는 개발
-  저장소에 있고, URL은 [README.md](README.md)의 「더 자세한 것」)
+  프로젝트에서 측정된 가장 큰 레버다(test `balanced_accuracy` +0.0762 — 측정 문서는 비공개
+  개발 저장소에 있다)
 
 ### 6. 끝나면 — 결과를 정리해 말해 주고 거기서 끝난다
 
@@ -279,5 +279,5 @@ python -m automl_agent.main run --dataset-card local/<이름>_card.json --thread
 잘못된 조합은 `main.py`가 한글로 왜 안 되는지 말한다. **그 메시지를 그대로 보여 주고 추측으로
 플래그를 바꿔 다시 시도하지 마라** — 거부는 대부분 "이 실행은 측정으로서 성립하지 않는다"는 뜻이다.
 
-전체 명령은 [RUNBOOK.md](RUNBOOK.md), 플래그의 근거는 [README.md](README.md)의 「이 루프를 믿을 수
-있는 근거 네 가지」.
+전체 명령은 [RUNBOOK.md](RUNBOOK.md), 플래그의 근거는 [README.md](README.md)의 「4. 핵심 설계
+원칙」.

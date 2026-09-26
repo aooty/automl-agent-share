@@ -33,7 +33,7 @@ python -m automl_agent.main show --thread-id <아이디> --report   # 보고서 
 
 **보고할 숫자는 holdout이다.** `best`는 val에서 *고른* 점수라 낙관적이다. holdout은 반복이 한
 번도 보지 않은 test 20%를 끝에 딱 한 번 채점한 값이다. 둘을 나란히 놓으면 안 되고, 하나만
-말해야 하면 holdout이다([README.md](README.md)의 「보고하는 점수는 고르지 않은 점수다」).
+말해야 하면 holdout이다([README.md](README.md)의 「신뢰할 수 있는 평가 체계」).
 
 **제안자가 실제로 결정했는지 매번 확인해라.** 각 시도의 `plan_source`·`selection_source`가
 `llm`/`fallback`/`rules` 중 하나다. `fallback`은 호출값을 냈는데 답이 안 쓰인 반복이다.
@@ -56,9 +56,8 @@ python -c "import json;d=json.load(open('artifacts/<아이디>/history.json',enc
 
 ## 저장소의 판정을 인용할 때
 
-**이 배포본에는 측정 문서도 `bench/`도 없다.** 판정을 인용해야 하면 개발 저장소로 가라 —
-URL은 [README.md](README.md)의 「더 자세한 것」에 있다. 거기 측정 문서 15개와, 판정 전체를
-저장된 예측 배열에서 재계산하는 `python -m bench.recheck`가 있다.
+**이 배포본에는 측정 문서도 `bench/`도 없다.** 측정 문서 15개와 판정을 재계산하는
+`python -m bench.recheck`는 비공개 개발 저장소에만 있다. 여기서는 판정을 인용하지 마라.
 
 핵심 판정을 정직하게 말해야 할 때:
 
