@@ -1,6 +1,6 @@
 # 🤖 AutoML Agent
 
-* 버전: `0.2.4`
+* 버전: `0.2.5`
 * 복사해서 쓰는 명령 모음: [RUNBOOK.md](RUNBOOK.md)
 
 <br>
@@ -168,6 +168,7 @@ LLM backend 설정:
 
 * 원본 데이터를 분석해 통계 요약 JSON과 logistic regression(`logreg`) baseline 점수를 만듭니다. 전체 pipeline을 돌리기 전에 card를 검토하거나 고칠 때 씁니다.
 * `--data`는 CSV, SQLite 파일, SQLAlchemy URL을 받으며, database는 `--table` 또는 `--query`로 읽을 행을 정합니다.
+* SQLite 파일은 추가 설치가 필요 없고, SQLAlchemy URL은 `pip install -e ".[db]"`와 해당 DB driver가 필요합니다.
 
 ```bash
 python -m automl_agent.main profile --data local/demo.csv --target died \
