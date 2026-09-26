@@ -1,14 +1,10 @@
-"""카드의 "집계가 보여 주지 않는, 이 데이터에 대한 것들" 채널.
+"""The card's channel for facts the aggregates do not show.
 
-출처는 둘이고, 같은 목록에 얹힌다:
+Roles:
 
-- **프로파일러 자신의 검사.** 지금은 센티넬 코드 (:mod:`automl_agent.dataset.sentinels`).
-- **운영자.** ``--caveat "..."``, 반복 가능. 시스템에서 *사람*의 원본 데이터 지식을 프롬프트로
-  나르는 유일한 채널이다.
-
-**운영자의 텍스트는 적힌 그대로 프롬프트에 닿는다 — 셀 값이 손으로 거기 갈 수 있는 유일한 자리다.**
-의도한 것이다. **아래 상한은 내용이 아니라 길이와 개수에 걸린다** — 지키는
-것은 프롬프트 예산이고 비공개가 아니다.
+* Caveat sources — caveat lines from the profiler's own checks.
+* Caveat list — merge, clean, and cap the card's caveats.
+* Prompt rendering — turn the card's caveats into a prompt block.
 """
 
 from __future__ import annotations
@@ -17,21 +13,21 @@ from typing import Any
 
 from .sentinels import KIND_NUMERIC_CODE
 
-# 카드 키. :mod:`automl_agent.privacy`의 allowlist, 프로파일러, 노드, 프롬프트가 모두 이것을
-# 참조하므로 다섯 군데에 적는 대신 여기서 이름을 갖는다.
+# Shared by privacy allowlist, profiler, nodes, and prompts.
 CAVEATS_KEY = "caveats"
 
-# 이 텍스트는 매 반복의 모든 추론 프롬프트에 렌더되므로 상한이 있다.
+# Capped: shown in every prompt
 MAX_CAVEATS = 20
 MAX_CAVEAT_CHARS = 400
 
 
-def sentinel_caveats(by_column: dict[str, list[dict[str, Any]]]) -> list[str]:
-    """의심되는 결측 코드마다 주의사항 하나. 그것으로 계획하는 독자를 향해 쓴다.
+# --- Role: caveat sources ---------------------------------------------------------
 
-    양쪽 절반을 다 말한다: 어느 값이 의심스러운지, 그리고 그 열의 통계 — 카드가 두 블록 위에
-    발표하는 그것 — 가 그 값을 그대로 둔 채 측정됐다는 사실.
-    """
+
+def sentinel_caveats(by_column: dict[str, list[dict[str, Any]]]) -> list[str]:
+    """Write one caveat per suspected missing-value code.
+
+    Each says the card stats and baseline counted that value as real."""
     lines: list[str] = []
     for name, findings in by_column.items():
         for item in findings:
@@ -51,10 +47,9 @@ def sentinel_caveats(by_column: dict[str, list[dict[str, Any]]]) -> list[str]:
 
 
 def grouping_caveats(group_column: str | None, n_groups: int | None = None) -> list[str]:
-    """열이 아니라 *분할*에 대한 유일한 주의사항.
+    """Write the grouped-split caveat; empty list when there is no group column.
 
-    그룹 분할은 ``baseline.protocol.grouped_by``에도 발표되지만, 여기 한 번 더 적는다.
-    """
+    Repeats ``baseline.protocol.grouped_by`` on purpose"""
     if not group_column:
         return []
     counted = f" ({n_groups}개 그룹)" if n_groups else ""
@@ -67,12 +62,13 @@ def grouping_caveats(group_column: str | None, n_groups: int | None = None) -> l
     ]
 
 
-def merge_caveats(*groups: list[str] | tuple[str, ...] | None) -> list[str]:
-    """평평하게, 다듬고, 중복을 걷고, 상한을 건다. 순서는 유지된다: 기계 먼저, 사람 나중.
+# --- Role: caveat list ------------------------------------------------------------
 
-    중복 판정은 글자 그대로의 일치다. 있는 이유가 되는 경우 — 같은 ``--caveat``을 두 번 주거나,
-    운영자가 프로파일러가 이미 찾은 것을 되풀이하는 것 — 에는 그것으로 충분하다.
-    """
+
+def merge_caveats(*groups: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Merge caveat groups into one clean, capped list, keeping order.
+
+    Drops empty and exact duplicates. Pass machine caveats first, human ones after."""
     merged: list[str] = []
     for group in groups:
         for item in group or ():
@@ -83,7 +79,7 @@ def merge_caveats(*groups: list[str] | tuple[str, ...] | None) -> list[str]:
 
 
 def card_caveats(card: dict[str, Any] | None) -> list[str]:
-    """카드의 주의사항 목록. 손으로 쓴 카드가 맨 문자열을 쓴 경우도 받아 준다."""
+    """Read the cleaned caveat list from a card; a bare string also works."""
     raw = (card or {}).get(CAVEATS_KEY)
     if isinstance(raw, str):
         return merge_caveats([raw])
@@ -92,8 +88,13 @@ def card_caveats(card: dict[str, Any] | None) -> list[str]:
     return []
 
 
+# --- Role: prompt rendering -------------------------------------------------------
+
+
 def describe_caveats(card: dict[str, Any] | None) -> str:
-    """프롬프트 블록. 결코 비지 않는다 — 빈 절이 "알려진 것 없음"으로 읽히지 않게."""
+    """Render the card's caveats as bullet lines for a prompt.
+
+    Never empty: says "none recorded", so silence is not read as "nothing known"."""
     items = card_caveats(card)
     if not items:
         return "(없음 — 이 데이터에 대해 별도로 기록된 주의사항이 없습니다)"

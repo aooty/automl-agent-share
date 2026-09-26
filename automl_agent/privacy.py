@@ -1,16 +1,11 @@
-"""원본 데이터 경계: 데이터 행에 닿은 것은 프롬프트에 닿지 않는다.
+"""The raw data boundary: nothing that touched data rows may reach a prompt.
 
-방어선 둘, 중요한 순서대로.
+Roles:
 
-1. **구조로.** 원본 행은 subprocess로 도는 고정 스크립트(``scripts/profile.py``,
-   ``scripts/train.py``) 안에서만 읽힌다. 경계의 비공개 절반(파일 경로와 목표 열)은 실행 노드만
-   읽는 자기 state 채널 ``data_ref``에 산다.
-2. **backstop으로.** :func:`assert_clean`이 API 호출 지점 하나에서 모든 렌더된 프롬프트에 돈다.
-   등록된 비공개 재료(데이터셋 경로)는 전송되는 대신 *실행을 중단시키고*, 그저 파일시스템 경로처럼
-   보이는 것은 가려진다.
-
-여기서는 pandas를 import하지도 데이터 파일을 열지도 않는다:
-이 모듈은 체이고 reader가 아니다.
+* Private registry — remember paths no prompt may contain.
+* Text scrubbing — hide paths and quoted values, stop leaks.
+* Dataset card — check a card, split public and private parts.
+* Training result — allowlist a raw result before it enters state.
 """
 
 from __future__ import annotations
@@ -31,29 +26,25 @@ from .scoring.metrics import METRICS, canonical
 
 
 class RawDataLeak(RuntimeError):
-    """등록된 비공개 재료가 나가는 프롬프트에서 발견됐다.
+    """Raised when a registered private string is found in an outgoing prompt.
 
-    추론 노드가 일부러 잡지 *않는다*: 유출은 이 코드의 결함이므로 실행이 시끄럽게 멈춘다.
+    Reasoning nodes do not catch it on purpose
     """
 
 
-# --------------------------------------------------------------------------- #
-# 프롬프트에 결코 나타나면 안 되는 문자열의 registry
-# --------------------------------------------------------------------------- #
+# --- Role: private registry -----------------------------------------------------------
 
-# 일부러 프로세스 전역: 가드는 API와 말하는 그 한 지점에서 닿을 수 있어야 하고, 그 지점은 실행의
-# 데이터 출처를 아무것도 모른다.
+# Process-wide so the API call site can reach it.
 _PRIVATE: set[str] = set()
 
-# 이보다 짧으면 "비공개" 문자열이 프롬프트 절반과 우연히 일치한다.
+# Shorter strings would match prompts by chance.
 _MIN_PRIVATE_LEN = 4
 
 
 def register_private(*values: Any) -> None:
-    """데이터셋 경로(또는 비슷한 것)를 프롬프트 금지어로 등록한다.
+    """Register paths as strings no prompt may contain: as given, resolved, and file name.
 
-    값 하나가 세 형태를 낸다 — 준 그대로, resolve된 절대 경로, 파일 이름만. 어느 것이든 출처
-    파일을 특정하기에 충분하기 때문이다.
+    Forms shorter than ``_MIN_PRIVATE_LEN`` are skipped.
     """
     for value in values:
         if not value:
@@ -71,26 +62,25 @@ def register_private(*values: Any) -> None:
 
 
 def clear_private() -> None:
-    """등록된 문자열을 전부 잊는다. 테스트와 오래 사는 프로세스를 위해."""
+    """Forget every registered string. For tests and long-lived processes."""
     _PRIVATE.clear()
 
 
 def private_strings() -> frozenset[str]:
+    """Return a copy of the registered private strings."""
     return frozenset(_PRIVATE)
 
 
-# --------------------------------------------------------------------------- #
-# 텍스트 씻어내기
-# --------------------------------------------------------------------------- #
+# --- Role: text scrubbing -------------------------------------------------------------
 
 _ABS_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|/)[\w\-.\\/]+")
 _DATA_FILE = re.compile(
     r"[\w\-.]*[\w\-]\.(?:csv|tsv|parquet|feather|xlsx?|jsonl?|pkl|npy|npz)\b",
     re.IGNORECASE,
 )
-# 인용된 리터럴만 가린다. 숫자는 일부러 건드리지 않는다 — Critic이 읽는 OOM·타이밍 증거가 거기
-# 있다.
+# Numbers are kept on purpose
 _QUOTED = re.compile(r"(['\"])(?:(?!\1).){1,200}\1")
+# A line that starts like ``SomeError: ...``.
 _EXCEPTION_LINE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Warning|Interrupt):\s")
 
 REDACTED_PATH = "<path>"
@@ -98,15 +88,14 @@ REDACTED_VALUE = "'<redacted>'"
 
 
 def redact_paths(text: str) -> str:
-    """파일시스템 경로와 데이터 파일 이름을 placeholder로 바꾼다."""
+    """Replace file system paths and data file names with ``<path>``."""
     return _DATA_FILE.sub(REDACTED_PATH, _ABS_PATH.sub(REDACTED_PATH, text))
 
 
 def scrub_message(text: str, limit: int = 300) -> str:
-    """학습 로그 꼬리를 씻어낸 진단 한 줄로 줄인다.
+    """Reduce a log tail to its last exception line, with paths and quotes hidden.
 
-    예외 타입과 메시지를 남기고 — Critic에게 필요한 신호가 그것이다 — traceback과 경로, 인용된
-    리터럴을 버린다. 셀 값이 숨는 곳이 마지막 것이다.
+    Quoted literals are where cell values hide; ``""`` for empty text.
     """
     if not text:
         return ""
@@ -118,9 +107,9 @@ def scrub_message(text: str, limit: int = 300) -> str:
 
 
 def assert_clean(text: str, label: str = "prompt") -> str:
-    """보낼 수 있는 ``text``. 등록된 재료에는 raise, 경로처럼 보이는 것은 가린다.
+    """Return ``text`` with path-like strings hidden; raise ``RawDataLeak`` on registered ones.
 
-    비대칭은 의도다.
+    The two cases differ on purpose
     """
     for secret in _PRIVATE:
         if secret in text:
@@ -132,21 +121,18 @@ def assert_clean(text: str, label: str = "prompt") -> str:
     return redact_paths(text)
 
 
-# --------------------------------------------------------------------------- #
-# 데이터셋 카드: 공개 요약 vs 비공개 데이터 참조
-# --------------------------------------------------------------------------- #
+# --- Role: dataset card ---------------------------------------------------------------
 
-# 카드 파일이 실어도 되는 단 하나의 비공개 키. 카드가 state에 들어가기 전에 떼어낸다.
+# The only private key; removed before the card enters state.
 DATA_KEY = "data"
 
-# 손으로 쓴 카드가 예시 행을 몰래 넣는 데 쓸 수 있는 키들. 카드는 정의상 요약이므로 떨어뜨린다.
+# Keys that could slip example rows into a card.
 SAMPLE_KEYS = frozenset(
     {"sample", "samples", "sample_rows", "head", "rows", "examples", "preview", "raw", "raw_rows"}
 )
 
 
-# 카드가 실어도 되는 최상위 키 전부 — denylist가 아니라 allowlist다. 실패 양식은 아무도 생각하지
-# 못한 키이고, 한 번 물렸다.
+# An allowlist, not a denylist
 CARD_KEYS: tuple[str, ...] = (
     "name",
     "description",
@@ -160,13 +146,11 @@ CARD_KEYS: tuple[str, ...] = (
     "n_classes",
     "class_balance",
     "imbalance_ratio",
-    # 위 셋의 회귀 짝: 버킷과 비율만 담는다. 목표 열의 단위로 적힌 min·max·분위수는 예측 대상
-    # 열의 셀 값이다.
+    # Buckets and ratios only
     "target",
     "missing",
     "features",
-    # 자유 서술, 그리고 사람이 손으로 쓰는 유일한 카드 필드 — 무엇으로 묶여 있는지는
-    # :mod:`automl_agent.dataset.caveats`.
+    # Hand-written free text; limits in ``dataset/caveats.py``.
     "caveats",
     "preprocessing",
     "constraints",
@@ -183,27 +167,23 @@ _SCALARS = (str, int, float, bool)
 
 
 def _is_scalar(value: Any) -> bool:
+    """_is_scalar | Dataset card: True for a str, int, float, bool, or ``None`` leaf."""
     return isinstance(value, _SCALARS) or value is None
 
 
 def _is_number(value: Any) -> bool:
-    """실수/정수이고 ``bool``이 아닐 때만 True. 값은 바꾸지 않는다 — ``414``는 ``414.0``이 아니다.
-
-    무엇이 숫자로 통하는지는 :func:`automl_agent.scoring.intervals.as_number` 한 곳에서만 정한다.
-    여기는 값을 쓰지 않고 통과 여부만 묻는 자리라서 판정만 빌려 온다.
-    """
+    """_is_number | Dataset card: True for a non-bool number, as ``as_number`` decides."""
     return as_number(value) is not None
 
 
 class CardSchemaError(ValueError):
-    """카드가 실어도 되지 않는 것을 싣고 있다."""
+    """Raised when a card carries something it may not carry."""
 
 
 def _check_value(value: Any, path: str) -> None:
-    """규칙 하나를 재귀로: 컨테이너는 통과, 잎은 스칼라여야 한다.
+    """_check_value | Dataset card: every leaf must be a scalar and no key a sample key.
 
-    이 규칙이 정확히 행을 불가능하게 만드는
-    규칙이다 — 레코드는 살 구조가 필요하다.
+    One rule, not a per-key type table
     """
     if _is_scalar(value):
         return
@@ -228,9 +208,9 @@ def _check_value(value: Any, path: str) -> None:
 
 
 def validate_card(card: Any) -> dict[str, Any]:
-    """fail-closed 스키마 검사. 카드를 그대로 돌려주거나 ``CardSchemaError``.
+    """Check a card's schema and return it unchanged; raise ``CardSchemaError`` if bad.
 
-    *첫* 번째 선이다: 모르는 키는 전달되는 대신 실행을 멈춘다.
+    First line only; :func:`public_card` still runs later
     """
     if not isinstance(card, dict):
         raise CardSchemaError("오류: 데이터셋 카드는 JSON 객체여야 합니다.")
@@ -250,7 +230,7 @@ def validate_card(card: Any) -> dict[str, Any]:
 
 
 def public_card(card: dict[str, Any]) -> dict[str, Any]:
-    """추론 노드가 봐도 되는 모양의 카드: 경로 없음, 예시 행 없음."""
+    """Return the card as reasoning nodes may see it: no ``data`` block, no sample keys."""
     return {
         key: value
         for key, value in (card or {}).items()
@@ -266,13 +246,9 @@ def data_ref(
     table: str | None = None,
     query: str | None = None,
 ) -> dict[str, Any]:
-    """비공개 ``data_ref`` 채널을 만든다. 명시된 인자가 카드를 이긴다.
+    """Build the private ``data_ref``; arguments win over the card's ``data`` block.
 
-    빈 dict는 "실제 데이터 없음": 실행기가 카드에 적힌 모양으로 행을 합성하고, 그래서 루프가
-    카드만으로도 돈다.
-
-    ``group_column``이 공개 카드가 아니라 여기로 오는 이유는 ``path``와 같다 — 어느 행이 떼어지는지를
-    정하므로 어떤 프롬프트도 볼 수 없다 (:mod:`automl_agent.scoring.splits`).
+    Returns ``{}`` without a path, meaning no real data
     """
     declared = dict((card or {}).get(DATA_KEY) or {})
     resolved_path = path or declared.get("path")
@@ -283,8 +259,7 @@ def data_ref(
     grouped = group_column or declared.get("group_column")
     if grouped:
         reference["group_column"] = str(grouped)
-    # DB 출처는 경로만으로 어느 행인지 정해지지 않는다. 질의가 ``path``와 같은 채널로 오는 이유도
-    # 같다 — 어떤 행이 존재하는지를 정하므로 프롬프트가 볼 수 없다.
+    # Table and query pick rows, so they stay private.
     for key, value in (("table", table), ("query", query)):
         resolved = value or declared.get(key)
         if resolved:
@@ -292,17 +267,12 @@ def data_ref(
     return reference
 
 
-# --------------------------------------------------------------------------- #
-# 학습 결과: denylist가 아니라 allowlist
-# --------------------------------------------------------------------------- #
+# --- Role: training result ------------------------------------------------------------
 
-# 오케스트레이터가 학습 실행에서 state에 남기는 것 전부. ``log_tail``과 ``artifacts``는 설계상
-# 없다 — 전체 로그는 디스크에 남고 프롬프트가 렌더되는 채널에 들어가지 않는다.
+# No ``log_tail`` or ``artifacts`` on purpose
 PUBLIC_RESULT_FIELDS: tuple[str, ...] = (
     "status",
-    # 지표가 어느 행에 대한 것인지: 루프 중에는 "val", 루프 뒤 한 번의 측정은 "test".
-    # ``model_path``와 ``schema_path``는 일부러 이 목록에 없다 — 적합된 estimator는 데이터와
-    # 등가이고, 스키마는 범주 수준과 클래스 라벨을 글자 그대로 나열한다.
+    # "val" in the loop, "test" for holdout.
     "split",
     "error_type",
     "train_time_sec",
@@ -312,27 +282,20 @@ PUBLIC_RESULT_FIELDS: tuple[str, ...] = (
     "dropped_hyperparams",
 )
 
-# 아래 넷은 키만이 아니라 *값*까지 걸러야 해서 따로 나른다. 필터는 값이 아니라 모양에 대한
-# 가드다 — 앞으로 생길 키가 객체로 도착하는 것을 막는다.
+# These keys get their values filtered too
 APPLIED_HYPERPARAMS_KEY = "applied_hyperparams"
-# {"impute": "median", "scale": true} — 실행기가 실제로 세운 파이프라인.
 APPLIED_PREPROCESSING_KEY = "applied_preprocessing"
-# {"held_out_rows": 414, "fit_rows": 2346, ...} — estimator의 early stopping이 떼어 둔 행 *개수*,
-# 그리고 결정 cut의 요청과 실행기의 거절 이유(``cut_requested``/``cut_declined``). 떼어 둔 것이 없고
-# cut을 묻지도 않은 흔한 경우에는 없다.
+# Row counts held back and cut requests; often absent.
 INTERNAL_VALIDATION_KEY = "internal_validation"
-# ``["missing_indicator(gcs, paco2)", "impute(median (constant: gcs, paco2))", "scale(auto)"]`` —
-# ``pipeline`` 명세가 실제로 낸 단계들, 순서대로 한 줄씩. mapping이 아니라 list여서 아래에
-# ``_public_params`` 대신 자기 필터가 붙는다.
+# A list of step lines, so it has its own filter.
 APPLIED_PIPELINE_KEY = "applied_pipeline"
-MAX_PIPELINE_LINE = 500
+MAX_PIPELINE_LINE = 500  # longest pipeline line kept, in characters
 
 
 def _public_params(params: Any) -> dict[str, Any]:
-    """렌더해도 되는 하이퍼파라미터 값: 스칼라, 또는 스칼라의 평평한 컨테이너.
+    """_public_params | Training result: keep scalars and flat containers of scalars.
 
-    LLM의 제안을 sklearn 파라미터 이름으로 좁힌 것이므로 행이 도착할 데이터 경로가 없다. 필터는
-    반대 경우를 위해 있다 — 프롬프트에 서식될 이유가 없는 객체나 중첩 구조.
+    Guards shape, not data
     """
     clean: dict[str, Any] = {}
     for key, value in (params if isinstance(params, dict) else {}).items():
@@ -343,16 +306,15 @@ def _public_params(params: Any) -> dict[str, Any]:
         elif isinstance(value, dict) and all(
             _is_scalar(item) for pair in value.items() for item in pair
         ):
-            # 한 단계만: 값은 가중치이고, 여기서 중첩 구조는 아예 다른 것이다.
+            # One level only; values are weights.
             clean[str(key)] = {str(name): item for name, item in value.items()}
     return clean
 
 
 def _public_paired(block: Any) -> dict[str, Any]:
-    """짝지은 비교 블록, 키 하나씩, 또는 ``{}``.
+    """_public_paired | Training result: rebuild the paired block key by key, or ``{}``.
 
-    모든 문자열 필드를 ``str``이 아니라 자기 어휘에 대고 검사한다 — ``status``·``unit``·``reason``은
-    :mod:`automl_agent.scoring.intervals`가 쓰는 낱말에, ``metric``은 지표 registry에.
+    Each string field is checked against its own word list
     """
     raw = block if isinstance(block, dict) else {}
     clean: dict[str, Any] = {}
@@ -361,8 +323,7 @@ def _public_paired(block: Any) -> dict[str, Any]:
     if raw.get("unit") in RESAMPLE_UNITS:
         clean["unit"] = raw["unit"]
     if canonical(str(raw.get("metric") or "")) in METRICS:
-        # 정규화된 이름이 아니라 호출자가 쓴 별칭: 이것은 passthrough이고, 장부는 이 필드를 목표가
-        # 말하는 것과 같은 지표 이름 옆에 찍는다.
+        # Keep the caller's alias, not the main name.
         clean["metric"] = raw["metric"]
     if str(raw.get("reason") or "") in PAIRED_REASONS:
         clean["reason"] = raw["reason"]
@@ -370,17 +331,15 @@ def _public_paired(block: Any) -> dict[str, Any]:
         if _is_number(raw.get(key)):
             clean[key] = raw[key]
     if isinstance(raw.get("threads_changed"), bool):
-        # 여기 유일한 boolean이라 자기 줄이 필요하다: 위 루프는 ``bool``을 거절한다 — 델타가 와야 할
-        # 자리의 ``True``는 점수로 렌더된다 (:mod:`automl_agent.threads`).
+        # The loop above rejects bools
         clean["threads_changed"] = raw["threads_changed"]
     return clean
 
 
 def public_result(result: dict[str, Any]) -> dict[str, Any]:
-    """날 ``result.json`` 짐을 allowlist를 통과시켜 공유 가능한 모양으로.
+    """Pass a raw ``result.json`` through the allowlist into a new, shareable dict.
 
-    지표는 숫자일 때만 남는다 — 앞으로의 model wrapper에서 나온 엉뚱한 문자열이 얹혀 올 자리가
-    지표 칸이다.
+    Only numeric metrics are kept; a failed result also gets ``error_summary``.
     """
     raw = dict(result or {})
     metrics = raw.get("metrics")
@@ -408,6 +367,6 @@ def public_result(result: dict[str, Any]) -> dict[str, Any]:
             clean[field] = raw[field]
     summary = scrub_message(str(raw.get("log_tail") or ""))
     if summary and clean.get("status") != "ok":
-        # 살아남는 단 하나의 텍스트 필드: 씻어낸 예외 줄.
+        # The only free-text field that survives.
         clean["error_summary"] = summary
     return clean

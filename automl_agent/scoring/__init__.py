@@ -1,13 +1,11 @@
-"""실행을 어떻게 재는지: 어느 지표로, 어느 행에서, 그리고 점수의 얼마가 잡음인지.
+"""Scoring rules: which metric, which rows, and how much is noise.
 
-``metrics``      registry — 실행이 목표로 삼을 수 있는 모든 지표와 그 성질.
-``goal``         루프가 넘으려는 바, 유도되거나 고정된.
-``splits``       어느 행이 학습하고, 어느 행이 조율하고, 어느 행을 끝까지 아무도 건드리지 않는지.
-``intervals``    점수의 얼마가 모델이고 얼마가 그것이 측정된 행인지.
-``calibration``  예측된 확률이 확률로 읽을 값이 있는지.
-``ranking``      랭킹만으로 정해지는 것과 작동점이 아직 살 수 있는 것.
+Roles:
 
-결정적인 측정 규칙이므로 그래프에서 자유롭다: 여기서 노드도, 프롬프트도, ``state``도 import하지 않는다.
-특히 ``metrics``는 sklearn에서도 자유롭고, 그것이 오케스트레이터 프로세스가 추정기 값을 치르지 않고
-그것을 import할 수 있게 하는 것이다 — 거기에 import를 더하기 전에 그 모듈 독스트링을 볼 것.
+* ``metrics`` — every metric a run can target.
+* ``goal`` — the bar the loop tries to pass.
+* ``splits`` — train, tune, and untouched holdout rows.
+* ``intervals`` — how much of a score is noise.
+* ``calibration`` — whether probabilities read as probabilities.
+* ``ranking`` — what the ranking decides, what a cut gains.
 """

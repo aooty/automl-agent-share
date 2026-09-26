@@ -1,12 +1,10 @@
-"""표의 열을 읽는 방식: 실행기가 쓸 수 있는 것, 그리고 각 값이 뜻하는 것.
+"""How the table's columns are read and what each value means.
 
-``features``   어느 열이 특성으로 쓸 수 있는지, 그리고 나머지가 숫자가 되는 방식.
-``targets``    타깃 열 인코딩, 그것이 함의하는 과제, 그리고 결측 라벨.
-``sentinels``  "결측"을 뜻하지만 측정치처럼 생겨서 도착하는 값들 (``-9999``).
-``caveats``    집계가 보여 주지 않는, 데이터에 대한 것들을 나르는 카드의 채널.
-``pipeline``   특성 공간 변환의 순서 있는 목록. JSON으로 선언되고 whitelist에서 해석된다.
+Roles:
 
-**이 패키지에 데이터 행은 살지 않는다** — 이름과 달리 여기 있는 것은 규칙과 어휘이고 저장소가
-아니다. 행은 subprocess(``scripts/``) 안에만 존재하고, 그것을 거기 붙들어 두는 경계는 한 단계
-위의 ``privacy``다.
+* ``features`` — which columns are features, and how they become numbers.
+* ``targets`` — target encoding, the implied task, and missing labels.
+* ``sentinels`` — "missing" codes that look like measurements (``-9999``).
+* ``caveats`` — facts about the data the aggregates do not show.
+* ``pipeline`` — ordered feature steps, declared in JSON, from a whitelist.
 """

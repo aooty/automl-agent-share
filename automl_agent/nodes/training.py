@@ -1,16 +1,11 @@
-"""Training 노드: 얇은 서브프로세스 래퍼. 실행 노드 — 여기에 LLM은 없다.
+"""Training node: a thin subprocess wrapper. An execution node, no LLM.
 
-늘 별도 프로세스인 이유:
+Roles:
 
-* OOM이나 강한 CUDA 오류가 오케스트레이터가 아니라 자식을 죽인다;
-* 프로세스 종료가 메모리를 전부 회수하므로, 긴 재계획 루프가 그것을 쌓을 수 없다.
-
-그래서 이 노드는 네 가지만 한다: config를 쓰고, ``scripts/train.py``를 띄우고, ``result.json``을
-파싱하고, 모든 실패를 Critic이 추론할 수 있는 보통의 결과로 바꾼다. 학습 실패에 절대 raise하지 않는다.
-
-원본 데이터 경계의 나머지 절반이기도 하다. 경로는 비공개 ``data_ref`` 채널에서 오고, state로 돌아가는
-것은 ``privacy.public_result`` — 지표, 상태, 시간, 그리고 씻어 낸 예외 한 줄. 예외 메시지 안에 셀 값을
-인용할 수 있는 전체 로그는 ``artifacts/<thread_id>/train/iter_NN/`` 아래 디스크에 남는다.
+* Training run: spawn ``scripts/train.py``; failures become normal results.
+* Config building: pass only settings the executor supports.
+* Failure results: results for attempts that could not start.
+* Dry-run trainer: fixed stand-in under ``--dry-run``.
 """
 
 from __future__ import annotations
@@ -29,22 +24,20 @@ from ..scoring.goal import goal_threshold
 from ..scoring.metrics import TASK_CLASSIFICATION, TASK_REGRESSION, card_task
 from ..state import AutoMLState, fit_share_sec, state_int
 
+# --- Role: training run ---------------------------------------------------------------
+
 
 def training(state: AutoMLState, *, config: RunConfig) -> dict:
-    """학습 시도 하나를 돌리고 ``{"result": ...}``를 돌려준다(공개 필드만)."""
+    """Run one training attempt and return its public result. Never raises on failure."""
     iteration = state_int(state, "iteration")
     if config.dry_run:
-        # 실제 결과와 같은 체를 지난다. 모킹된 경로가 Critic이 실제로 보는 모양에서 어긋날 수
-        # 없게.
+        # Same filter as a real result, so they match.
         return {"result": public_result(_mocked_result(state, config, iteration))}
 
-    # 이 적합에 허용된 것: 전체 예산이 아니라 실행의 남은 시간 중 자기 몫. 예산을 계산하지 않는
-    # 중이면 ``None``이고, 그때는 예전 상한이 적용된다.
+    # This fit's share of time; ``None`` means no budget.
     share = fit_share_sec(state)
     if share is not None and share <= 0:
-        # 아무것도 띄우지 않는다. ``route``가 반복 사이에 예산을 보지만 그 결정 뒤의 계획·모델 선택
-        # 호출도 시간을 쓰므로, 예산은 그 틈에서 소진될 수 있다. 1초 뒤 죽을 서브프로세스를 띄우면
-        # spawn이 느린 것으로 기록된다. 이것은 이유를 기록하고, ``route``가 다음에 실행을 끝낸다.
+        # Out of time: spawn nothing
         return {"result": public_result(_out_of_time(iteration))}
     timeout = config.train_timeout_sec if share is None else min(share, config.train_timeout_sec)
 
@@ -60,9 +53,7 @@ def training(state: AutoMLState, *, config: RunConfig) -> dict:
             json.dumps(train_config, indent=2, ensure_ascii=False), encoding="utf-8"
         )
     except OSError as exc:
-        # 아무것도 띄우지 않았으므로 실패를 읽어 낼 로그도 result.json도 없다. 가드 없이는 이것이
-        # 노드 밖으로 raise되어 오케스트레이터까지 데려갔다 — 파일에 대한 traceback 하나에
-        # 체크포인트된 실행을 잃는 것이고, 그것이 이 노드가 막으려고 존재하는 하나뿐인 실패 양태다.
+        # Return a failed result, never raise
         return {"result": public_result(_unwritable(iteration, config_path, exc))}
 
     command = [
@@ -82,15 +73,13 @@ def training(state: AutoMLState, *, config: RunConfig) -> dict:
     try:
         log_path.write_text(console, encoding="utf-8")
     except OSError as exc:
-        # 증거가 아니라 보관용 사본이다: ``console``은 이미 메모리에 있고 ``log_tail``은 아래에서 거기서
-        # 잘라 낸다. 그래서 이 시도는 자기 결과를 지키고, 사람이 나중에 읽었을 파일만 없어진다 — 소리 내어
-        # 말하는 이유는 조용히 없는 train.log가 아예 돌지 않은 시도처럼 보이기 때문이다.
+        # Warn: a missing log looks like no attempt ran.
         print(f"  [training] iteration {iteration}의 {log_path.name}을 저장하지 못했습니다: {exc}")
 
     result = read_json_object(result_path)
 
     if timed_out:
-        # 시간 예산을 집행하는 것은 자식이 아니라 여기, 오케스트레이터다.
+        # The orchestrator enforces the time limit, not the child.
         result = {
             "metrics": (result or {}).get("metrics", {}),
             "train_time_sec": round(elapsed, 3),
@@ -99,7 +88,7 @@ def training(state: AutoMLState, *, config: RunConfig) -> dict:
             "log_tail": _tail(console) or f"exceeded this fit's share of the time budget ({timeout:.0f}s)",
         }
     elif result is None:
-        # 파싱할 result 파일이 없다: 자식이 그것을 쓰기 전에 죽었다.
+        # The child died before writing its result.
         result = {
             "metrics": {},
             "train_time_sec": round(elapsed, 3),
@@ -113,20 +102,15 @@ def training(state: AutoMLState, *, config: RunConfig) -> dict:
     result["wall_time_sec"] = round(elapsed, 3)
     result["returncode"] = returncode
 
-    # 경계: log_tail과 artifact 경로를 하류에서 걸러 내는 대신 여기서 떨어뜨린다. 그래서
-    # ``result``는 구조적으로 프롬프트에 안전하고, 뒤의 어느 노드도 실수로도 그것을 흘릴 수 없다.
-    # 파일 자체는 work_dir에 남고 그것은 ``config.iteration_dir(iteration)``이다 — 유도 가능하므로
-    # state에 있을 필요가 없다.
+    # Boundary: drops log_tail and paths before state.
     return {"result": public_result(result)}
 
 
-# --------------------------------------------------------------------------- #
-# Config 조립
-# --------------------------------------------------------------------------- #
+# --- Role: config building ------------------------------------------------------------
 
 
 def build_train_config(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
-    """카드, 비공개 데이터 참조, 계획, 모델을 config로 옮긴다."""
+    """Build the ``train_config.json`` dict from card, data reference, plan, and model."""
     card = dict(state.get("dataset_card") or {})
     plan = dict(state.get("plan") or {})
     constraints = dict(card.get("constraints") or {})
@@ -141,25 +125,17 @@ def build_train_config(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
         "target_missing": {"policy": target_missing_policy(card, config)},
         "data": data_block(card, reference),
         "metric": str((state.get("goal") or {}).get("metric", config.metric)),
-        # 모델 이름을 어느 추정기 계열에서 해소할지, 그리고 — 읽을 열이 없는 합성 경로에서는 —
-        # 어느 생성기가 도는지. 실제 데이터에서는 스크립트가 정답 열을 직접 다시 읽고 *그것*을
-        # 따른다: 카드는 열을 기술하고, 권위는 열에 있다.
+        # Real data: the script re-reads the task from target.
         "task": card_task(card) or TASK_CLASSIFICATION,
         "seed": config.seed,
     }
     steps = pipeline_block(plan)
     if steps:
-        # executor에서 ``preprocessing``에 합쳐지는 것이 아니라 그것을 대체한다 — spec이 오면
-        # executor는 플래그를 무시하고, 둘 다 보내면 한 파이프라인의 기술이 config에 둘 들어가면서
-        # 어느 쪽이 돌았는지 말할 수 있는 것이 없어진다. 플래그가 파일에 남는 이유는 카드의 기본값이
-        # 여전히 거기 살고, 모르는 단계만으로 된 spec은 그 기본값이 아니라 아무것도 없는 쪽으로
-        # 떨어지기 때문이다.
+        # Replaces ``preprocessing``, not merged
         train_config["pipeline"] = steps
     decision = decision_block(plan)
     if decision:
-        # 무언가 청했을 때만. 그래서 조율하지 않는 실행은 늘 쓰던 ``train_config.json``을 그대로
-        # 쓴다 — 그것이 앞선 시도의 config를 뒤의 것에 대고 재생해서 계획이 다른 곳에서만 다르게
-        # 만드는 것이다.
+        # Only when asked for
         train_config["decision"] = decision
     baseline = paired_baseline(state, config)
     if baseline:
@@ -167,31 +143,21 @@ def build_train_config(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
     if constraints.get("memory_limit_mb"):
         train_config["memory_limit_mb"] = constraints["memory_limit_mb"]
     if card.get("simulate"):
-        # 코드가 아니라 카드가 선언한 실패 주입 훈련.
+        # Failure drill declared by the card, not code.
         train_config["simulate"] = card["simulate"]
     return train_config
 
 
 def paired_baseline(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
-    """이 시도를 행 단위로 견줄 앞선 시도.
+    """Pick the current best as the row-by-row baseline, as iteration and path.
 
-    실행의 현재 최고 — 모든 소비자가 이미 하는 그 비교다(ledger의 "직전 최고 대비", ``evaluate``의
-    ``improved``, 보고서의 대표 줄). ``best``는 :mod:`automl_agent.nodes.evaluate`의 것이고 그것은
-    training *뒤에* 도므로, 여기서는 iteration 1..N-1의 최고를 담는다: 뺄셈이 쓰는 바로 그 baseline이다.
-
-    config에 들어가는 것은 반복 번호와 경로이고, 예측은 절대 아니다. 경로는 번호의 순함수이므로 state가
-    파일 내용을 기억할 필요가 없고, 파일을 읽는 것은 학습 서브프로세스다 — 이미 경계의 데이터 쪽이다.
-
-    아직 baseline이 없거나 그 반복이 예측 파일을 남기지 않았으면(오류, 또는 쓰기 실패) ``{}``. executor가
-    둘 다 침묵이 아니라 이유가 붙은 ``skipped`` 블록으로 바꾼다.
+    Returns ``{}`` with no baseline or no predictions file
     """
     iteration = (state.get("best") or {}).get("iteration")
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
         return {}
     if iteration == state_int(state, "iteration"):
-        # 그래프를 통해서는 일어날 수 없다 — ``evaluate``가 이 반복에 대해 아직 안 돌았다 — 그러나
-        # 재개된 실행은 체크포인트에서 state를 다시 세우고, 자신과 짝지어진 시도는 정확히 0인 델타와
-        # 0인 P를 공개하는데, 그것은 기록 오류가 아니라 측정된 미개선으로 읽힌다.
+        # Resumed runs only; self-pairing fakes a zero delta.
         return {}
     path = config.predictions_path(iteration)
     if not path.exists():
@@ -200,12 +166,9 @@ def paired_baseline(state: AutoMLState, config: RunConfig) -> dict[str, Any]:
 
 
 def target_missing_policy(card: dict[str, Any], config: RunConfig) -> str:
-    """이 시도가 따르는 라벨 없는 행 정책.
+    """Choose the missing-label policy: flag, then card, then ``reject``.
 
-    플래그가 주어졌으면 그것이 이긴다. 그 밖에는 카드의 것인데, ``--on-missing-target drop``으로 세운
-    카드는 이미 줄어든 행 집합을 기술하고 있고, 다른 정책으로 학습하면 baseline이 측정된 것과 다른
-    데이터셋을 채점하게 되기 때문이다. 둘 다 없으면 ``reject``: 라벨 없는 행은 기본적으로 데이터 준비
-    버그다.
+    Why this order:
     """
     if config.on_missing_target:
         return config.on_missing_target
@@ -215,8 +178,7 @@ def target_missing_policy(card: dict[str, Any], config: RunConfig) -> str:
     return DEFAULT_TARGET_MISSING_POLICY
 
 
-# ``scripts.train.PREPROCESSING_ALIASES``와 발을 맞춰 둔다. 여기서 그것을 import할 수 없는 이유는
-# 그 모듈이 sklearn을 끌어오고 오케스트레이터 프로세스는 그러지 않기 때문이다.
+# Copy of ``scripts.train.PREPROCESSING_ALIASES``; importing loads sklearn.
 _PREPROCESSING_ALIASES: dict[str, str] = {
     "add_missing_indicators": "missing_indicator",
     "add_missing_indicator": "missing_indicator",
@@ -228,22 +190,14 @@ _PREPROCESSING_ALIASES: dict[str, str] = {
 
 
 def preprocessing_block(plan: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
-    """executor가 실제로 존중하는 전처리 설정만 통과시킨다.
+    """Pass through only preprocessing settings the executor supports.
 
-    ``plan.preprocessing``은 자유 형식 LLM 출력이다. ``train.py``가 구현하는 것은 행렬 전체에 대한 대치
-    전략 하나와 스케일에 민감한 추정기용 스케일링뿐이므로, 나머지를 흘려보내면 검증되지 않은 모델 작성
-    키가 executor의 config 파일에 들어가고 보고서가 돌지 않은 변환을 주장하게 된다.
-
-    ``none``은 모델 계열을 보지 않고 통과시킨다. 계열 검사는 executor의 몫이기 때문이다:
-    ``_wrap_preprocessing``이 모든 경로가 — 이 노드가 본 적 없는 손으로 쓴 config까지 — 도착하는 곳이고,
-    계열이 NaN을 받을 수 없으면 거기서 요청을 낮춘다.
+    Plan first, card as fallback
     """
     raw = plan.get("preprocessing") or card.get("preprocessing") or {}
     if not isinstance(raw, dict):
         return {}
-    # 별칭을 executor에서만이 아니라 여기서도 정규화한다. 전략 목록을 되적는 것과 같은 이유의 의도된
-    # 반복이다: 이 노드는 executor가 보기 전에 그 키를 받아들여야 하고, executor는 이 노드가 건드린 적
-    # 없는 손으로 쓴 config에서 그것을 받아들여야 한다.
+    # Also done in the executor, on purpose
     raw = {_PREPROCESSING_ALIASES.get(str(name), str(name)): value for name, value in raw.items()}
     block: dict[str, Any] = {}
     impute = raw.get("impute")
@@ -255,20 +209,14 @@ def preprocessing_block(plan: dict[str, Any], card: dict[str, Any]) -> dict[str,
     return block
 
 
-# ``scripts.train.DECISION_TUNED``와 발을 맞춰 둔다. ``_PREPROCESSING_ALIASES``와 같은 이유로 여기
-# 되적는다: 이 노드가 executor가 보기 전에 그 값을 세워야 한다.
+# Copy of ``scripts.train.DECISION_TUNED``, same reason.
 _DECISION_TUNED = "tuned"
 
 
 def decision_block(plan: dict[str, Any]) -> dict[str, Any]:
-    """계획의 ``tune_threshold``를 executor의 ``decision`` config로 바꾼다.
+    """Turn ``tune_threshold is True`` into ``{"threshold": "tuned"}``, else ``{}``.
 
-    불리언이 들어가고 문자열이 나오는 비대칭이 요점이다: executor의 키는 ``"tuned"`` *또는* 명시적 컷을
-    받는데, 손으로 쓴 config나 테스트에는 하나를 지목할 이유가 있다. *계획*에는 없다 — planner는 이 모델의
-    확률을 본 적이 없으므로, 거기서 나온 수는 그 분포에 대한 짐작이 결정으로 분장한 것이다.
-
-    ``True``만 센다. ``False``와 없음은 같은 요청(기본 0.5 규칙)이고 둘 다 ``{}``를 주므로, config 파일은
-    "이전과 같음"을 뜻하는 키를 지니는 대신 그대로 남는다.
+    A plan never names a cut
     """
     if plan.get("tune_threshold") is True:
         return {"threshold": _DECISION_TUNED}
@@ -276,19 +224,7 @@ def decision_block(plan: dict[str, Any]) -> dict[str, Any]:
 
 
 def _named_step(entry: dict[str, Any]) -> dict[str, Any]:
-    """``{"impute": {...}}``를 ``{"step": "impute", ...}``로 편다.
-
-    제안자가 실제로 쓴 모양이다. 단계 이름이 ``step``의 *값*이라는 것은 CAN 목록도 planning 프롬프트도
-    글자로 보여주지 않으므로(둘 다 "a list of steps"까지만 말한다) 모델은 껍데기를 짐작해야 하고, 이름을
-    키로 적는 쪽을 짐작한다. 짐작이 틀렸을 때 실제로 일어난 일: 명세 전체가 아래의 ``step`` 검사에서
-    조용히 떨어지고, config에 ``pipeline`` 키가 아예 없고, executor는 플래그 경로를 돌고, 서로 다른
-    전처리를 청한 세 반복이 바이트 단위로 같은 config로 같은 점수를 냈다.
-
-    읽는 쪽에서 받는 이유는 여기가 모든 명세가 지나는 한 곳이기 때문이다. 애매하지 않을 때만 편다 —
-    키가 하나뿐이고, 그것이 아는 단계 이름이고, 값이 dict일 때. 그 밖에는 손대지 않고 원래의 검사에
-    보낸다. 껍데기 안의 ``step``보다 키 쪽 이름이 이기는 이유는 이 모양에서 이름을 적는 자리가
-    키이기 때문이다.
-    """
+    """_named_step | Config building: unwrap ``{"impute": {...}}`` into ``{"step": "impute", ...}``."""
     if "step" in entry or len(entry) != 1:
         return entry
     name, body = next(iter(entry.items()))
@@ -298,21 +234,9 @@ def _named_step(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def pipeline_block(plan: dict[str, Any]) -> list[dict[str, Any]]:
-    """executor가 해석할 순서 있는 파이프라인 spec만 통과시킨다.
+    """Pass through only pipeline steps with known names, columns sorted.
 
-    ``plan.pipeline``도 자유 형식 LLM 출력이고 이것이 그 문이다. :func:`preprocessing_block`과 같은
-    조건이다: 모르는 단계 이름은 config 파일에 절대 닿지 않으므로, executor는 모르는 이름을 해소하라고
-    요청받지 않고 어떤 보고서도 구현 없는 변환을 주장할 수 없다. 이름은
-    :data:`automl_agent.dataset.pipeline.STEPS`에서 오고, 되적는 대신 import한다 — 그 모듈은 import 시점에
-    stdlib보다 멀리 닿지 않고, 그래서 registry가 ``scripts/train.py``가 아니라 거기 산다.
-
-    단계 *안쪽*의 키는 일부러 여기서 걸러지 않는다. executor가 각각을 곧 세울 대상에 대고 검증하고(전략은
-    imputer 자신의 목록에, 열은 적합된 스키마에, 차수는 존재하는 것에) 자기가 한 일을
-    ``applied_pipeline``에 보고한다. 여기서 두 번째 검증을 하려면 그 세 목록의 두 번째 사본이 필요하고,
-    어긋나는 것은 그 사본이다.
-
-    ``columns``는 있으면 정렬한다. 그래서 한 선택의 두 표기가
-    :func:`automl_agent.nodes.planning._signature`에게 두 계획이 아니라 하나의 서명이 된다.
+    Keys inside a step are checked by the executor
     """
     raw = plan.get("pipeline")
     if not isinstance(raw, list):
@@ -334,11 +258,9 @@ def pipeline_block(plan: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def data_block(card: dict[str, Any], reference: dict[str, Any] | None = None) -> dict[str, Any]:
-    """비공개 데이터 참조를 ``train.py``의 데이터 계약에 맞춘다.
+    """Build the ``data`` block: real rows from ``data_ref``, else synthetic from the card.
 
-    ``path``가 있는 참조는 실제 행에서 학습한다. 없으면 카드가 선언한 모양을 합성하므로, 카드만으로도
-    여전히 루프 전체를 돌릴 수 있다. 경로는 ``data_ref``에서 오고 카드에서는 절대 오지 않는다는 점에
-    주의: 이 노드에 닿는 카드는 이미 비공개 ``data`` 블록이 벗겨져 있다.
+    The path comes only from ``data_ref``, never the card.
     """
     declared = dict(reference or {})
     if declared.get("path"):
@@ -347,12 +269,10 @@ def data_block(card: dict[str, Any], reference: dict[str, Any] | None = None) ->
             "target_column": declared.get("target_column") or card.get("target_column") or "target",
         }
         if declared.get("group_column"):
-            # 전달만 하고 기본값을 세우지 않는다: 카드의 baseline이 측정된 분할 규약이 train.py가
-            # 재현하는 것이어야 한다.
+            # No default: repeat the baseline's split.
             block["group_column"] = str(declared["group_column"])
         for key in ("table", "query"):
-            # DB 출처에서 어느 행을 읽는가. 카드가 프로파일된 행과 학습되는 행이 같아야 하므로
-            # 같은 참조에서 그대로 옮긴다.
+            # Same rows as profiling read.
             if declared.get(key):
                 block[key] = str(declared[key])
         return block
@@ -364,8 +284,7 @@ def data_block(card: dict[str, Any], reference: dict[str, Any] | None = None) ->
         "n_features": int(card.get("n_features", 20) or 20),
     }
     if card_task(card) == TASK_REGRESSION:
-        # 클래스도, 분리도, 라벨 뒤집기도 없다 — 그 셋의 연속 대응물은 하나의 수, 즉
-        # ``make_regression``이 더하는 줄일 수 없는 잡음이다.
+        # Regression has only ``make_regression`` noise.
         synthetic["noise"] = float(difficulty.get("noise", 10.0) or 10.0)
     else:
         synthetic.update(
@@ -381,22 +300,11 @@ def data_block(card: dict[str, Any], reference: dict[str, Any] | None = None) ->
     return {"path": None, "target_column": declared.get("target_column", "target"), "synthetic": synthetic}
 
 
-# --------------------------------------------------------------------------- #
-# 결과 파싱 보조
-# --------------------------------------------------------------------------- #
+# --- Role: failure results ------------------------------------------------------------
 
 
 def _unwritable(iteration: int, path: Path, exc: OSError) -> dict[str, Any]:
-    """시작할 수 없었던 시도, 다른 모든 실패한 시도와 같은 모양으로.
-
-    꽉 찬 디스크나 읽기 전용 ``artifacts/``는 모델링 실패가 아니고, Critic이 제안할 수 있는 어떤 변경도
-    그것을 고치지 못한다 — 그래서 콘솔 줄이 운영자가 똑같은 세 반복에서 추론하게 두는 대신 그것을 대놓고
-    말한다. 결과는 그래도 보통 채널을 지난다. 대안(raise)은 실행을 버리기 때문이다.
-
-    ``error_type``이 가장 가까운 기존 이름이 아니라 자기 이름인 이유: ``config_error``는
-    ``critic.ERROR_TYPE_MAP``에서 ``data_issue``로 가고, 그러면 Critic이 공간이 없는 디스크에 대고 열
-    수정을 처방한다.
-    """
+    """_unwritable | Failure results: result when the config could not be written."""
     print(
         f"  [training] iteration {iteration}의 {path.name}을 쓸 수 없습니다: {exc}\n"
         "    학습이 실패한 것이 아니라 디스크나 권한 문제입니다 — 제안을 바꿔도 다음 "
@@ -415,16 +323,7 @@ def _unwritable(iteration: int, path: Path, exc: OSError) -> dict[str, Any]:
 
 
 def _out_of_time(iteration: int) -> dict[str, Any]:
-    """실행 예산에 자리가 없었던 시도, 다른 모든 실패한 시도와 같은 모양으로.
-
-    자기 이름이 아니라 ``too_slow``인 이유는 루프 쪽에서 보면 시간을 넘긴 적합과 같은 사실이기 때문이다:
-    이 반복은 점수를 내지 못했고 이유는 시계다. ``critic.ERROR_TYPE_MAP``은 이미 그것을 비용에 대한
-    진단으로 보내고, 어차피 Critic은 다시 돌지 않는다 — ``route``가 여기서 본 것과 같은 예산으로 실행을
-    끝낸다.
-
-    ``train_time_sec``는 0.0이고 그것이 정직한 값이다: 아무것도 적합하지 않았다. 비용 0으로 읽히면서
-    실패한 시도가 정확히 일어난 일이고, 독자가 이것을 초가 정말 쓰인 timeout 경우와 가르는 방법이다.
-    """
+    """_out_of_time | Failure results: result when no time is left."""
     print(
         f"  [training] iteration {iteration}: 시간 예산이 이 시도를 시작하기 전에 소진됐습니다 "
         "— 학습을 시작하지 않았습니다.\n"
@@ -443,20 +342,15 @@ def _out_of_time(iteration: int) -> dict[str, Any]:
 
 
 def _tail(text: str, limit: int = 4000) -> str:
+    """_tail | Training run: keep the last ``limit`` characters of output."""
     return text[-limit:]
 
 
-# --------------------------------------------------------------------------- #
-# --dry-run 학습기
-# --------------------------------------------------------------------------- #
+# --- Role: dry-run trainer ------------------------------------------------------------
 
 
 def _mocked_result(state: AutoMLState, config: RunConfig, iteration: int) -> dict[str, Any]:
-    """``--dry-run <시나리오>``로 고르는, 학습의 결정적인 대역.
-
-    궤적이 반복 번호에서 나오므로 모든 시나리오가 ``route``의 서로 다른 분기로 끝난다: 목표 도달, 반복
-    예산, 정체.
-    """
+    """_mocked_result | Dry-run trainer: fixed fake result for ``--dry-run <scenario>``."""
     goal = dict(state.get("goal") or {})
     threshold = goal_threshold(goal, config.fallback_threshold)
     metric = str(goal.get("metric", config.metric))
@@ -471,8 +365,7 @@ def _mocked_result(state: AutoMLState, config: RunConfig, iteration: int) -> dic
                 f"train_{metric}": round(min(1.0, score + 0.06), 4),
                 "train_val_gap": 0.06,
             },
-            # 추정기를 세우지 않았으므로 좁혀진 것도 낮춰진 것도 없다: 제안이 곧 돌아간 것이다.
-            # 그래도 넣어 둔다. 모킹된 경로가 실제 경로의 모양을 갖게.
+            # Nothing dropped; kept for the real result's shape.
             "applied_hyperparams": dict(state.get("hyperparams") or {}),
             "dropped_hyperparams": [],
             "applied_preprocessing": preprocessing_block(
@@ -496,13 +389,13 @@ def _mocked_result(state: AutoMLState, config: RunConfig, iteration: int) -> dic
         }
 
     if scenario == "success":
-        # 세 번째 시도에서 목표에 닿는다.
+        # Reaches the goal on the third attempt.
         return ok(threshold - 0.09 + 0.05 * (iteration - 1))
     if scenario == "fail":
-        # 바를 넘기에는 너무 느리게 나아진다: 반복 예산에서 끝난다.
+        # Too slow to pass: ends on iteration budget.
         return ok(threshold - 0.20 + 0.02 * (iteration - 1))
     if scenario == "oom":
-        # 첫 시도가 터지고, Critic의 축소 권고가 회복시킨다.
+        # First attempt OOMs, then the Critic's advice recovers.
         if iteration <= 1:
             return failed("oom")
         return ok(threshold - 0.05 + 0.06 * (iteration - 2))
@@ -514,5 +407,5 @@ def _mocked_result(state: AutoMLState, config: RunConfig, iteration: int) -> dic
         if iteration <= 1:
             return failed("crash")
         return ok(threshold - 0.06 + 0.07 * (iteration - 2))
-    # "stall": 영원히 같은 점수이므로 stall_count가 실행을 끝낸다.
+    # "stall": same score forever, so stall_count ends it.
     return ok(threshold - 0.10)

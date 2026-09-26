@@ -1,10 +1,13 @@
-"""고정 실행기가 할 수 있는 것과 못 하는 것. 프롬프트와 계획 검사가 함께 읽는 하나의 목록.
+"""The fixed executor's can and cannot list, shared by the prompts and the plan check.
 
-실행기의 모양에 대한 단 하나의 출처다: :func:`describe`가 프롬프트에 주입하고
-:func:`unsupported_claims`가 돌아온 것을 훑는다 — 사본이 둘이면 어긋날 수 있다.
+Roles:
 
-**플래그만 하고 절대 거절하지 않는다.** 마커는 부분 문자열 매치이고, 온전한 계획을 버린 false
-positive는 결함 있는 계획과 같은 iteration을 치른다.
+* Capability records — one thing the executor does not do.
+* Executor numbers — sklearn and split numbers the entries quote.
+* Capability list — what the executor does and does not do.
+* Negation words — words that mark a phrase as denied.
+* Prompt rendering — turn the list and row counts into prompts.
+* Claim detection — find plan prose needing a missing capability.
 """
 
 from __future__ import annotations
@@ -17,52 +20,46 @@ from typing import Any
 from .scoring.metrics import TASK_CLASSIFICATION, TASK_REGRESSION
 from .scoring.splits import TEST_FRACTION, TRAIN_SHARE, VAL_SHARE, row_counts
 
+# --- Role: capability records ---------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class Capability:
-    """실행기가 하지 않는 것 하나와, 그 대신 해 주는 가장 가까운 것."""
+    """One thing the executor does not do, and the closest thing it does instead."""
 
     name: str
     summary: str
     instead: str
-    # 계획이 이것에 의존한다는 표시가 되는 소문자 부분 문자열. 비어 있으면 프롬프트에 적을
-    # 값은 있지만 오경보 없이 잡기에는 너무 흐릿한 한계다.
+    # Lowercase substrings; empty means state it, never detect it.
     markers: tuple[str, ...] = field(default_factory=tuple)
-    # 어느 태스크에서 이 한계를 *말할* 값이 있는지. 탐지는 일부러 이걸로 걸러지지 않는다 —
-    # :func:`unsupported_claims` 참고.
+    # Tasks to state it for; detection ignores this
     tasks: tuple[str, ...] = (TASK_CLASSIFICATION, TASK_REGRESSION)
 
 
-# 아래 항목들이 인용하는 수. 적어 넣지 않고 보간하는 것은, 두 번 적힌 비율은 실행기와 어긋날
-# 수 있기 때문이다.
+# --- Role: executor numbers -----------------------------------------------------------
 
-# sklearn은 ``early_stopping='auto'``를 ``n_samples > 10_000``으로 푼다 — 초과이고, ``fit``에
-# 넘긴 행 수로 센다. 파일이 아니라 train 분할이다.
+# sklearn auto early stopping: strictly above this, on train rows.
 EARLY_STOPPING_AUTO_MIN_ROWS = 10_000
 
-# 학습 행에서 자기 검증 조각을 떼어 가는 추정기들과, 조기 종료를 시키면서 크기는 알려주지 않을
-# 때 가져가는 비율. 둘 다 sklearn 기본값이고, 버전이 오를 때 한 자리만 고치도록 여기 둔다.
+# sklearn defaults: models that early-stop on a train slice.
 SELF_VALIDATING_MODELS = ("hist_gbdt", "mlp")
 DEFAULT_VALIDATION_FRACTION = 0.1
 
-# ``tune_threshold``가 컷을 고르려고 train에서 떼어 두는 비율. sklearn까지 끌고 오는
-# ``scripts.train``에서 import하지 않고 다시 적는다. 둘은 테스트가 묶어 둔다.
+# Copy of ``scripts.train``'s value (avoids sklearn); a test ties them.
 CUT_FRACTION = 0.2
 
 
-# 실행기가 실제로 하는 일. 의도가 아니라 코드에서 옮겨 적었다 — ``scripts/train.py``의
-# ``run_training``·``build_estimator``, 단계는 ``dataset/pipeline.py``.
+# --- Role: capability list ------------------------------------------------------------
 
-# 시도 1회에 모델 1개.
+# Copied from ``scripts/train.py`` and ``dataset/pipeline.py``, not intent.
+
 _ONE_ESTIMATOR = "Fit exactly one estimator from the model list per attempt."
-# `hyperparams`는 sklearn 이름 그대로 전달하고, 못 받는 키는 버린 뒤 기록한다.
 _HYPERPARAMS = (
     "Apply proposed `hyperparams` through `set_params`, under sklearn's own names "
     "(a small alias map covers `n_estimators`→`max_iter` for hist_gbdt and similar). "
     "Keys the estimator does not accept are dropped and recorded in "
     "`dropped_hyperparams`."
 )
-# 클래스 가중치로 운용점을 옮기는 레버. threshold와 같은 축이라 한 시도에 같이 쓰지 않는다.
 _CLASS_WEIGHT = (
     "Rebalance classes through the estimator's own `class_weight` — `'balanced'`, or an "
     'explicit weight per class such as `{"0": 1, "1": 10}`, whose keys are class codes '
@@ -76,12 +73,9 @@ _CLASS_WEIGHT = (
     "the cut is indirect; the threshold moves the cut and nothing else. Doing both in one "
     "attempt leaves two owners for whatever the score does."
 )
-# 학습 행을 비율로 줄인다.
 _SUBSAMPLE = "Cut the training set with `train_subsample` (a float strictly between 0 and 1)."
-# 이 모듈에서는 단어 사이에 슬래시를 쓰지 않는다: ``redact_paths``가 렌더된 프롬프트를 훑으며
-# ``median/mean``을 ``median<path>``로 바꾼다.
+# No slash between words here: ``redact_paths`` would mangle it.
 
-# `preprocessing` 플래그로 하는 전처리 — 전략 하나를 모든 열에 적용, `none`은 NaN을 쪼개는 계열만.
 _PREPROCESSING = (
     "Impute and scale as the plan's `preprocessing` block asks, falling back to the dataset "
     "card's: `impute` as one of `median`, `mean` or `most_frequent`, applied to every column "
@@ -91,7 +85,6 @@ _PREPROCESSING = (
     "Each attempt reports the pipeline that was really built in `applied_preprocessing`, so "
     "a downgrade is visible in the history rather than only in the training log."
 )
-# 결측을 열로 만드는 두 단계, 그리고 그 크기를 근거로 쓰면 안 되는 이유.
 _MISSINGNESS = (
     "Turn missingness into columns, both booleans and both applied before imputation: "
     "`missing_indicator` appends one 0 or 1 column per input column, and `missing_count` "
@@ -130,10 +123,7 @@ _MISSINGNESS = (
     "a row was recorded rather than the subject's state, these columns let the model learn "
     "the recording regime — a random split scores that as a gain instead of showing it."
 )
-# 랭킹 축에 순서가 없다. 이 항목이 이제 인용하지 않는 크기들은 표본 하나, 실행 하나여서
-# 어디로도 일반화되지 않는다.
-#
-# 레버는 자기가 움직이는 축에서 값을 매겨라 — `balanced_accuracy` 차이만으로는 순서를 못 정한다.
+# Dropped sizes live in ``docs/contracts.md`` and ``docs/FINDINGS-mimic.md``.
 _LEVER_AXES = (
     "Price a lever on the axis it moves, because two of them move independently and "
     "`balanced_accuracy` is their sum. The *ranking* axis is what `roc_auc`, `pr_auc` and "
@@ -166,7 +156,6 @@ _LEVER_AXES = (
     "says that share is out of reach, it says how much of the shortfall the "
     "cheap lever can take and how much needs the ranking."
 )
-# 확률을 확률로 읽어도 되는지 보는 진단값 — 재보정 레버는 없다.
 _CALIBRATION_DIAGNOSTICS = (
     "Report whether the predicted probabilities are worth reading as probabilities, without "
     "changing them: `brier` is the mean squared error of the positive-class probability, and "
@@ -182,7 +171,6 @@ _CALIBRATION_DIAGNOSTICS = (
     "shortfall: a model can rank well and still be systematically overconfident, and no metric "
     "in the registry would show it."
 )
-# 순서가 있는 `pipeline` 스펙 — 열 단위 지정과 단계 조합이 플래그로는 안 되던 것.
 _PIPELINE_SPEC = (
     "Take an ordered `pipeline` — a list of steps, each naming the columns it applies to — "
     "instead of the four `preprocessing` flags. Give one or the other: a spec makes the "
@@ -221,7 +209,6 @@ _PIPELINE_SPEC = (
     "One sample, one split, and the sizes are deliberately not quoted: read these as the "
     "reason the step exists, not as what it will buy here."
 )
-# `batch_size`와 `precision`은 메모리 추정용 힌트일 뿐, 학습을 바꾸지 않는다.
 _MEMORY_HINTS = (
     "Read `batch_size` and `precision: fp16` as *memory-budget hints only* — they "
     "change the pre-flight memory estimate, not how the model is fitted."
@@ -229,7 +216,7 @@ _MEMORY_HINTS = (
 
 
 def _scoring_protocol(strata: str, extra: str = "") -> str:
-    """채점 항목 둘이 함께 여는 분할 프로토콜. 비율은 ``scoring.splits``에서 온다."""
+    """_scoring_protocol | Capability list: split protocol text both scoring entries share."""
     return (
         f"Score on a fixed protocol: {strata} three-way split at the run's seed — train "
         f"{TRAIN_SHARE:.0%}, validation {VAL_SHARE:.0%}, test {TEST_FRACTION:.0%} — where every "
@@ -240,7 +227,6 @@ def _scoring_protocol(strata: str, extra: str = "") -> str:
     )
 
 
-# 분류 채점 — 고정 3분할 프로토콜과 검증 분할에서 보고되는 지표들.
 _CLASSIFICATION_SCORING = _scoring_protocol("a stratified") + (
     "every "
     "metric in the registry, plus `train_f1`/`train_accuracy`/`train_<goal metric>` "
@@ -248,7 +234,6 @@ _CLASSIFICATION_SCORING = _scoring_protocol("a stratified") + (
     "`specificity`, which no goal may target but which names the direction the imbalance "
     "lever has to move: `balanced_accuracy` is the mean of `recall` and `specificity`."
 )
-# 컷을 건드리기 전에 읽을 진단 — 남은 여유가 작으면 부족한 쪽은 랭킹이다.
 _CUT_DIAGNOSTICS = (
     "Report what the decision threshold is worth on this ranking, whether or not the plan "
     "moved it: `balanced_accuracy_at_best_cut` is the best `balanced_accuracy` any cut of this "
@@ -260,7 +245,6 @@ _CUT_DIAGNOSTICS = (
     "remaining gap is in the ranking, which means the model family or the features, not "
     "`class_weight` and not the threshold."
 )
-# 임계값 스윕 — 레버의 모양과 거절 조건, 그리고 균형 잡힌 타깃에서는 살 것이 없다는 것.
 _THRESHOLD_TUNING = (
     "Choose the decision threshold, when the plan sets `tune_threshold: true` on a binary "
     f"target. The executor then holds {CUT_FRACTION:.0%} of the *training* rows out of the fit, sweeps the "
@@ -291,10 +275,6 @@ _THRESHOLD_TUNING = (
     "is not `balanced_accuracy` chosen on it: the two argmaxes are different cuts, so the "
     "metric the run is judged on is the one that moves, and the others can fall."
 )
-# `train_val_gap`을 실행기가 정규화하는 것은, 날 차이는 `r2`와 `mae` 사이에서 부호가 뒤집히기
-# 때문이다.
-#
-# 회귀 채점 — 같은 프로토콜에서 strata와 결정 규칙만 빠진다.
 _REGRESSION_SCORING = _scoring_protocol(
     "an unstratified", " There are no strata because the target is continuous."
 ) + (
@@ -305,8 +285,7 @@ _REGRESSION_SCORING = _scoring_protocol(
     "one fixed order."
 )
 
-# 순서가 의미를 나른다 — 프롬프트는 위에서 아래로 읽히므로, 레버는 그것을 값 매기는 수보다
-# 앞서지 않고, 문법은 그것이 순서 짓는 변환들보다 앞서지 않는다.
+# Order carries meaning
 CAN: tuple[str, ...] = (
     _ONE_ESTIMATOR,
     _HYPERPARAMS,
@@ -340,16 +319,13 @@ CAN_BY_TASK: dict[str, tuple[str, ...]] = {
 }
 
 
-# 능력이 ``CAN``으로 옮겨가면 마커도 함께 옮기거나 지운다 — 항목을 여기 남기려고 좁히는 일은
-# 없다. 부분 문자열은 지원되는 요청과 안 되는 요청을 구분할 수 없어서, 좁힌 항목은 둘 다
-# 플래그한다.
+# Moving to CAN: move markers too, never narrow
 CANNOT: tuple[Capability, ...] = (
     Capability(
         name="cross_validation",
         summary="Run cross-validation or produce out-of-fold predictions.",
         instead=(
-            # "stratified"는 분기하지 않고 빼 둔다 — 분할에 strata가 있는지는 태스크별
-            # 채점 항목이 이미 말한다. 여기서 중요한 것은 그것이 하나라는 점이다.
+            # No "stratified": the scoring entry already says so.
             f"there is one {VAL_SHARE:.0%} validation split, fixed by the seed and shared with the "
             "card's baseline so the two numbers are comparable"
         ),
@@ -363,8 +339,7 @@ CANNOT: tuple[Capability, ...] = (
             "oof predict",
             "k-fold",
             "kfold",
-            # 계획이 실제로 쓰는 대로의 fold 수. 맨 "-fold"는 뺀다 — "a ten-fold speedup"도
-            # 걸린다.
+            # No bare "-fold": "a ten-fold speedup" would match.
             " folds",
             "per-fold",
             "each fold",
@@ -390,8 +365,7 @@ CANNOT: tuple[Capability, ...] = (
             "dropping — a column you want out has to leave the card, not the plan"
         ),
         markers=(
-            # 결측 지시자·교차항 마커는 없다 — 실행기가 둘 다 해 주고, ``polynomial
-            # feature``는 덤으로 빗나간 표현이다 (step이 `interaction_only`라 제곱항이 없다).
+            # No indicator or interaction markers
             "feature engineering",
             "engineered feature",
             "derived feature",
@@ -432,7 +406,7 @@ CANNOT: tuple[Capability, ...] = (
             "platt scaling",
             "sigmoid calibration",
         ),
-        # 연속 타깃에는 재보정할 예측 확률이 없다.
+        # A continuous target has no probabilities.
         tasks=(TASK_CLASSIFICATION,),
     ),
     Capability(
@@ -468,8 +442,7 @@ CANNOT: tuple[Capability, ...] = (
             "imputation differs; do not describe a transformer to build"
         ),
         markers=(
-            # 이들은 결과가 아니라 *객체*를 이름 짓고, 구현이 없는 쪽은 그 객체다. 열 단위
-            # 대치는 해 주므로 마커가 없다.
+            # Name the missing object; per-column imputation is supported.
             "columntransformer",
             "column-specific scal",
             "per-column scal",
@@ -501,12 +474,12 @@ CANNOT: tuple[Capability, ...] = (
 
 CAPABILITIES_BY_NAME: dict[str, Capability] = {item.name: item for item in CANNOT}
 
-# 뒤에 오는 것을, 뒤에 오는 것만 부정하는 단어들 — 그래서 검사가 방향을 가진다:
-# "a threshold sweep instead of class_weight"는 sweep을 요구하는 문장이다.
+# --- Role: negation words -------------------------------------------------------------
+
+# Cues deny only what follows
 NEGATION_CUES: tuple[str, ...] = (
     "without",
-    # "cannot"/"can not"/"can't"는 넣지 않는다: 산문에서 이 단어 뒤에는 공백이 오므로 "not "과
-    # "n't "가 이미 그것들을 포함한다.
+    # "not " and "n't " already cover "cannot" and "can't".
     "n't ",
     "not ",
     "no ",
@@ -524,9 +497,7 @@ NEGATION_CUES: tuple[str, ...] = (
     "impossible",
 )
 
-# 구절이 주어일 때 *앞의* 구절을 부정하는 서술어들: "indicator columns are forbidden".
-# 전부 동사에 붙인 것은 일부러다 — 맨 "negligible"은 요청인 "a threshold sweep at negligible
-# cost"를 침묵시킨다.
+# Deny the subject before them; verb-bound
 DISCLAIMER_PREDICATES: tuple[str, ...] = (
     "is forbidden",
     "are forbidden",
@@ -553,7 +524,7 @@ DISCLAIMER_PREDICATES: tuple[str, ...] = (
     "cannot be used",
     "does not exist",
     "do not exist",
-    # --- 구할 수 없다가 아니라, 쓸 값이 없다 --------------------------------- #
+    # --- not "cannot get it" but "not worth using" -------------------------- #
     "is not worth",
     "are not worth",
     "would not be worth",
@@ -577,19 +548,20 @@ DISCLAIMER_PREDICATES: tuple[str, ...] = (
     "are not the bottleneck",
 )
 
-# 단서가 양쪽으로 닿는 거리. 이보다 먼 단서는 보통 같은 문장의 다른 것에 대한 말이다.
+# How far a cue reaches on each side.
 NEGATION_WINDOW = 60
 
-# 단서는 절을 넘지 않고, 괄호로 낀 여담은 그 자체가 한 절이다 — 그래서 "(the executor cannot
-# stack) but calibrate the probabilities"는 여전히 calibration을 플래그한다.
+# Cues stop at clause breaks; brackets are their own clause.
 _CLAUSE_BREAK = re.compile(r"[.;:!?,()\[\]\n]")
 
 
-def describe(task: str | None = None) -> str:
-    """planning·critic·report 프롬프트에 주입되는 마크다운 블록.
+# --- Role: prompt rendering -----------------------------------------------------------
 
-    :data:`CAN`/:data:`CANNOT`에서 렌더하고 템플릿에 적어 넣지 않는다 — 그래야 어느 쪽도 표류하지
-    않는다. ``task``가 ``None``이면(카드가 말하지 않은 경우) 분류로 읽는다.
+
+def describe(task: str | None = None) -> str:
+    """Build the can and cannot markdown for the planning, critic, and report prompts.
+
+    A ``None`` task is read as classification.
     """
     lines = ["### The executor will do", ""]
     lines += [f"- {item}" for item in CAN_BY_TASK.get(task or TASK_CLASSIFICATION, CAN)]
@@ -607,10 +579,9 @@ def describe(task: str | None = None) -> str:
 
 
 def describe_row_budget(n_rows: Any, *, grouped: bool = False) -> str:
-    """적합이 실제로 보게 되는 행 수에 대한 planning 프롬프트 블록.
+    """Build the planning block on how many rows the fit really sees; never empty.
 
-    :func:`automl_agent.scripts.train.describe_internal_validation`가 재는 것의 예보이고, 둘은
-    테스트가 묶어 둔다. 비는 일은 없다.
+    Forecasts what ``scripts.train`` measures; a test ties them
     """
     try:
         counts = row_counts(int(n_rows))
@@ -666,11 +637,13 @@ def describe_row_budget(n_rows: Any, *, grouped: bool = False) -> str:
     return "\n".join(lines)
 
 
-def _is_negated(haystack: str, start: int, end: int) -> bool:
-    """산문이 ``start``:``end``의 구절을 요구하는 게 아니라 부정할 때 True.
+# --- Role: claim detection ------------------------------------------------------------
 
-    앞에 놓인 단서("without threshold tuning"), 또는 구절이 주어인 뒤쪽의 부정 서술어
-    ("indicator columns are forbidden"). 둘 다 구절 자신의 절 안에서만.
+
+def _is_negated(haystack: str, start: int, end: int) -> bool:
+    """_is_negated | Claim detection: True if the prose denies the phrase at ``start``:``end``.
+
+    A cue before or a denying predicate after, within its own clause.
     """
     before = _CLAUSE_BREAK.split(haystack[max(0, start - NEGATION_WINDOW) : start])[-1]
     if any(cue in before for cue in NEGATION_CUES):
@@ -680,13 +653,11 @@ def _is_negated(haystack: str, start: int, end: int) -> bool:
 
 
 def unsupported_claims(*texts: object) -> list[str]:
-    """주어진 산문이 의존하는 것으로 보이는, 없는 능력들의 이름.
+    """Return sorted names of missing capabilities that plan or verdict prose depends on.
 
-    계획과 verdict 산문만. 보고서는 절대 아니다. 부정되지 않은 등장 하나로 충분하고
-    (:func:`_is_negated`), 태스크로는 걸러지지 않는다.
+    Never use on the report; one undenied match is enough
     """
-    # 공백이 아니라 개행: 필드들은 서로 다른 문장이고, 한 문장 끝의 단서가 다음 문장까지
-    # 닿아서는 안 된다.
+    # Newlines stop a cue reaching into the next field.
     haystack = "\n".join(str(text).lower() for text in texts if text)
     if not haystack:
         return []
@@ -703,7 +674,7 @@ def unsupported_claims(*texts: object) -> list[str]:
 
 
 def explain_claims(names: list[str]) -> str:
-    """콘솔 경고와 폴백 보고서용 한 줄 요약."""
+    """Summarize capability names in one line for warnings and the fallback report."""
     parts = []
     for name in names:
         item = CAPABILITIES_BY_NAME.get(name)

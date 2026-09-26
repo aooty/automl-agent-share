@@ -1,1 +1,1 @@
-"""홀로 도는 실행 스크립트. 그래프 노드가 subprocess로 띄운다."""
+"""Fixed scripts (not written by the LLM). Graph nodes run them as subprocesses."""
